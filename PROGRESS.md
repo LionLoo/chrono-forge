@@ -7,7 +7,7 @@ Last updated: 2026-08-19
 - Goal: complete private Chrono Forge v1.0.0 release
 - Current milestone: M0 repository and architecture bootstrap
 - Current branch: `bootstrap/repository-harness` locally after the checkpoint commit
-- Remote: GitHub CLI is authenticated as `LionLoo` through the shared Windows keyring with `repo` and `workflow` scopes; private origin creation is the current operation
+- Remote: `https://github.com/LionLoo/chrono-forge` exists, is confirmed private, and has `main` plus `bootstrap/repository-harness` pushed
 - Included-usage meter: no read-only ChatGPT/Codex weekly-allowance tool is exposed to this agent; the environment is using the included plan path and no API key or credit balance will be used
 - v1.0 completion: not yet satisfied
 
@@ -46,4 +46,4 @@ Last updated: 2026-08-19
 
 ## Next task
 
-Create the private `LionLoo/chrono-forge` repository without generated files, push `main` and `bootstrap/repository-harness`, open the M0 PR, wait for the required CI check, merge it, update this file with the remote evidence, and begin M1 only after the included-usage check.
+Open the M0 PR from `bootstrap/repository-harness` to `main`, wait for the required CI check, fix any failure, merge it, update this file with the PR/CI/merge evidence, and begin M1 only after the included-usage check.
