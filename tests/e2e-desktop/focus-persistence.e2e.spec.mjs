@@ -73,7 +73,10 @@ describe('native focus persistence', () => {
     await $('button=Pause').click();
     expect(await (await $('p=focus paused')).isDisplayed()).toBe(true);
     await $('button=Save now').click();
-    expect(await (await $('.persistence-status')).getText()).toContain('World saved manually.');
+    await browser.waitUntil(
+      async () => (await $('.persistence-status').getText()).includes('World saved manually.'),
+      { timeoutMsg: 'manual save did not finish' },
+    );
 
     const allPausedSessions = await browser.tauri.execute(({ core }) =>
       core.invoke('list_focus_sessions'),

@@ -5,18 +5,18 @@ Last updated: 2026-08-20
 ## Release state
 
 - Goal: build, verify, package, and privately release the complete Chrono Forge v1.0.0 contract; do not stop at a prototype or partial roadmap.
-- Current milestone: M2 focus loop and durable saves is locally acceptance-complete and awaiting its private PR/hosted CI merge checkpoint.
-- Current branch: `feature/focus-and-persistence`; pre-integration HEAD is `4f3ef6a`, with verified M2 core commit `6f4f33c` based on merged M1.
-- Remote: `https://github.com/LionLoo/chrono-forge` is private. Last hosted evidence is green M1 `main` run `32345659299`; the complete M2 branch is not pushed yet.
+- Current milestone: M2 focus loop and durable saves is acceptance-complete and open in private PR #3; a deterministic native-E2E wait fix is ready for the replacement hosted gate.
+- Current branch: `feature/focus-and-persistence`; verified implementation commit `aac2602` is based on merged M1.
+- Remote: `https://github.com/LionLoo/chrono-forge` is private. PR #3 run `32407587022` passed the web job but failed the native job because the smoke sampled an intermediate queued-save status; the corrected native flow passes locally and has not yet been pushed.
 - Included-usage meter: no read-only weekly allowance value is exposed. Work uses only the included ChatGPT/Codex plan path; no API key, purchased/promotional credit, or account credit is used.
 - v1.0 completion: not satisfied. M3-M12 remain release-blocking.
 
 ## HARNESS EVALUATION
 
 - Requirements verified versus remaining: M0 and M1 are merged. M2 now satisfies its timer, break, calm/settings, alerts, history/statistics, factual recap, focus-to-sim, sleep recovery, multiple-slot, autosave/manual save, import/export, migrations, corruption recovery, and bounded offline requirements. M3-M12 remain unchanged and mandatory.
-- Build/test/CI: frozen `npm ci` and the complete local `npm run ci` pass. The post-fix gate covers format/lint/strict type checking, 132 covered TypeScript tests, 19 Rust tests, production Worker browser E2E, native restart/SQLite E2E, SBOM, optimized executable/NSIS installer, and production test-capability exclusion. Hosted M2 CI is pending.
+- Build/test/CI: frozen `npm ci` and the complete local `npm run ci` pass. The post-fix gate covers format/lint/strict type checking, 132 covered TypeScript tests, 19 Rust tests, production Worker browser E2E, native restart/SQLite E2E, SBOM, optimized executable/NSIS installer, and production test-capability exclusion. Hosted run `32407587022` has a green web job; its native job exposed only the status-observation race, and the focused corrective native E2E passes 1/1 locally. A replacement run is pending.
 - Known defects/debt: no open P0-P2 from independent M2 closure review. Non-blocking upstream WebdriverIO diagnostics incorrectly mention `tauri-driver` for its embedded provider and warn during post-session mock cleanup; the smoke still passes. The main web chunk is just above the 500 kB warning threshold. Branch protection is unavailable on the private-repository plan, and Windows signing credentials are not configured.
-- Major failures and autonomous recovery: native E2E required an exact package patch because its embedded provider incorrectly ran EdgeDriver preflight; the first TypeScript WDIO loader hit a host `os.userInfo` failure and was replaced with direct MJS. Dependency advisories were eliminated with exact compatible overrides; a missing optional peer that blocked SBOM generation was pinned. Review then found independent world/timer persistence that could double-count or omit ticks; recovery was redesigned as one atomic per-generation pair. A repeat-run E2E failure exposed preserved orphan history and was fixed by settling visible state and scoping assertions to the isolated slot.
+- Major failures and autonomous recovery: native E2E required an exact package patch because its embedded provider incorrectly ran EdgeDriver preflight; the first TypeScript WDIO loader hit a host `os.userInfo` failure and was replaced with direct MJS. Dependency advisories were eliminated with exact compatible overrides; a missing optional peer that blocked SBOM generation was pinned. Review then found independent world/timer persistence that could double-count or omit ticks; recovery was redesigned as one atomic per-generation pair. Repeat-run E2E failures exposed preserved orphan history and then a hosted queued-status race; cleanup/assertions are slot-isolated and the manual-save assertion now waits for its own durable completion signal.
 - Review/subagent findings: bounded Terra/high workers delivered focus UI/controller, alerts, offline progression, native E2E, and atomic persistence. Independent review found two P1 and three P2 recovery/idempotence defects; all are fixed with regressions. Closure review reports no P0-P3 and no remaining M2 release blocker. Production-app QA passed launch, rendering, deterministic hashes, default layout, semantic controls, archive/settings visibility, and Start/Pause/Resume.
 - Demonstrated scale/performance: deterministic 96×64 worlds and three-seed one-million-tick world/Worker tests still pass. M8 target populations and latency/heap budgets are not yet implemented or claimed. M2 demonstrates a frictionless focus start and calm observation surface; satisfying 30–60 minute civilization development remains unmeasurable until M3+ adds autonomous settlement behavior and is explicitly still required by the enjoyment criterion.
 - Buildable/runnable: yes. The actual production executable launched without blank/crash, the native controlled-clock flow completed through real SQLite IPC, and the Windows installer builds. The production artifact contains no WDIO bridge, test capability, or global Tauri API.
@@ -43,6 +43,7 @@ Last updated: 2026-08-20
 - Production build: `chrono-forge.exe` and `Chrono Forge_0.1.0_x64-setup.exe` built; exclusion scan passed.
 - Independent closure review: 34 focused tests and 18 focused Rust tests passed; no P0-P3 or M2 blocker.
 - Production visual QA: actual executable at 1442×932 passed launch, map/hash/status, semantic controls, archive/settings, timer flow, and layout inspection.
+- Hosted PR #3 run `32407587022`: web quality/tests/browser E2E passed; native formatting/lint/Rust tests passed before its smoke hit the corrected intermediate-status race. The corrected local native flow passes 1/1.
 
 ## Active risks and blockers
 
@@ -59,4 +60,4 @@ Last updated: 2026-08-20
 
 ## Exact next action
 
-Stage only the named M2 implementation, test, workflow, and durable-document paths; commit the verified checkpoint; push `feature/focus-and-persistence`; open its private PR; verify the current `Required` CI is green; merge sequentially; then update/verify the durable main checkpoint and rotate root ownership before starting M3 autonomous survival, agents, and construction.
+Commit only the native-E2E wait fix and affected durable status documents; push PR #3; require its replacement `Required` CI to pass; mark the PR ready and merge sequentially; verify the resulting `main` run and clean checkout; then rotate root ownership before starting M3 autonomous survival, agents, and construction.
