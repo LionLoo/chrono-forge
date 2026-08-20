@@ -1,0 +1,7 @@
+{
+  "checksum": "5f1d517a",
+  "engineVersion": 0,
+  "format": "chrono-forge-world",
+  "formatVersion": 0,
+  "worldJson": "{\"animals\":[62,53,46,79],\"biome\":[1,1,2,1],\"chunks\":[{\"height\":2,\"id\":0,\"width\":2,\"x\":0,\"y\":0}],\"config\":{\"chunkSize\":2,\"height\":2,\"width\":2},\"elevation\":[698,698,693,692],\"eventLog\":[{\"id\":1,\"kind\":\"world-generated\",\"tick\":0}],\"food\":[64,81,62,88],\"freshWater\":[26,41,26,20],\"habitability\":[125,120,109,127],\"hazard\":[11,26,26,20],\"metal\":[101,62,122,51],\"moisture\":[80,82,82,84],\"nextEventId\":2,\"plants\":[79,104,75,113],\"seed\":[101,202,303,404],\"stone\":[359,419,389,398],\"temperature\":[46,20,58,37],\"tick\":0,\"timber\":[31,46,26,50],\"water\":[0,0,0,0]}"
+}

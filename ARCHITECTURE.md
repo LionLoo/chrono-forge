@@ -77,13 +77,13 @@ Offline progression is an explicit logged input containing elapsed milliseconds,
 
 Rust exposes only typed commands such as list/load/commit/delete slots, import/export, settings, focus history, and database checks. The WebView never receives a general SQL surface. SQLite lives in Tauri `AppLocalData` with WAL, `synchronous=FULL`, foreign keys, and a busy timeout. Authoritative snapshots begin as canonical JSON envelopes with format, engine/content versions, seed, tick, checksum, and payload.
 
-Saves are immutable generations. A transaction inserts generation `N+1`, verifies metadata, updates the slot head, and commits; pruning older generations happens separately after success. The newest three verified generations are retained. Startup performs a quick check, validates the head checksum/schema/references/numbers/RNG, and falls back newest-first without deleting corrupt material. Full database backups use SQLite's backup API, never a raw copy of a live WAL database.
+Saves are immutable generations. A transaction inserts generation `N+1`, verifies its SHA-256 readback, updates the slot head, and commits; pruning older generations happens separately after success. The newest three checksum-verified generations are retained. Loading is deliberately two-stage: Rust returns checksum-verified candidates in head-first/newest-first order, then the TypeScript migration layer validates the exact envelope, versions, canonical payload, references, dimensions, ranges, and internal checksum. A semantically invalid head is skipped for an older candidate without deleting evidence, and export targets the exact semantically accepted generation. Full database backups use SQLite's backup API, never a raw copy of a live WAL database.
 
 Database migrations live in Rust. Simulation payload migrations are pure one-version steps, validated after every step and written as a new generation. Unknown future versions are rejected without mutation. At least the prior two released payload versions remain readable throughout v1.x.
 
 ## Focus time
 
-The focus timer uses an injected monotonic/wall-clock adapter and stores state transitions with timestamps. Pause, cancel, sleep recovery, and completion are explicit. Simulation progression derives from accepted focus intervals and the configured ratio; interrupted sessions pause or reduce progression and never punish the world. Session recaps query actual event IDs within the accepted interval.
+The focus timer is a versioned explicit-time state machine. Callers inject every epoch observation; backward wall-clock movement is clamped to the last accepted observation, and sleep-sized intervals account identically to partitioned checkpoints. Pause, cancel, optional breaks, and completion are explicit. Integer remainder accounting converts accepted focus milliseconds to simulation ticks without drift. Persisted state must pass exact-key semantic rehydration and agree with its typed session summary. Session recaps contain sorted event IDs validated against the authoritative saved world; loading replaces, rather than merges, the UI event set.
 
 ## Rendering and accessibility
 

@@ -6,7 +6,7 @@ Chrono Forge is a local-first desktop focus timer and autonomous civilization si
 
 ## Status
 
-Chrono Forge is under active v1.0 development. The repository foundation and M1 deterministic world kernel are implemented and verified; focus sessions and durable saves are next. This is an inspectable simulation lab, not yet a playable v1 release. [PRODUCT_SPEC.md](PRODUCT_SPEC.md) is the authoritative v1 contract, [ROADMAP.md](ROADMAP.md) is its ordered milestone view, [PLAN.md](PLAN.md) is the decision-complete execution contract, and [PROGRESS.md](PROGRESS.md) is the durable status record.
+Chrono Forge is under active v1.0 development. The repository foundation and M1 deterministic world kernel are verified. M2 now has a tested explicit-time focus domain, canonical save migrations, bounded offline catch-up, and immutable SQLite generations; its accessible product UI and native desktop E2E remain in progress. This is an inspectable simulation lab, not yet a playable v1 release. [PRODUCT_SPEC.md](PRODUCT_SPEC.md) is the authoritative v1 contract, [ROADMAP.md](ROADMAP.md) is its ordered milestone view, [PLAN.md](PLAN.md) is the decision-complete execution contract, and [PROGRESS.md](PROGRESS.md) is the durable status record.
 
 The current app generates a coherent 96×64 seeded world in a dedicated module Worker, independently reproduces its state hash on the main thread, renders terrain/resources/habitability/hazards through PixiJS, and exposes keyboard-operable pan, zoom, overlay, and fixed-tick controls. The visible seed and both hashes make determinism directly inspectable.
 

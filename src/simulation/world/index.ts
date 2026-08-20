@@ -382,6 +382,33 @@ export function stepWorld(state: WorldState, ticks = 1): WorldState {
   return Object.freeze({ ...state, tick: state.tick + ticks });
 }
 
+/** Appends one factual event with the next stable id to an immutable world snapshot. */
+export function appendWorldEvent(
+  state: WorldState,
+  kind: string,
+  eventTick = state.tick,
+): WorldState {
+  if (kind.length === 0 || kind.length > 64) {
+    throw new RangeError('World event kind must contain 1 through 64 characters.');
+  }
+  if (
+    !Number.isSafeInteger(eventTick) ||
+    eventTick < 0 ||
+    eventTick > state.tick ||
+    !Number.isSafeInteger(state.nextEventId) ||
+    state.nextEventId < 1 ||
+    state.nextEventId >= Number.MAX_SAFE_INTEGER
+  ) {
+    throw new RangeError('World event id and tick must remain valid safe integers.');
+  }
+  const event = Object.freeze({ id: state.nextEventId, tick: eventTick, kind });
+  return Object.freeze({
+    ...state,
+    nextEventId: state.nextEventId + 1,
+    eventLog: Object.freeze([...state.eventLog, event]),
+  });
+}
+
 export function tileIndex(state: WorldState, x: number, y: number): number {
   if (
     !Number.isSafeInteger(x) ||
