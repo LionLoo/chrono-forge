@@ -1,0 +1,463 @@
+import { hashCanonicalJson } from '../canonical';
+import { deriveXoshiro128State, Xoshiro128StarStar } from '../random';
+
+export type WorldSeed = readonly [number, number, number, number];
+
+export enum Biome {
+  Water = 0,
+  Tundra = 1,
+  Grassland = 2,
+  Forest = 3,
+  Desert = 4,
+  Wetland = 5,
+  Mountain = 6,
+}
+
+export interface WorldConfig {
+  readonly width: number;
+  readonly height: number;
+  readonly chunkSize: number;
+}
+
+export interface WorldChunk {
+  readonly id: number;
+  readonly x: number;
+  readonly y: number;
+  readonly width: number;
+  readonly height: number;
+}
+
+export interface WorldEvent {
+  readonly id: number;
+  readonly tick: number;
+  readonly kind: string;
+}
+
+export interface WorldTileFields {
+  readonly elevation: Int16Array;
+  readonly water: Uint8Array;
+  readonly temperature: Int16Array;
+  readonly moisture: Uint8Array;
+  readonly biome: Uint8Array;
+  readonly freshWater: Uint16Array;
+  readonly food: Uint16Array;
+  readonly timber: Uint16Array;
+  readonly stone: Uint16Array;
+  readonly metal: Uint16Array;
+  readonly habitability: Uint8Array;
+  readonly hazard: Uint8Array;
+  readonly plants: Uint16Array;
+  readonly animals: Uint16Array;
+}
+
+export interface WorldState extends WorldTileFields {
+  readonly seed: WorldSeed;
+  readonly config: WorldConfig;
+  readonly tick: number;
+  readonly nextEventId: number;
+  readonly eventLog: readonly WorldEvent[];
+  readonly chunks: readonly WorldChunk[];
+  /** Compatibility projection; it aliases the root-level authoritative fields. */
+  readonly tiles: WorldTileFields;
+}
+
+export const DEFAULT_WORLD_CONFIG: WorldConfig = Object.freeze({
+  width: 96,
+  height: 64,
+  chunkSize: 32,
+});
+
+const MAX_WORLD_TILES = 1_000_000;
+
+function asUint32(value: number, name: string): number {
+  if (!Number.isSafeInteger(value) || value < 0 || value > 0xffff_ffff) {
+    throw new RangeError(`${name} must be a uint32 integer.`);
+  }
+
+  return value >>> 0;
+}
+
+function normalizeSeed(seed: WorldSeed): WorldSeed {
+  if (seed.length !== 4) {
+    throw new RangeError('World seed must contain exactly four uint32 words.');
+  }
+
+  return [
+    asUint32(seed[0], 'World seed'),
+    asUint32(seed[1], 'World seed'),
+    asUint32(seed[2], 'World seed'),
+    asUint32(seed[3], 'World seed'),
+  ];
+}
+
+function normalizeConfig(partialConfig: Partial<WorldConfig> | undefined): WorldConfig {
+  const config: WorldConfig = {
+    width: partialConfig?.width ?? DEFAULT_WORLD_CONFIG.width,
+    height: partialConfig?.height ?? DEFAULT_WORLD_CONFIG.height,
+    chunkSize: partialConfig?.chunkSize ?? DEFAULT_WORLD_CONFIG.chunkSize,
+  };
+
+  if (
+    !Number.isSafeInteger(config.width) ||
+    !Number.isSafeInteger(config.height) ||
+    !Number.isSafeInteger(config.chunkSize) ||
+    config.width < 1 ||
+    config.height < 1 ||
+    config.chunkSize < 1 ||
+    config.width * config.height > MAX_WORLD_TILES
+  ) {
+    throw new RangeError('World dimensions must be positive integers within the tile limit.');
+  }
+
+  return Object.freeze(config);
+}
+
+function clamp(value: number, minimum: number, maximum: number): number {
+  return value < minimum ? minimum : value > maximum ? maximum : value;
+}
+
+function makeChunks(config: WorldConfig): readonly WorldChunk[] {
+  const chunks: WorldChunk[] = [];
+  let id = 0;
+  for (let y = 0; y < config.height; y += config.chunkSize) {
+    for (let x = 0; x < config.width; x += config.chunkSize) {
+      chunks.push(
+        Object.freeze({
+          id,
+          x,
+          y,
+          width: Math.min(config.chunkSize, config.width - x),
+          height: Math.min(config.chunkSize, config.height - y),
+        }),
+      );
+      id += 1;
+    }
+  }
+
+  return Object.freeze(chunks);
+}
+
+function coordinateHash(keys: readonly number[], x: number, y: number, channel: number): number {
+  let value = keys[channel % keys.length] ?? 0;
+  value ^= Math.imul(x + 1, 0x9e3779b1);
+  value ^= Math.imul(y + 1, 0x85ebca77);
+  value ^= Math.imul(channel + 1, 0xc2b2ae3d);
+  value ^= value >>> 16;
+  value = Math.imul(value, 0x7feb352d);
+  value ^= value >>> 15;
+  value = Math.imul(value, 0x846ca68b);
+  return (value ^ (value >>> 16)) >>> 0;
+}
+
+function smoothLatticeWeight(offset: number, scale: number): number {
+  const numerator = offset * offset * (3 * scale - 2 * offset) * 65_535;
+  return Math.trunc(numerator / (scale * scale * scale));
+}
+
+function interpolateInteger(start: number, end: number, weight: number): number {
+  return start + Math.trunc(((end - start) * weight) / 65_535);
+}
+
+/**
+ * Integer-only value noise. Hashes supply lattice values, while smooth integer
+ * interpolation creates coherent terrain-scale regions between those values.
+ */
+function latticeNoise(
+  keys: readonly number[],
+  x: number,
+  y: number,
+  channel: number,
+  scale: number,
+): number {
+  const cellX = Math.trunc(x / scale);
+  const cellY = Math.trunc(y / scale);
+  const localX = x - cellX * scale;
+  const localY = y - cellY * scale;
+  const xWeight = smoothLatticeWeight(localX, scale);
+  const yWeight = smoothLatticeWeight(localY, scale);
+  const top = interpolateInteger(
+    coordinateHash(keys, cellX, cellY, channel) & 0xffff,
+    coordinateHash(keys, cellX + 1, cellY, channel) & 0xffff,
+    xWeight,
+  );
+  const bottom = interpolateInteger(
+    coordinateHash(keys, cellX, cellY + 1, channel) & 0xffff,
+    coordinateHash(keys, cellX + 1, cellY + 1, channel) & 0xffff,
+    xWeight,
+  );
+  return interpolateInteger(top, bottom, yWeight);
+}
+
+function multiScaleNoise(keys: readonly number[], x: number, y: number, channel: number): number {
+  const continental = latticeNoise(keys, x, y, channel, 32);
+  const regional = latticeNoise(keys, x, y, channel + 1, 12);
+  const local = latticeNoise(keys, x, y, channel + 2, 4);
+  return Math.trunc((continental * 6 + regional * 3 + local) / 10);
+}
+
+function isSanctuary(config: WorldConfig, x: number, y: number): boolean {
+  const halfWidth = Math.max(1, Math.min(16, Math.trunc(config.width / 4)));
+  const halfHeight = Math.max(1, Math.min(12, Math.trunc(config.height / 4)));
+  const centerX = Math.trunc(config.width / 2);
+  const centerY = Math.trunc(config.height / 2);
+  return Math.abs(x - centerX) <= halfWidth && Math.abs(y - centerY) <= halfHeight;
+}
+
+function biomeFor(elevation: number, water: number, temperature: number, moisture: number): Biome {
+  if (water > 0) {
+    return Biome.Water;
+  }
+  if (elevation >= 840) {
+    return Biome.Mountain;
+  }
+  if (temperature < 55) {
+    return Biome.Tundra;
+  }
+  if (moisture >= 185) {
+    return Biome.Wetland;
+  }
+  if (moisture < 70) {
+    return Biome.Desert;
+  }
+  if (moisture >= 130) {
+    return Biome.Forest;
+  }
+  return Biome.Grassland;
+}
+
+function compareEvents(left: WorldEvent, right: WorldEvent): number {
+  if (left.id !== right.id) {
+    return left.id - right.id;
+  }
+  if (left.tick !== right.tick) {
+    return left.tick - right.tick;
+  }
+  return left.kind < right.kind ? -1 : left.kind > right.kind ? 1 : 0;
+}
+
+function arrayDto(values: ArrayLike<number>): number[] {
+  return Array.from(values);
+}
+
+/** Builds an immutable world snapshot from only a seed and integer configuration. */
+export function createInitialWorld(
+  seed: WorldSeed,
+  partialConfig?: Partial<WorldConfig>,
+): WorldState {
+  const normalizedSeed = normalizeSeed(seed);
+  const config = normalizeConfig(partialConfig);
+  const tileCount = config.width * config.height;
+  const stream = new Xoshiro128StarStar(deriveXoshiro128State(normalizedSeed, 'world-generation'));
+  const keys = [stream.nextUint32(), stream.nextUint32(), stream.nextUint32(), stream.nextUint32()];
+  const elevation = new Int16Array(tileCount);
+  const water = new Uint8Array(tileCount);
+  const temperature = new Int16Array(tileCount);
+  const moisture = new Uint8Array(tileCount);
+  const biome = new Uint8Array(tileCount);
+  const freshWater = new Uint16Array(tileCount);
+  const food = new Uint16Array(tileCount);
+  const timber = new Uint16Array(tileCount);
+  const stone = new Uint16Array(tileCount);
+  const metal = new Uint16Array(tileCount);
+  const habitability = new Uint8Array(tileCount);
+  const hazard = new Uint8Array(tileCount);
+  const plants = new Uint16Array(tileCount);
+  const animals = new Uint16Array(tileCount);
+
+  for (let y = 0; y < config.height; y += 1) {
+    for (let x = 0; x < config.width; x += 1) {
+      const index = y * config.width + x;
+      const terrainNoise = Math.trunc((multiScaleNoise(keys, x, y, 0) * 1_000) / 65_535);
+      const moistureNoise = Math.trunc((multiScaleNoise(keys, x, y, 3) * 255) / 65_535);
+      const resourceNoise = coordinateHash(keys, x, y, 6);
+      const latitude = Math.abs(y * 2 - (config.height - 1));
+      const latitudePenalty = Math.trunc((latitude * 210) / Math.max(1, config.height - 1));
+      const sanctuary = isSanctuary(config, x, y);
+      const tileElevation = sanctuary ? 470 + (terrainNoise % 230) : terrainNoise;
+      const tileWater =
+        sanctuary || tileElevation >= 300 ? 0 : 1 + Math.trunc((300 - tileElevation) / 50);
+      const tileTemperature = clamp(
+        255 - latitudePenalty + ((resourceNoise >>> 8) % 61) - 30,
+        -100,
+        400,
+      );
+      const tileMoisture = clamp(moistureNoise + (tileWater > 0 ? 45 : 0), 0, 255);
+      const tileBiome = biomeFor(tileElevation, tileWater, tileTemperature, tileMoisture);
+      const nearWater = tileWater > 0 || (resourceNoise & 0x7) === 0;
+      const tileFreshWater =
+        tileWater > 0
+          ? 700 + (resourceNoise % 301)
+          : nearWater
+            ? 80 + (resourceNoise % 260)
+            : resourceNoise % 45;
+      const tileFood =
+        tileWater > 0
+          ? 0
+          : clamp(40 + tileMoisture + (resourceNoise % 70) - Math.trunc(tileElevation / 8), 0, 400);
+      const tileTimber =
+        tileBiome === Biome.Forest
+          ? 260 + (resourceNoise % 241)
+          : tileBiome === Biome.Wetland
+            ? 110 + (resourceNoise % 130)
+            : resourceNoise % 70;
+      const tileStone = clamp(
+        Math.trunc(tileElevation / 2) + ((resourceNoise >>> 16) % 100),
+        0,
+        600,
+      );
+      const tileMetal =
+        tileElevation > 430 ? (resourceNoise >>> 22) % 130 : (resourceNoise >>> 25) % 20;
+      const tileHazard = clamp(
+        tileWater > 0
+          ? 190 + (resourceNoise % 66)
+          : Math.max(0, tileElevation - 700) + (resourceNoise % 30),
+        0,
+        255,
+      );
+      const tileHabitability =
+        tileWater > 0
+          ? 0
+          : clamp(
+              100 + Math.trunc(tileFood / 2) + Math.trunc(tileFreshWater / 6) - tileHazard,
+              0,
+              255,
+            );
+
+      elevation[index] = tileElevation;
+      water[index] = tileWater;
+      temperature[index] = tileTemperature;
+      moisture[index] = tileMoisture;
+      biome[index] = tileBiome;
+      freshWater[index] = tileFreshWater;
+      food[index] = tileFood;
+      timber[index] = tileTimber;
+      stone[index] = tileStone;
+      metal[index] = tileMetal;
+      habitability[index] = tileHabitability;
+      hazard[index] = tileHazard;
+      plants[index] = tileWater > 0 ? 0 : clamp(tileFood + Math.trunc(tileTimber / 2), 0, 600);
+      animals[index] =
+        tileWater > 0 ? 0 : clamp(Math.trunc(tileFood / 3) + (resourceNoise % 60), 0, 180);
+    }
+  }
+
+  const tiles: WorldTileFields = Object.freeze({
+    elevation,
+    water,
+    temperature,
+    moisture,
+    biome,
+    freshWater,
+    food,
+    timber,
+    stone,
+    metal,
+    habitability,
+    hazard,
+    plants,
+    animals,
+  });
+
+  return Object.freeze({
+    seed: Object.freeze(normalizedSeed),
+    config,
+    tick: 0,
+    nextEventId: 2,
+    eventLog: Object.freeze([{ id: 1, tick: 0, kind: 'world-generated' }]),
+    chunks: makeChunks(config),
+    ...tiles,
+    tiles,
+  });
+}
+
+/** Advances only logical ticks. Environmental systems are intentionally added in later M1 slices. */
+export function stepWorld(state: WorldState, ticks = 1): WorldState {
+  if (!Number.isSafeInteger(ticks) || ticks < 0 || state.tick + ticks > Number.MAX_SAFE_INTEGER) {
+    throw new RangeError('World tick advancement must remain a non-negative safe integer.');
+  }
+  if (ticks === 0) {
+    return state;
+  }
+
+  return Object.freeze({ ...state, tick: state.tick + ticks });
+}
+
+export function tileIndex(state: WorldState, x: number, y: number): number {
+  if (
+    !Number.isSafeInteger(x) ||
+    !Number.isSafeInteger(y) ||
+    x < 0 ||
+    y < 0 ||
+    x >= state.config.width ||
+    y >= state.config.height
+  ) {
+    throw new RangeError('Tile coordinates are outside the world.');
+  }
+  return y * state.config.width + x;
+}
+
+export function tileCoordinates(state: WorldState, index: number): readonly [number, number] {
+  if (!Number.isSafeInteger(index) || index < 0 || index >= state.elevation.length) {
+    throw new RangeError('Tile index is outside the world.');
+  }
+  return [index % state.config.width, Math.trunc(index / state.config.width)];
+}
+
+export function isWalkableTile(state: WorldState, index: number): boolean {
+  if (!Number.isSafeInteger(index) || index < 0 || index >= state.elevation.length) {
+    return false;
+  }
+  const water = state.water[index];
+  const habitability = state.habitability[index];
+  const hazard = state.hazard[index];
+  return (
+    water === 0 &&
+    habitability !== undefined &&
+    habitability >= 80 &&
+    hazard !== undefined &&
+    hazard < 180
+  );
+}
+
+/** Canonical DTO JSON with fixed key and array order, suitable for durable snapshots and hashes. */
+export function canonicalWorldJson(state: WorldState): string {
+  const eventLog = [...state.eventLog]
+    .sort(compareEvents)
+    .map((event) => ({ id: event.id, kind: event.kind, tick: event.tick }));
+  return JSON.stringify({
+    animals: arrayDto(state.animals),
+    biome: arrayDto(state.biome),
+    chunks: state.chunks.map((chunk) => ({
+      height: chunk.height,
+      id: chunk.id,
+      width: chunk.width,
+      x: chunk.x,
+      y: chunk.y,
+    })),
+    config: {
+      chunkSize: state.config.chunkSize,
+      height: state.config.height,
+      width: state.config.width,
+    },
+    elevation: arrayDto(state.elevation),
+    eventLog,
+    food: arrayDto(state.food),
+    freshWater: arrayDto(state.freshWater),
+    habitability: arrayDto(state.habitability),
+    hazard: arrayDto(state.hazard),
+    metal: arrayDto(state.metal),
+    moisture: arrayDto(state.moisture),
+    nextEventId: state.nextEventId,
+    plants: arrayDto(state.plants),
+    seed: [...state.seed],
+    stone: arrayDto(state.stone),
+    temperature: arrayDto(state.temperature),
+    tick: state.tick,
+    timber: arrayDto(state.timber),
+    water: arrayDto(state.water),
+  });
+}
+
+export function hashWorldState(state: WorldState): string {
+  return hashCanonicalJson(canonicalWorldJson(state));
+}

@@ -2,6 +2,8 @@
 
 `PRODUCT_SPEC.md` is the product contract and `PLAN.md` contains the decision-complete acceptance criteria, branches, and validation for each item. Milestones run in this order:
 
+Current checkpoint: M1 implementation, full local validation, and independent review are complete; private pull-request delivery and hosted CI are in progress. M2 is next after that merge.
+
 | Order | Milestone                                                    | Outcome                                                                                       |
 | ----- | ------------------------------------------------------------ | --------------------------------------------------------------------------------------------- |
 | M0    | Repository and architecture bootstrap                        | Reproducible toolchain, persistent harness/memory, desktop shell, tests, CI, private remote   |

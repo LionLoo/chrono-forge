@@ -61,6 +61,10 @@ Agents use a documented utility/goal hybrid. Needs, opportunities, geography, pe
 
 Terrain is a chunked tile world; the initial chunk is 32×32 tiles. Dynamic entities use a deterministic uniform spatial grid. Local movement uses A* with fixed neighbor order and heap order `(f, h, nodeId)`. Shared goals can use reverse-Dijkstra flow fields; long routes use chunk portals. Cache keys include navigation revision and movement class, and incremental work consumes fixed node-expansion quotas.
 
+The M1 baseline world is 96×64 tiles arranged as six 32×32-or-smaller chunks. Authoritative tile fields are dense typed arrays for elevation, water, temperature, moisture, biome, five resources, habitability, hazard, plants, and animals. Integer-only multi-scale lattice noise creates coherent regions; coordinate hashing supplies local resource detail. A central sanctuary guarantees a substantial connected habitable region without changing seed determinism. Initial history contains the factual `world-generated` event at tick 0.
+
+The version-1 frame projection copies biome, aggregate resource, habitability, and hazard arrays before transfer. The main thread never receives authoritative arrays. Worker input is treated as untrusted structured-clone data: every request is validated and reconstructed before dispatch, malformed input becomes a typed fault, and an unsupported numeric protocol version takes precedence over version-specific field validation.
+
 Camera distance affects rendering detail only. Authoritative LOD uses deterministic population/settlement tiers, historical importance, and scheduled cadence. Aggregation/deaggregation must conserve population, resource, relationship, ownership, knowledge, and event totals covered by invariants.
 
 ## Worker protocol
@@ -84,6 +88,8 @@ The focus timer uses an injected monotonic/wall-clock adapter and stores state t
 ## Rendering and accessibility
 
 React owns semantics, focus order, keyboard controls, text scaling, inspectors, timelines, settings, and announcements. Pixi owns terrain/entities/effects and exposes selected objects through typed IDs. The renderer batches by texture/layer, culls by viewport, interpolates projections, and honors reduced motion/effects without changing simulation. Overlay palettes include redundant shape/pattern cues and measured contrast.
+
+Tauri keeps a strict CSP without `unsafe-eval`. PixiJS loads its statically generated `pixi.js/unsafe-eval` fallback before renderer initialization; despite the package entrypoint name, this removes runtime code generation and is required for WebView2 under the strict policy.
 
 All runtime assets are bundled locally. Tauri uses a restrictive capability list and CSP; no account or remote content is required.
 
