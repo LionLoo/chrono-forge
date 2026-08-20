@@ -1,0 +1,19 @@
+[package]
+name = "chrono-forge"
+version = "0.1.0"
+description = "Chrono Forge desktop shell"
+authors = ["Chrono Forge contributors"]
+edition = "2024"
+rust-version = "1.97.1"
+license = "MIT"
+
+[lib]
+name = "chrono_forge_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "=2.6.3", features = [] }
+
+[dependencies]
+serde = { version = "=1.0.229", features = ["derive"] }
+tauri = { version = "=2.11.5", features = [] }

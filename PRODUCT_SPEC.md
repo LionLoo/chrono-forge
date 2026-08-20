@@ -1,0 +1,98 @@
+# Chrono Forge v1.0 product specification
+
+This is the authoritative product definition and acceptance contract. `PLAN.md` supplies implementation detail; neither it nor `ROADMAP.md` may weaken this document.
+
+## Promise and player role
+
+“Focus on your work while another world builds itself.”
+
+Chrono Forge is a visually rich, local-first desktop focus timer and autonomous civilization simulator. Starting or resuming focused work advances a seeded world. Inhabitants—not the player—normally choose work, ordinary buildings, sites, settlement growth, social organization, and technology. The player observes, inspects factual history, and may use limited condition-changing interventions. Interrupting focus is non-punitive: progression pauses or slows and never destroys the civilization.
+
+## Required v1 systems
+
+### Focus and recap
+
+Custom durations and useful presets; start, pause, resume, complete, cancel, and optional breaks; calm focus mode; sound/notification controls; focus history/statistics; configurable real-to-sim time; reliable recovery across focus changes and system sleep where possible; post-session recap grounded exclusively in actual event IDs.
+
+### Autonomous people and decisions
+
+Individuals have needs, traits, skills, age, health, relationships/family or cultural equivalents, summarized memories, personal/communal goals, emerging occupation, and bounded knowledge. A documented utility/goal hybrid uses needs, opportunities, geography, personality, social conditions, knowledge, plan cost, and deterministic randomness. Worlds must not follow one disguised script.
+
+### Construction and settlements
+
+People independently identify construction need, choose building type/site from terrain/resources/safety/transport/neighbors/settlement needs, acquire materials, build over time, and repair, expand, replace, repurpose, abandon, or demolish. Demand/planning creates paths and roads. Settlements visibly evolve through shelters, villages, towns, cities, advanced cities, and off-world colonies. Architecture reflects culture, environment, material, technology, wealth, damage, and age.
+
+### Procedural world and environment
+
+Seeded reproducible terrain, water, climate/biomes, resources, habitability/danger, plants/animals at appropriate abstraction, environmental change, and meaningful natural constraints.
+
+### Economy and survival
+
+Food, water, shelter, health, safety, gathering, storage, transportation, production chains, scarcity/surplus, local exchange/trade, specialization, inter-settlement trade, and disruptions from disasters, conflict, migration, and technology. Important changes must affect visible inhabitants and world state, not only hidden counters.
+
+### Population and society
+
+Birth, aging, death, generations, relationships, families/equivalents, migration, groups, leaders, institutions, cooperation, disagreement, crime, conflict, reconciliation, emergent/changing government or coordination, inequality, stability/social pressure, named important people, and inspectable biographies.
+
+### Culture and factual history
+
+Generated personal/settlement/civilization names, preferences, beliefs/philosophies, architectural styles, traditions, institutions, alliances/rivalries, discovery, disaster, migration, war/peace, golden ages, decline, collapse, and recovery. A browsable timeline and recaps may state only events the simulation recorded.
+
+### Contextual technology
+
+Branching/emergent discovery depends on existing knowledge, available materials, environment, skilled people, institutions, trade, conflict, accidents, sustained experimentation, and controlled randomness. Development spans primitive survival, agriculture, industry, information technology, advanced energy, planetary engineering, and spaceflight. Worlds can specialize, skip/delay branches, and lose knowledge through collapse; there is no rigid universal ladder.
+
+### Multiple societies
+
+Autonomous settlement founding and migration, independent communities, trade routes, cultural divergence, diplomacy, alliances, rivalries, conflict/war, conquest, federation, fragmentation, coexistence, ruins, and historical layers.
+
+### Disasters and optional interventions
+
+Model context-sensitive drought, flood, fire, storm, earthquake, disease, famine, resource collapse, political crisis, technological accident, and meteor impact. Optional weather/resource/organism/omen/artifact/protection/disaster/alien-signal interventions change conditions without prescribing the civilization's exact response.
+
+### Visual experience
+
+Smooth animated 2D world; pan/zoom; readable terrain/resources; visible inhabitants, construction progress, era/condition buildings, roads, districts, farms, industry, infrastructure, ruins, advanced structures, weather/time/disasters/environment; resource/population/trade/technology/danger overlays; inspection of people/buildings/settlements/events; timeline and recap; calm non-demanding focus presentation. Assets must be original, generated, procedural, or appropriately licensed and attributed.
+
+### Scale
+
+Fixed deterministic ticks, spatial indexing, validated authoritative aggregation/LOD, event-driven schedules, off-thread simulation, cached/incremental pathfinding, and reduced-detail behavior keep growing worlds responsive. Near/detailed and aggregate transitions conserve key state. Benchmarks and thresholds prevent regressions.
+
+### Planetary and space age
+
+Advanced planetary civilization, planet-scale travel/abstraction, spaceflight research, spacecraft, orbit, missions, additional celestial bodies, autonomous colonies, communication/travel delays, colony divergence, interworld exchange, alien life or civilizations, and space diplomacy/cooperation/competition/conflict. Higher abstraction is acceptable, but systems must be playable, visible, historical, and autonomously reached.
+
+### Saves and offline behavior
+
+Multiple slots, autosave/manual save, visible seed, safe version migrations, practical import/export, interrupted/corrupt-write recovery, configurable offline progression, and bounded summarized catch-up.
+
+### Settings, accessibility, and privacy
+
+Volume and visual-effect controls, color-accessible overlays, scalable UI, keyboard access to primary controls, reduced motion, pause/speed controls outside focus, clear local-data explanations, and no mandatory account or online service.
+
+## Required evidence and invariants
+
+Maintain unit, determinism, property/invariant, save round-trip/migration, controlled-clock timer, integration, accelerated long-run, benchmark, browser/desktop E2E, maintainable visual-regression, and production artifact smoke tests.
+
+Release-blocking invariants: no unexplained negative resources; duplicate ownership; actions by dead/removed people; invalid building placement; broken save references; `NaN`/infinite authoritative values; same-input determinism drift; aggregation loss; context-invalid technology; or recap/history claims without recorded events.
+
+Long accelerated runs across multiple seeds must detect crashes, deadlocks, runaway population, permanent inactivity, impossible resources, and performance collapse.
+
+## v1.0 completion contract
+
+Do not declare completion until all required systems above function without placeholders and evidence shows:
+
+- a new player creates a world and focus session;
+- founders autonomously survive, gather, build, and expand while visibly constructing;
+- normal buildings/jobs require no player assignment;
+- multiple settlements/societies, contextual technology, disasters, interventions, collapse/recovery, advanced cities, space colonies, and alien encounters work visually and mechanically;
+- factual history/recaps, saves, autosaves, offline catch-up, import/export, corruption recovery, and migrations work;
+- documented target populations remain responsive and primary interfaces pass accessibility gates;
+- no known critical/high correctness defect remains;
+- formatting, linting, type checking, all automated test layers, accelerated simulations, E2E, performance gates, and production builds pass;
+- main CI is green; production configuration is visually inspected; installation/release instructions are tested; architecture, rules, controls, development, testing, limitations, privacy, and licensing are documented;
+- a clean checkout reproduces validation and the usable supported-platform artifact;
+- the private repository has complete history, an exact `v1.0.0` tag, and a GitHub `v1.0.0` release with notes and artifacts;
+- an independent final review has no unresolved release blocker.
+
+Final verification must exercise: clean install/build; installed artifact launch; new world; accelerated focus session; gathering/construction; all major eras; disaster/recovery; multiple settlements; technology divergence across seeds; planetary/space progression; save-exit-reload continuity; accessibility/visual QA; independent review/fixes; rerun of the complete suite; green main CI; tag and release.
