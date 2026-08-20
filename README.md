@@ -6,7 +6,9 @@ Chrono Forge is a local-first desktop focus timer and autonomous civilization si
 
 ## Status
 
-Chrono Forge is under active v1.0 development. The repository and architecture bootstrap is complete; the deterministic world kernel is next, and this is not yet a playable release. [PRODUCT_SPEC.md](PRODUCT_SPEC.md) is the authoritative v1 contract, [ROADMAP.md](ROADMAP.md) is its ordered milestone view, [PLAN.md](PLAN.md) is the decision-complete execution contract, and [PROGRESS.md](PROGRESS.md) is the durable status record.
+Chrono Forge is under active v1.0 development. The repository foundation and M1 deterministic world kernel are implemented and verified; focus sessions and durable saves are next. This is an inspectable simulation lab, not yet a playable v1 release. [PRODUCT_SPEC.md](PRODUCT_SPEC.md) is the authoritative v1 contract, [ROADMAP.md](ROADMAP.md) is its ordered milestone view, [PLAN.md](PLAN.md) is the decision-complete execution contract, and [PROGRESS.md](PROGRESS.md) is the durable status record.
+
+The current app generates a coherent 96×64 seeded world in a dedicated module Worker, independently reproduces its state hash on the main thread, renders terrain/resources/habitability/hazards through PixiJS, and exposes keyboard-operable pan, zoom, overlay, and fixed-tick controls. The visible seed and both hashes make determinism directly inspectable.
 
 ## Supported release target
 
@@ -18,7 +20,7 @@ The first signed-off v1.0 artifact targets Windows 10/11 x64 using Tauri and Web
 - PixiJS 8.19 for the animated 2D world
 - A pure TypeScript deterministic simulation in a dedicated Web Worker
 - Tauri 2.11 and Rust for the desktop shell, SQLite persistence, notifications, and packaging
-- Vitest, fast-check, Playwright, and WebdriverIO for layered validation
+- Vitest, fast-check, and Playwright for current layered validation; native persistence E2E is added at M2 after its driver dependency is re-audited
 
 Exact versions are pinned in the npm and Cargo lockfiles. Major choices and their evidence are recorded in [DECISIONS.md](DECISIONS.md).
 

@@ -1,0 +1,52 @@
+import { WORKER_PROTOCOL_VERSION, type WorkerToUiMessage } from '../../src/protocol';
+import { createInitialWorld, hashWorldState, stepWorld } from '../../src/simulation/world';
+import { createSimulationRuntime } from '../../src/workers/simulation-runtime';
+
+const LONG_HORIZON = 1_000_000;
+const seeds = [
+  [1, 2, 3, 4],
+  [101, 202, 303, 404],
+  [0xffff_ffff, 0, 0x8000_0000, 17],
+] as const;
+
+describe('accelerated deterministic world horizon', () => {
+  it('preserves generation fields and factual event references across large fixed-tick advances', () => {
+    for (const seed of seeds) {
+      const initial = createInitialWorld(seed);
+      const advanced = stepWorld(initial, LONG_HORIZON);
+      const repeated = stepWorld(createInitialWorld(seed), LONG_HORIZON);
+
+      expect(advanced.tick).toBe(LONG_HORIZON);
+      expect(advanced.elevation).toBe(initial.elevation);
+      expect(advanced.eventLog).toStrictEqual([{ id: 1, tick: 0, kind: 'world-generated' }]);
+      expect(advanced.nextEventId).toBe(2);
+      expect(hashWorldState(advanced)).toBe(hashWorldState(repeated));
+    }
+  });
+
+  it('keeps the worker checkpoint equal to the main runtime at the long horizon', () => {
+    const responses: WorkerToUiMessage[] = [];
+    const runtime = createSimulationRuntime((message) => responses.push(message));
+    const seed = seeds[1];
+    runtime.handleMessage({
+      type: 'initialize',
+      protocolVersion: WORKER_PROTOCOL_VERSION,
+      requestId: 'long-initialize',
+      seed,
+    });
+    runtime.handleMessage({
+      type: 'advanceTicks',
+      protocolVersion: WORKER_PROTOCOL_VERSION,
+      requestId: 'long-advance',
+      ticks: LONG_HORIZON,
+    });
+
+    const frame = responses.find((message) => message.type === 'frameDelta');
+    expect(frame?.type).toBe('frameDelta');
+    if (frame?.type !== 'frameDelta') throw new Error('Long worker frame is missing.');
+    expect(frame.frame.tick).toBe(LONG_HORIZON);
+    expect(frame.frame.stateHash).toBe(
+      hashWorldState(stepWorld(createInitialWorld(seed), LONG_HORIZON)),
+    );
+  });
+});
