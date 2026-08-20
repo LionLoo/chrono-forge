@@ -5,16 +5,16 @@ Last updated: 2026-08-20
 ## Release state
 
 - Goal: build, verify, package, and privately release the complete Chrono Forge v1.0.0 contract; do not stop at a prototype or partial roadmap.
-- Current milestone: M2 focus loop and durable saves is acceptance-complete and open in private PR #3; a deterministic native-E2E wait fix is ready for the replacement hosted gate.
-- Current branch: `feature/focus-and-persistence`; verified implementation commit `aac2602` is based on merged M1.
-- Remote: `https://github.com/LionLoo/chrono-forge` is private. PR #3 run `32407587022` passed the web job but failed the native job because the smoke sampled an intermediate queued-save status; the corrected native flow passes locally and has not yet been pushed.
+- Current milestone: M2 focus loop and durable saves is acceptance-complete and merged; M3 autonomous survival, agents, and construction is next after root rotation.
+- Current branch: `main`; M2 integration commit is `b0d5ac69a76e194ab4a84774da1fb5e9e9f67a7d` from squash-merged PR #3.
+- Remote: `https://github.com/LionLoo/chrono-forge` is private. PR #3 replacement run `32409846530` and its aggregate `Required` check passed before merge. The latest `main` run for this durable checkpoint must be green before rotation.
 - Included-usage meter: no read-only weekly allowance value is exposed. Work uses only the included ChatGPT/Codex plan path; no API key, purchased/promotional credit, or account credit is used.
 - v1.0 completion: not satisfied. M3-M12 remain release-blocking.
 
 ## HARNESS EVALUATION
 
 - Requirements verified versus remaining: M0 and M1 are merged. M2 now satisfies its timer, break, calm/settings, alerts, history/statistics, factual recap, focus-to-sim, sleep recovery, multiple-slot, autosave/manual save, import/export, migrations, corruption recovery, and bounded offline requirements. M3-M12 remain unchanged and mandatory.
-- Build/test/CI: frozen `npm ci` and the complete local `npm run ci` pass. The post-fix gate covers format/lint/strict type checking, 132 covered TypeScript tests, 19 Rust tests, production Worker browser E2E, native restart/SQLite E2E, SBOM, optimized executable/NSIS installer, and production test-capability exclusion. Hosted run `32407587022` has a green web job; its native job exposed only the status-observation race, and the focused corrective native E2E passes 1/1 locally. A replacement run is pending.
+- Build/test/CI: frozen `npm ci` and the complete local `npm run ci` pass. The post-fix gate covers format/lint/strict type checking, 132 covered TypeScript tests, 19 Rust tests, production Worker browser E2E, native restart/SQLite E2E, SBOM, optimized executable/NSIS installer, and production test-capability exclusion. Hosted PR run `32409846530` passed both jobs and aggregate `Required`, including the corrected native flow and production installer scan. The durable `main` checkpoint run is the remaining gate before rotation.
 - Known defects/debt: no open P0-P2 from independent M2 closure review. Non-blocking upstream WebdriverIO diagnostics incorrectly mention `tauri-driver` for its embedded provider and warn during post-session mock cleanup; the smoke still passes. The main web chunk is just above the 500 kB warning threshold. Branch protection is unavailable on the private-repository plan, and Windows signing credentials are not configured.
 - Major failures and autonomous recovery: native E2E required an exact package patch because its embedded provider incorrectly ran EdgeDriver preflight; the first TypeScript WDIO loader hit a host `os.userInfo` failure and was replaced with direct MJS. Dependency advisories were eliminated with exact compatible overrides; a missing optional peer that blocked SBOM generation was pinned. Review then found independent world/timer persistence that could double-count or omit ticks; recovery was redesigned as one atomic per-generation pair. Repeat-run E2E failures exposed preserved orphan history and then a hosted queued-status race; cleanup/assertions are slot-isolated and the manual-save assertion now waits for its own durable completion signal.
 - Review/subagent findings: bounded Terra/high workers delivered focus UI/controller, alerts, offline progression, native E2E, and atomic persistence. Independent review found two P1 and three P2 recovery/idempotence defects; all are fixed with regressions. Closure review reports no P0-P3 and no remaining M2 release blocker. Production-app QA passed launch, rendering, deterministic hashes, default layout, semantic controls, archive/settings visibility, and Start/Pause/Resume.
@@ -43,7 +43,7 @@ Last updated: 2026-08-20
 - Production build: `chrono-forge.exe` and `Chrono Forge_0.1.0_x64-setup.exe` built; exclusion scan passed.
 - Independent closure review: 34 focused tests and 18 focused Rust tests passed; no P0-P3 or M2 blocker.
 - Production visual QA: actual executable at 1442×932 passed launch, map/hash/status, semantic controls, archive/settings, timer flow, and layout inspection.
-- Hosted PR #3 run `32407587022`: web quality/tests/browser E2E passed; native formatting/lint/Rust tests passed before its smoke hit the corrected intermediate-status race. The corrected local native flow passes 1/1.
+- Hosted PR #3: initial run `32407587022` exposed the corrected intermediate-status race after its web and Rust gates passed. Replacement run `32409846530` passed web quality/tests/browser E2E, Rust gates, native E2E, installer/exclusion verification, artifact upload, and aggregate `Required`.
 
 ## Active risks and blockers
 
@@ -55,9 +55,9 @@ Last updated: 2026-08-20
 
 ## Root rotation state
 
-- Same-project root continuation is supported. At the next major checkpoint, spawn a same-directory GPT-5.6 Sol/xhigh successor with the unchanged original goal, contract, authority, billing guardrail, workflow, and stop conditions.
+- Same-project root continuation is supported. After the durable `main` run is green, spawn a same-directory GPT-5.6 Sol/xhigh successor with the unchanged original goal, contract, authority, billing guardrail, workflow, and stop conditions.
 - The successor must reconstruct only from durable repository evidence, verify Git/GitHub/CI, state the exact next task, and affirm root ownership before editing; then the prior root stops.
 
 ## Exact next action
 
-Commit only the native-E2E wait fix and affected durable status documents; push PR #3; require its replacement `Required` CI to pass; mark the PR ready and merge sequentially; verify the resulting `main` run and clean checkout; then rotate root ownership before starting M3 autonomous survival, agents, and construction.
+Commit and push only this merged-checkpoint documentation on `main`; require the latest `main` `Required` run to pass and verify the checkout is clean; then rotate root ownership. The successor's first product action is to lock M3 observable acceptance tests from `PLAN.md` and implement autonomous survival, agents, and construction without reducing any v1 criterion.
