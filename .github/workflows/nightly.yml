@@ -1,0 +1,44 @@
+name: Nightly simulation guardrails
+
+on:
+  schedule:
+    - cron: '37 9 * * 1'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: nightly-simulation
+  cancel-in-progress: false
+
+jobs:
+  long-run-and-benchmark:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - name: Set up Node.js
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+      - name: Install locked dependencies
+        run: npm ci
+      - name: Run property invariants
+        run: npm run test:property
+      - name: Run determinism suite
+        run: npm run test:determinism
+      - name: Run accelerated simulation suite
+        run: npm run test:sim:long
+      - name: Run benchmarks
+        run: npm run bench -- --outputJson benchmark-results/nightly.json
+      - name: Upload benchmark evidence
+        if: always()
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
+        with:
+          name: nightly-benchmark-results
+          path: benchmark-results
+          if-no-files-found: ignore
+          retention-days: 30

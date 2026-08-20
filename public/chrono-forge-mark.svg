@@ -1,0 +1,12 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-labelledby="title desc">
+  <title id="title">Chrono Forge</title>
+  <desc id="desc">A brass sun above a dark green forge tower.</desc>
+  <rect width="512" height="512" rx="96" fill="#101713"/>
+  <circle cx="360" cy="140" r="62" fill="#e7b762"/>
+  <path d="M72 338 218 142l82 112 62-72 92 156Z" fill="#2d4136"/>
+  <path d="M0 360c106-44 195-36 268 23 74 59 155 72 244 39v90H0Z" fill="#41675f"/>
+  <path d="M198 211h112v221H198z" fill="#9b7148"/>
+  <path d="m176 216 78-88 78 88Z" fill="#3d3027"/>
+  <path d="M250 348c0-21 17-38 38-38s38 17 38 38v84h-76Z" fill="#241f1a"/>
+  <rect x="220" y="254" width="34" height="50" rx="4" fill="#f3c96d"/>
+</svg>
