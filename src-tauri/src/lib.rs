@@ -1,4 +1,7 @@
 use serde::Serialize;
+use tauri::Manager;
+
+mod persistence;
 
 #[derive(Debug, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
@@ -19,8 +22,35 @@ fn app_info() -> AppInfo {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    tauri::Builder::default()
-        .invoke_handler(tauri::generate_handler![app_info])
+    let builder = tauri::Builder::default().plugin(tauri_plugin_notification::init());
+
+    #[cfg(feature = "desktop-e2e")]
+    let builder = builder
+        .plugin(tauri_plugin_wdio::init())
+        .plugin(tauri_plugin_wdio_webdriver::init());
+
+    builder
+        .setup(|app| {
+            let app_local_data = app.path().app_local_data_dir()?;
+            app.manage(persistence::PersistenceState::open_app_local_data(
+                &app_local_data,
+            )?);
+            Ok(())
+        })
+        .invoke_handler(tauri::generate_handler![
+            app_info,
+            persistence::list_save_slots,
+            persistence::load_save_slot_candidates,
+            persistence::commit_save_slot,
+            persistence::commit_focus_checkpoint,
+            persistence::delete_save_slot,
+            persistence::export_save_generation,
+            persistence::import_save_slot,
+            persistence::record_focus_session,
+            persistence::list_focus_sessions,
+            persistence::load_settings,
+            persistence::save_settings,
+        ])
         .run(tauri::generate_context!())
         .expect("failed to run Chrono Forge");
 }

@@ -1,9 +1,13 @@
 import { useMemo, useState } from 'react';
 
+import { getFocusAlerts, type FocusAlerts } from './adapters/focus-alerts';
+import { getRuntimePersistence, type RuntimePersistence } from './adapters/runtime-persistence';
 import { INITIAL_WORLD_CAMERA, panCamera, zoomCamera } from './rendering/camera';
 import { WorldMapCanvas } from './rendering/WorldMapCanvas';
 import { WORLD_OVERLAYS, type WorldOverlay } from './rendering/world-palette';
 import { PROJECT_META } from './project-meta';
+import { FocusPersistencePanel } from './ui/FocusPersistencePanel';
+import type { FocusClock } from './ui/useFocusController';
 import {
   DEMO_WORLD_SEED,
   useWorldSimulation,
@@ -11,6 +15,9 @@ import {
 } from './ui/useWorldSimulation';
 
 interface AppProps {
+  readonly focusAlerts?: FocusAlerts;
+  readonly focusClock?: FocusClock;
+  readonly persistence?: RuntimePersistence;
   readonly workerFactory?: SimulationWorkerFactory;
 }
 
@@ -18,8 +25,10 @@ function seedLabel(): string {
   return DEMO_WORLD_SEED.map((word) => word.toString(16).padStart(8, '0')).join('-');
 }
 
-export function App({ workerFactory }: AppProps) {
+export function App({ focusAlerts, focusClock, persistence, workerFactory }: AppProps) {
   const simulation = useWorldSimulation(workerFactory);
+  const completionAlerts = focusAlerts ?? getFocusAlerts();
+  const runtimePersistence = persistence ?? getRuntimePersistence();
   const [camera, setCamera] = useState(INITIAL_WORLD_CAMERA);
   const [overlay, setOverlay] = useState<WorldOverlay>('terrain');
   const deterministicMatch =
@@ -55,18 +64,18 @@ export function App({ workerFactory }: AppProps) {
           </span>
           <span>{PROJECT_META.name}</span>
         </a>
-        <span className="build-badge">v{PROJECT_META.version} · world kernel</span>
+        <span className="build-badge">v{PROJECT_META.version} · focus forge</span>
       </header>
 
       <main id="main" className="world-lab" tabIndex={-1}>
         <section className="lab-intro" aria-labelledby="hero-title">
           <div>
-            <p className="eyebrow">Milestone 1 · The first terrain</p>
+            <p className="eyebrow">Milestone 2 · Focus becomes history</p>
             <h1 id="hero-title">{PROJECT_META.promise}</h1>
           </div>
           <p>
-            A fixed-tick world now forms from one visible seed. Every contour, biome, resource, and
-            habitat is reproduced independently in the browser and its simulation worker.
+            Begin a calm session and accepted focus time advances this deterministic world. Local
+            saves preserve both civilization state and factual focus history without an account.
           </p>
         </section>
 
@@ -252,11 +261,18 @@ export function App({ workerFactory }: AppProps) {
               Advance 100 fixed ticks
             </button>
             <p className="milestone-note">
-              This kernel exposes terrain and population fields only. Focus sessions, settlements,
-              and durable saves arrive in the next verified milestones.
+              Focus time advances fixed logical ticks; observing or moving the camera never changes
+              the authoritative outcome.
             </p>
           </aside>
         </div>
+
+        <FocusPersistencePanel
+          alerts={completionAlerts}
+          runtime={runtimePersistence}
+          simulation={simulation}
+          {...(focusClock === undefined ? {} : { clock: focusClock })}
+        />
       </main>
     </div>
   );

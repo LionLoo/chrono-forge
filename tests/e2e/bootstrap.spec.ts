@@ -23,7 +23,9 @@ test('production frontend runs the deterministic world in its module worker', as
       name: 'Focus on your work while another world builds itself.',
     }),
   ).toBeVisible();
-  await expect(page.getByRole('status')).toContainText('Worker synchronized · deterministic match');
+  await expect(page.locator('.simulation-status')).toContainText(
+    'Worker synchronized · deterministic match',
+  );
   await expect(page.getByRole('img', { name: 'Generated Chrono Forge world' })).toBeVisible();
 
   const hashes = page.locator('.hash-panel code');
@@ -40,6 +42,6 @@ test('production frontend runs the deterministic world in its module worker', as
   await expect(
     page.locator('.world-metrics div').filter({ hasText: 'Logical tick' }),
   ).toContainText('100');
-  await expect(page.getByRole('status')).toContainText('deterministic match');
+  await expect(page.locator('.simulation-status')).toContainText('deterministic match');
   expect(await hashes.nth(0).textContent()).toBe(await hashes.nth(1).textContent());
 });

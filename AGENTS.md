@@ -17,11 +17,31 @@ Deliver the complete v1.0 contract. Read `PROGRESS.md`, `PLAN.md`, `ARCHITECTURE
 
 For each milestone: lock observable acceptance criteria; add failing tests where reasonable; implement the smallest coherent vertical slice; run focused checks; run the complete applicable gate; launch and inspect the actual app for UI/gameplay changes; use deterministic accelerated worlds for long-horizon behavior; obtain independent review; fix all confirmed correctness, regression, performance, accessibility, and coverage findings; rerun; then commit, push, open/update one PR, wait for green CI, and merge sequentially.
 
+Periodically evaluate core enjoyment with representative 30–60 minute deterministic sessions: short sessions need noticeable factual feedback and a calm, frictionless experience, while major growth stays gradual across many sessions. Ask whether a user would want to return to the same world over many hours of work; never manufacture rewards or recap claims outside recorded simulation events.
+
 The primary orchestrator is GPT-5.6 Sol at xhigh reasoning and retains architecture, product decisions, integration, milestone selection, final review, and the v1.0 completion decision. Use subagents only for one bounded independent exploration, implementation, testing, documentation, browser QA, or review assignment. Every spawn must explicitly select `gpt-5.6-terra` with high reasoning; do not rely only on inheritance. Do not let parallel agents edit the same files. An implementer is never the only reviewer of its own work. Workers and reviewers never merge PRs. The user has authorized the Sol root integrator to create the private repository, push branches, open PRs, merge them after independent review and green CI, manage tags, and publish the private release.
 
 Every worker return must include: a concise summary; files created or modified; validation commands executed; exact results; and remaining risks, uncertainties, or follow-up work. Workers do not make independent product or architecture decisions and must escalate them to Sol.
 
 Use only included ChatGPT/Codex plan allowance. Never use an API key, purchased credits, promotional credits, or the owner's credit balance. Before a new milestone, check remaining included usage when a read-only meter is available. If included weekly usage is exhausted or nearly exhausted, finish only the current safe checkpoint, update `PROGRESS.md`, commit valid verified work, and pause before the next milestone.
+
+## Speed and token efficiency
+
+Optimize for shorter wall-clock completion and lower token use without reducing v1.0 scope, correctness, independent review, or release gates. Read only task-relevant files and sections; keep durable state concise; delegate in parallel only when independent work materially shortens the critical path; and use the cheapest capable model and reasoning level allowed by the mandatory Sol/Terra policy. During implementation, prefer focused validation and reserve full suites for integration, merge, and release gates. Batch compatible reads and checks, reuse unchanged verified decisions and evidence, fix root causes directly, and do not repeat research, analysis, reviews, or tests when relevant state has not changed. Avoid premature abstractions, unnecessary refactors, excessive documentation, and work outside the active milestone. Keep agent messages concise and action-oriented. While blocked on CI or another non-editing wait, advance safe independent work that cannot conflict. At checkpoints, note qualitative efficiency problems and adjust any repeated behavior that consumes substantial time or tokens without improving outcomes.
+
+## Harness evaluation
+
+At every major checkpoint, keep a concise `HARNESS EVALUATION` section in `PROGRESS.md` that records requirements verified versus remaining, build/test/CI state, known defects and technical debt, significant failures and autonomous recovery, review/subagent findings, demonstrated scale/performance, and whether the repository is buildable and runnable. This is evidence and handoff context; it never replaces or weakens product acceptance criteria.
+
+A checkpoint is not durable until a fresh Sol root agent, given only the repository and its durable documents, can identify the completed work, current branch/milestone, exact validation evidence, unresolved risks, and correct next action without conversation history.
+
+## Autonomous root rotation
+
+Treat root chat context as disposable and repository state as authoritative. After a major checkpoint, after context compaction, or when root context is large or stale, finish the current coherent checkpoint; validate it; update `PROGRESS.md`, affected plans/decisions, exact branch/HEAD and CI state, blockers, and exact next task; verify the repository-only handoff; and commit valid checkpoint work before rotating.
+
+Create a same-directory peer task for this saved Chrono Forge checkout when the desktop task API supports it, then explicitly set GPT-5.6 Sol with xhigh reasoning. Transfer the unchanged original Chrono Forge goal, harness, full v1 requirements and completion contract, authority, workflows, stop conditions, billing guardrail, and root responsibilities. The successor must ignore prior chat as authority, reconstruct and verify state from durable documents plus Git/GitHub/CI, state the exact next task, and affirm root ownership before editing. Once that acknowledgement is received, the prior root stops all project work. Never run two root controllers against the shared checkout concurrently.
+
+If true same-project root creation or ownership transfer is unavailable, record the limitation in `PROGRESS.md` and perform a logical repo-based reset: discard chat-derived assumptions, reread every source-of-truth document, recheck Git/GitHub/CI and validation evidence, and continue only from the persisted exact next task.
 
 ## Commands
 

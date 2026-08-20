@@ -257,8 +257,9 @@ export function validateUiToWorkerMessage(input: unknown): WorkerRequestValidati
         message: { type: 'requestSave', protocolVersion: WORKER_PROTOCOL_VERSION, requestId },
       };
     case 'performOfflineCatchUp':
-      return isFiniteNumber(input.elapsedMilliseconds) &&
-        isFiniteNumber(input.rate) &&
+      return isNonNegativeSafeInteger(input.elapsedMilliseconds) &&
+        isNonNegativeSafeInteger(input.rate) &&
+        input.rate <= 1_000 &&
         isNonNegativeSafeInteger(input.policyVersion)
         ? {
             kind: 'valid',
@@ -273,7 +274,7 @@ export function validateUiToWorkerMessage(input: unknown): WorkerRequestValidati
           }
         : invalid(
             requestId,
-            'performOfflineCatchUp requires finite elapsedMilliseconds/rate and integer policyVersion.',
+            'performOfflineCatchUp requires non-negative safe integer elapsedMilliseconds/rate and integer policyVersion.',
           );
     default:
       return invalid(requestId, `Unknown worker request type ${input.type}.`);
@@ -337,6 +338,7 @@ export interface FaultResponse extends ResponseBase {
 }
 
 export interface WorkerEvent {
+  readonly id: number;
   readonly tick: number;
   readonly type: string;
   readonly subjectId: number;

@@ -30,7 +30,9 @@ body {
 
 button,
 a,
-input {
+input,
+select,
+textarea {
   font: inherit;
 }
 
@@ -41,6 +43,8 @@ button {
 a:focus-visible,
 button:focus-visible,
 input:focus-visible,
+select:focus-visible,
+textarea:focus-visible,
 [tabindex]:focus-visible {
   outline: 3px solid #f3c96d;
   outline-offset: 3px;
@@ -473,9 +477,237 @@ input:focus-visible,
   line-height: 1.6;
 }
 
+.focus-card {
+  margin-top: 28px;
+  padding: 28px;
+  border: 1px solid rgba(226, 194, 126, 0.18);
+  background: rgba(14, 23, 17, 0.94);
+  box-shadow: 0 22px 70px rgba(0, 0, 0, 0.24);
+}
+
+.focus-card-error {
+  border-color: #d98f76;
+}
+
+.focus-heading {
+  margin-bottom: 24px;
+}
+
+.focus-layout,
+.focus-lower-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1.15fr) minmax(300px, 0.85fr);
+  gap: 22px;
+}
+
+.focus-lower-grid {
+  margin-top: 22px;
+}
+
+.timer-panel,
+.archive-panel,
+.settings-panel,
+.history-panel {
+  padding: 22px;
+  border: 1px solid rgba(218, 202, 167, 0.12);
+  background: #101a14;
+}
+
+.phase-label,
+.timer-ratio,
+.local-data-note {
+  color: #aebdab;
+  font-size: 0.76rem;
+  line-height: 1.55;
+}
+
+.phase-label {
+  margin: 0;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+}
+
+.timer-readout {
+  display: block;
+  margin: 12px 0 4px;
+  color: #fff0c8;
+  font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+  font-size: clamp(3.4rem, 8vw, 6.5rem);
+  font-variant-numeric: tabular-nums;
+  font-weight: 700;
+  letter-spacing: -0.07em;
+  line-height: 1;
+}
+
+.preset-row,
+.session-actions,
+.archive-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 9px;
+}
+
+.focus-setup,
+.archive-panel,
+.settings-panel,
+.history-panel,
+.recap-panel {
+  display: grid;
+  gap: 14px;
+}
+
+.focus-card h3,
+.focus-card h4,
+.focus-card p {
+  margin-top: 0;
+}
+
+.focus-card label {
+  display: grid;
+  gap: 7px;
+  color: #cbd8c9;
+  font-size: 0.78rem;
+  font-weight: 650;
+}
+
+.focus-card input:not([type='checkbox']):not([type='range']),
+.focus-card select,
+.focus-card textarea {
+  width: 100%;
+  min-height: 42px;
+  border: 1px solid #4f6452;
+  border-radius: 3px;
+  background: #0a110d;
+  color: #f0f5ee;
+  padding: 9px 11px;
+}
+
+.focus-card textarea {
+  min-height: 82px;
+  resize: vertical;
+  font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+  font-size: 0.68rem;
+}
+
+.focus-card button {
+  min-height: 42px;
+  border: 1px solid #667967;
+  border-radius: 3px;
+  background: #17241b;
+  color: #edf5ea;
+  cursor: pointer;
+  padding: 9px 14px;
+  font-size: 0.76rem;
+  font-weight: 750;
+}
+
+.focus-card button:hover:not(:disabled) {
+  border-color: #d6b66b;
+  background: #213128;
+}
+
+.focus-card button:disabled {
+  cursor: not-allowed;
+  opacity: 0.48;
+}
+
+.focus-card button.primary-action {
+  border-color: #d8a74e;
+  background: #91602b;
+  color: #fff4d7;
+}
+
+.focus-card details {
+  border-top: 1px solid rgba(218, 202, 167, 0.12);
+  padding-top: 12px;
+}
+
+.focus-card summary {
+  color: #e9d6a5;
+  cursor: pointer;
+  font-size: 0.82rem;
+  font-weight: 750;
+}
+
+.focus-card details[open] summary {
+  margin-bottom: 14px;
+}
+
+.checkbox-setting {
+  grid-template-columns: auto 1fr;
+  align-items: center;
+}
+
+.checkbox-setting input {
+  width: 20px;
+  height: 20px;
+  accent-color: #d6a351;
+}
+
+.history-panel dl {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 10px;
+  margin: 0;
+}
+
+.history-panel dl > div {
+  padding: 12px;
+  background: #0a120d;
+}
+
+.history-panel dt {
+  color: #93a392;
+  font-size: 0.68rem;
+}
+
+.history-panel dd {
+  margin: 6px 0 0;
+  color: #f3dfaa;
+  font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+}
+
+.recap-panel {
+  border-left: 3px solid #c99645;
+  padding-left: 14px;
+}
+
+.recap-panel ul {
+  margin: 0;
+  padding-left: 20px;
+  color: #bdcabb;
+  font-size: 0.78rem;
+  line-height: 1.6;
+}
+
+.persistence-status {
+  min-height: 24px;
+  margin-top: 18px;
+  color: #c7d5c4;
+  font-size: 0.76rem;
+}
+
+.calm-mode .lab-intro,
+.calm-mode .telemetry-card,
+.calm-mode .world-card > .card-heading,
+.calm-mode .overlay-picker,
+.calm-mode .camera-toolbar {
+  display: none;
+}
+
+.calm-mode .lab-grid {
+  grid-template-columns: minmax(0, 1fr);
+}
+
+.calm-mode .world-card {
+  min-height: auto;
+}
+
 @media (max-width: 980px) {
   .lab-intro,
-  .lab-grid {
+  .lab-grid,
+  .focus-layout,
+  .focus-lower-grid {
     grid-template-columns: 1fr;
   }
 
@@ -529,6 +761,14 @@ input:focus-visible,
 
   .zoom-controls {
     justify-content: flex-start;
+  }
+
+  .focus-card {
+    padding: 18px;
+  }
+
+  .history-panel dl {
+    grid-template-columns: 1fr;
   }
 }
 

@@ -5,17 +5,26 @@ import {
   type AdvanceTicksRequest,
   type FrameDeltaResponse,
   type InitializeRequest,
+  type LoadRequest,
+  type PerformOfflineCatchUpRequest,
+  type RequestSaveRequest,
   type RunMode,
   type WorkerFaultCode,
   type WorkerToUiMessage,
   type WorldFrameProjection,
 } from '../protocol';
+import { deserializeWorldSnapshot, serializeWorldSnapshot } from '../simulation/persistence';
 import {
+  appendWorldEvent,
   createInitialWorld,
   hashWorldState,
   stepWorld,
   type WorldState,
 } from '../simulation/world';
+
+export const OFFLINE_CATCH_UP_POLICY_VERSION = 1;
+export const MAX_OFFLINE_CATCH_UP_MILLISECONDS = 7 * 24 * 60 * 60 * 1_000;
+export const MAX_OFFLINE_CATCH_UP_TICKS = 1_000_000;
 
 export type RuntimePost = (message: WorkerToUiMessage, transfer: readonly ArrayBuffer[]) => void;
 
@@ -166,6 +175,71 @@ export function createSimulationRuntime(post: RuntimePost): SimulationRuntime {
     metrics(request.requestId);
   }
 
+  function load(request: LoadRequest): void {
+    world = deserializeWorldSnapshot(request.snapshot);
+    runMode = 'paused';
+    emit({
+      type: 'ready',
+      protocolVersion: WORKER_PROTOCOL_VERSION,
+      requestId: request.requestId,
+      frame: projectWorldFrame(world),
+    });
+    metrics(request.requestId);
+  }
+
+  function requestSave(request: RequestSaveRequest): void {
+    if (world === undefined) {
+      fault(request.requestId, 'not-initialized', 'Initialize a world before requesting a save.');
+      return;
+    }
+    emit({
+      type: 'saveSnapshot',
+      protocolVersion: WORKER_PROTOCOL_VERSION,
+      requestId: request.requestId,
+      snapshot: serializeWorldSnapshot(world),
+    });
+  }
+
+  function performOfflineCatchUp(request: PerformOfflineCatchUpRequest): void {
+    if (world === undefined) {
+      fault(request.requestId, 'not-initialized', 'Initialize a world before offline catch-up.');
+      return;
+    }
+    if (request.policyVersion !== OFFLINE_CATCH_UP_POLICY_VERSION) {
+      fault(
+        request.requestId,
+        'unsupported-operation',
+        `Offline catch-up policy ${request.policyVersion} is not supported.`,
+      );
+      return;
+    }
+    const elapsedMilliseconds = Math.min(
+      request.elapsedMilliseconds,
+      MAX_OFFLINE_CATCH_UP_MILLISECONDS,
+    );
+    const requestedTicks = Math.floor((elapsedMilliseconds * request.rate) / 1_000);
+    const ticks = Math.min(requestedTicks, MAX_OFFLINE_CATCH_UP_TICKS);
+    if (ticks > 0) {
+      world = appendWorldEvent(stepWorld(world, ticks), 'offline-catch-up');
+    }
+    emit({
+      type: 'frameDelta',
+      protocolVersion: WORKER_PROTOCOL_VERSION,
+      requestId: request.requestId,
+      frame: projectWorldFrame(world),
+    });
+    if (ticks > 0) {
+      const event = world.eventLog.at(-1)!;
+      emit({
+        type: 'eventBatch',
+        protocolVersion: WORKER_PROTOCOL_VERSION,
+        requestId: request.requestId,
+        events: [{ id: event.id, tick: event.tick, type: event.kind, subjectId: 0 }],
+      });
+    }
+    metrics(request.requestId);
+  }
+
   return Object.freeze({
     handleMessage(input: unknown): void {
       const validation = validateUiToWorkerMessage(input);
@@ -188,6 +262,9 @@ export function createSimulationRuntime(post: RuntimePost): SimulationRuntime {
           case 'initialize':
             initialize(message);
             return;
+          case 'load':
+            load(message);
+            return;
           case 'advanceTicks':
             advance(message);
             return;
@@ -195,15 +272,18 @@ export function createSimulationRuntime(post: RuntimePost): SimulationRuntime {
             runMode = message.runMode;
             metrics(message.requestId);
             return;
-          case 'load':
           case 'queueCommand':
-          case 'requestSave':
-          case 'performOfflineCatchUp':
             fault(
               message.requestId,
               'unsupported-operation',
               `${message.type} is not available until the persistence and focus milestone.`,
             );
+            return;
+          case 'requestSave':
+            requestSave(message);
+            return;
+          case 'performOfflineCatchUp':
+            performOfflineCatchUp(message);
             return;
         }
       } catch (error) {

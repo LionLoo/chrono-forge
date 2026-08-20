@@ -8,6 +8,10 @@ This is the authoritative product definition and acceptance contract. `PLAN.md` 
 
 Chrono Forge is a visually rich, local-first desktop focus timer and autonomous civilization simulator. Starting or resuming focused work advances a seeded world. Inhabitants—not the player—normally choose work, ordinary buildings, sites, settlement growth, social organization, and technology. The player observes, inspects factual history, and may use limited condition-changing interventions. Interrupting focus is non-punitive: progression pauses or slows and never destroys the civilization.
 
+### Core product enjoyment
+
+A typical 30–60 minute focus session produces noticeable but appropriately small civilization progress, reveals a few meaningful recorded developments, remains interesting without demanding attention, ends with a concise factual recap, and is polished and frictionless to start. Major settlement, societal, technological, and historical progression remains gradual and earned across many hours and many sessions. Check periodically: “Would a user want to return to this same world over many hours of work?”
+
 ## Required v1 systems
 
 ### Focus and recap
@@ -83,6 +87,7 @@ Long accelerated runs across multiple seeds must detect crashes, deadlocks, runa
 Do not declare completion until all required systems above function without placeholders and evidence shows:
 
 - a new player creates a world and focus session;
+- representative 30–60 minute sessions provide satisfying factual feedback without compressing long-term civilization development;
 - founders autonomously survive, gather, build, and expand while visibly constructing;
 - normal buildings/jobs require no player assignment;
 - multiple settlements/societies, contextual technology, disasters, interventions, collapse/recovery, advanced cities, space colonies, and alien encounters work visually and mechanically;

@@ -3,7 +3,12 @@ import {
   type UiToWorkerMessage,
   type WorkerToUiMessage,
 } from '../../src/protocol';
-import { createSimulationRuntime } from '../../src/workers/simulation-runtime';
+import {
+  createSimulationRuntime,
+  MAX_OFFLINE_CATCH_UP_MILLISECONDS,
+  MAX_OFFLINE_CATCH_UP_TICKS,
+  OFFLINE_CATCH_UP_POLICY_VERSION,
+} from '../../src/workers/simulation-runtime';
 
 function messageOfType<TType extends WorkerToUiMessage['type']>(
   messages: readonly WorkerToUiMessage[],
@@ -75,6 +80,112 @@ describe('simulation worker runtime', () => {
       { type: 'fault', code: 'not-initialized' },
       { type: 'fault', code: 'unsupported-operation' },
       { type: 'fault', code: 'protocol-version-mismatch' },
+    ]);
+  });
+
+  it('saves and loads a canonical worker snapshot at the same deterministic hash', () => {
+    const firstResponses: WorkerToUiMessage[] = [];
+    const first = createSimulationRuntime((message) => firstResponses.push(message));
+    first.handleMessage({
+      type: 'initialize',
+      protocolVersion: WORKER_PROTOCOL_VERSION,
+      requestId: 'initialize-save',
+      seed: [5, 6, 7, 8],
+      config: { width: 7, height: 5, chunkSize: 3 },
+    });
+    first.handleMessage({
+      type: 'advanceTicks',
+      protocolVersion: WORKER_PROTOCOL_VERSION,
+      requestId: 'advance-save',
+      ticks: 345,
+    });
+    first.handleMessage({
+      type: 'requestSave',
+      protocolVersion: WORKER_PROTOCOL_VERSION,
+      requestId: 'save',
+    });
+    const saved = messageOfType(firstResponses, 'saveSnapshot');
+    const expected = lastMessageOfType(firstResponses, 'frameDelta').frame;
+
+    const loadedResponses: WorkerToUiMessage[] = [];
+    const loaded = createSimulationRuntime((message) => loadedResponses.push(message));
+    loaded.handleMessage({
+      type: 'load',
+      protocolVersion: WORKER_PROTOCOL_VERSION,
+      requestId: 'load',
+      snapshot: saved.snapshot,
+    });
+    const ready = messageOfType(loadedResponses, 'ready');
+    expect(ready.frame.tick).toBe(345);
+    expect(ready.frame.stateHash).toBe(expected.stateHash);
+    expect(ready.frame.width).toBe(7);
+    expect(ready.frame.height).toBe(5);
+  });
+
+  it('performs deterministic bounded offline catch-up and emits only factual event ids', () => {
+    const responses: WorkerToUiMessage[] = [];
+    const runtime = createSimulationRuntime((message) => responses.push(message));
+    runtime.handleMessage({
+      type: 'initialize',
+      protocolVersion: WORKER_PROTOCOL_VERSION,
+      requestId: 'offline-initialize',
+      seed: [10, 20, 30, 40],
+    });
+    runtime.handleMessage({
+      type: 'performOfflineCatchUp',
+      protocolVersion: WORKER_PROTOCOL_VERSION,
+      requestId: 'offline',
+      elapsedMilliseconds: 2_000,
+      rate: 5,
+      policyVersion: OFFLINE_CATCH_UP_POLICY_VERSION,
+    });
+
+    expect(lastMessageOfType(responses, 'frameDelta').frame.tick).toBe(10);
+    expect(messageOfType(responses, 'eventBatch').events).toStrictEqual([
+      { id: 2, tick: 10, type: 'offline-catch-up', subjectId: 0 },
+    ]);
+
+    runtime.handleMessage({
+      type: 'performOfflineCatchUp',
+      protocolVersion: WORKER_PROTOCOL_VERSION,
+      requestId: 'offline-clamped',
+      elapsedMilliseconds: MAX_OFFLINE_CATCH_UP_MILLISECONDS + 1,
+      rate: 1_000,
+      policyVersion: OFFLINE_CATCH_UP_POLICY_VERSION,
+    });
+    expect(lastMessageOfType(responses, 'frameDelta').frame.tick).toBe(
+      10 + MAX_OFFLINE_CATCH_UP_TICKS,
+    );
+  });
+
+  it('rejects invalid offline input and unsupported policy versions', () => {
+    const responses: WorkerToUiMessage[] = [];
+    const runtime = createSimulationRuntime((message) => responses.push(message));
+    runtime.handleMessage({
+      type: 'initialize',
+      protocolVersion: WORKER_PROTOCOL_VERSION,
+      requestId: 'policy-initialize',
+      seed: [1, 1, 2, 3],
+    });
+    runtime.handleMessage({
+      type: 'performOfflineCatchUp',
+      protocolVersion: WORKER_PROTOCOL_VERSION,
+      requestId: 'negative-elapsed',
+      elapsedMilliseconds: -1,
+      rate: 1,
+      policyVersion: OFFLINE_CATCH_UP_POLICY_VERSION,
+    });
+    runtime.handleMessage({
+      type: 'performOfflineCatchUp',
+      protocolVersion: WORKER_PROTOCOL_VERSION,
+      requestId: 'unknown-policy',
+      elapsedMilliseconds: 1_000,
+      rate: 1,
+      policyVersion: 99,
+    });
+    expect(responses.slice(-2)).toMatchObject([
+      { type: 'fault', code: 'invalid-request', requestId: 'negative-elapsed' },
+      { type: 'fault', code: 'unsupported-operation', requestId: 'unknown-policy' },
     ]);
   });
 
