@@ -66,6 +66,8 @@ describe('persistence adapter', () => {
           headGeneration: 1,
           recoveredGeneration: 1,
           recoveredFromCorruption: false,
+          savedAtMs: 1_000,
+          focusSession: null,
           snapshot: snapshot('one'),
           checksum: snapshotOneChecksum,
         } as never;
@@ -104,6 +106,8 @@ describe('persistence adapter', () => {
       headGeneration: 1,
       recoveredGeneration: 1,
       recoveredFromCorruption: false,
+      savedAtMs: 1_000,
+      focusSession: null,
       snapshot: snapshot('one'),
       checksum: snapshotOneChecksum,
     };
@@ -172,6 +176,8 @@ describe('persistence adapter', () => {
                 headGeneration: 1,
                 recoveredGeneration: 1,
                 recoveredFromCorruption: false,
+                savedAtMs: 1_000,
+                focusSession: null,
                 snapshot: snapshot('one'),
                 checksum: snapshotOneChecksum,
               },
@@ -194,6 +200,8 @@ describe('persistence adapter', () => {
           headGeneration: 2,
           recoveredGeneration: 2,
           recoveredFromCorruption: false,
+          savedAtMs: 2_000,
+          focusSession: null,
           snapshot: malformedSnapshot,
           checksum: checksumOf(malformedSnapshot),
         },
@@ -203,6 +211,8 @@ describe('persistence adapter', () => {
           headGeneration: 2,
           recoveredGeneration: 1,
           recoveredFromCorruption: true,
+          savedAtMs: 1_000,
+          focusSession: null,
           snapshot: snapshot('one'),
           checksum: snapshotOneChecksum,
         },
@@ -240,6 +250,113 @@ describe('persistence adapter', () => {
     const tampered = JSON.parse(exported) as { checksum: string };
     tampered.checksum = '0'.repeat(64);
     await expect(destination.importSaveSlot(JSON.stringify(tampered))).rejects.toThrow('checksum');
+  });
+
+  it('uses an injected in-memory clock for durable generation timestamps', async () => {
+    let nowMs = 1_000;
+    const gateway = createInMemoryPersistenceGateway(() => nowMs);
+    const first = await gateway.commitSaveSlot('alpha', 'Alpha', snapshot('one'));
+    nowMs = 2_500;
+    const second = await gateway.importSaveSlot(
+      JSON.stringify({
+        format: 'chrono-forge-save-export',
+        version: 1,
+        slotId: 'alpha',
+        name: 'Alpha',
+        snapshot: snapshot('two'),
+        checksum: checksumOf(snapshot('two')),
+      }),
+    );
+
+    expect(first.savedAtMs).toBe(1_000);
+    expect(second.savedAtMs).toBe(2_500);
+    expect((await gateway.loadSaveSlot('alpha'))?.savedAtMs).toBe(2_500);
+  });
+
+  it('commits an exact focus checkpoint with its immutable generation atomically', async () => {
+    const gateway = createInMemoryPersistenceGateway();
+    const committed = await gateway.commitFocusCheckpoint(
+      'alpha',
+      'Alpha',
+      snapshot('one'),
+      completedSession,
+      [1],
+    );
+
+    expect(committed.focusSession).toEqual(completedSession);
+    expect((await gateway.loadSaveSlot('alpha'))?.focusSession).toEqual(completedSession);
+    expect(await gateway.listFocusSessions()).toEqual([completedSession]);
+    await expect(
+      gateway.commitFocusCheckpoint(
+        'alpha',
+        'Alpha',
+        snapshot('two'),
+        { ...completedSession, slotId: 'beta' },
+        [1],
+      ),
+    ).rejects.toThrow('belong to its save slot');
+    expect((await gateway.loadSaveSlot('alpha'))?.recoveredGeneration).toBe(1);
+    expect(await gateway.listFocusSessions()).toEqual([completedSession]);
+  });
+
+  it('uses the checkpoint command only after validating the exact snapshot pair', async () => {
+    const calls: string[] = [];
+    const gateway = createTauriPersistenceGateway(async (command, arguments_) => {
+      await Promise.resolve();
+      calls.push(command);
+      expect(arguments_).toEqual({
+        slotId: 'alpha',
+        name: 'Alpha',
+        snapshot: snapshot('one'),
+        session: completedSession,
+      });
+      return {
+        slotId: 'alpha',
+        name: 'Alpha',
+        headGeneration: 1,
+        recoveredGeneration: 1,
+        recoveredFromCorruption: false,
+        savedAtMs: 1_000,
+        focusSession: completedSession,
+        snapshot: snapshot('one'),
+        checksum: snapshotOneChecksum,
+      } as never;
+    });
+
+    await expect(
+      gateway.commitFocusCheckpoint('alpha', 'Alpha', snapshot('one'), completedSession, [1]),
+    ).resolves.toMatchObject({ focusSession: completedSession });
+    await expect(
+      gateway.commitFocusCheckpoint(
+        'alpha',
+        'Alpha',
+        snapshot('one'),
+        { ...completedSession, recapEventIds: [2] },
+        [2],
+      ),
+    ).rejects.toThrow('authoritative world');
+    expect(calls).toEqual(['commit_focus_checkpoint']);
+  });
+
+  it('rejects malformed native generation timestamps', async () => {
+    const gateway = createTauriPersistenceGateway(async () => {
+      await Promise.resolve();
+      return [
+        {
+          slotId: 'alpha',
+          name: 'Alpha',
+          headGeneration: 1,
+          recoveredGeneration: 1,
+          recoveredFromCorruption: false,
+          savedAtMs: -1,
+          focusSession: null,
+          snapshot: snapshot('one'),
+          checksum: snapshotOneChecksum,
+        },
+      ] as never;
+    });
+
+    await expect(gateway.loadSaveSlot('alpha')).rejects.toThrow('savedAtMs');
   });
 
   it('keeps browser delete/history semantics aligned and rejects invalid boundary data', async () => {
@@ -302,5 +419,20 @@ describe('persistence adapter', () => {
     await expect(gateway.saveSettings({ ...updated, volumePercent: 101 })).rejects.toThrow(
       'outside its supported range',
     );
+  });
+
+  it('persists and clears the active slot identifier', async () => {
+    const gateway = createInMemoryPersistenceGateway();
+    const selected = { ...DEFAULT_APP_SETTINGS, activeSlotId: 'alpha' };
+    await gateway.commitSaveSlot('alpha', 'Alpha', snapshot('one'));
+    expect(await gateway.saveSettings(selected)).toEqual(selected);
+    await expect(
+      gateway.saveSettings({ ...DEFAULT_APP_SETTINGS, activeSlotId: 'missing' }),
+    ).rejects.toThrow('does not reference an existing save slot');
+    await gateway.deleteSaveSlot('alpha');
+    expect((await gateway.loadSettings()).activeSlotId).toBeNull();
+    await expect(
+      gateway.saveSettings({ ...DEFAULT_APP_SETTINGS, activeSlotId: 'bad slot' }),
+    ).rejects.toThrow('activeSlotId');
   });
 });

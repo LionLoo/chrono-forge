@@ -74,8 +74,10 @@ jobs:
         run: npm run lint:rust
       - name: Test Rust
         run: npm run test:rust
-      - name: Build Windows installer
-        run: npm run build:desktop
+      - name: Run native desktop E2E
+        run: npm run test:e2e:desktop
+      - name: Build installer and verify production excludes the test harness
+        run: npm run verify:production-exclusion
       - name: Upload unsigned Windows installer
         uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
         with:

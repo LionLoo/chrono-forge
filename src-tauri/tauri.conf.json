@@ -11,6 +11,10 @@
   },
   "app": {
     "withGlobalTauri": false,
+    "security": {
+      "capabilities": ["default"],
+      "csp": "default-src 'self'; img-src 'self' asset: http://asset.localhost data:; style-src 'self'; font-src 'self'; connect-src ipc: http://ipc.localhost; worker-src 'self' blob:"
+    },
     "windows": [
       {
         "label": "main",
@@ -22,10 +26,7 @@
         "center": true,
         "resizable": true
       }
-    ],
-    "security": {
-      "csp": "default-src 'self'; img-src 'self' asset: http://asset.localhost data:; style-src 'self'; font-src 'self'; connect-src ipc: http://ipc.localhost; worker-src 'self' blob:"
-    }
+    ]
   },
   "bundle": {
     "active": true,

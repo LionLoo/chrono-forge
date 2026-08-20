@@ -22,7 +22,14 @@ fn app_info() -> AppInfo {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    tauri::Builder::default()
+    let builder = tauri::Builder::default().plugin(tauri_plugin_notification::init());
+
+    #[cfg(feature = "desktop-e2e")]
+    let builder = builder
+        .plugin(tauri_plugin_wdio::init())
+        .plugin(tauri_plugin_wdio_webdriver::init());
+
+    builder
         .setup(|app| {
             let app_local_data = app.path().app_local_data_dir()?;
             app.manage(persistence::PersistenceState::open_app_local_data(
@@ -35,6 +42,7 @@ pub fn run() {
             persistence::list_save_slots,
             persistence::load_save_slot_candidates,
             persistence::commit_save_slot,
+            persistence::commit_focus_checkpoint,
             persistence::delete_save_slot,
             persistence::export_save_generation,
             persistence::import_save_slot,

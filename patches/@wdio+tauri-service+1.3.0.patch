@@ -1,0 +1,26 @@
+diff --git a/node_modules/@wdio/tauri-service/dist/cjs/index.js b/node_modules/@wdio/tauri-service/dist/cjs/index.js
+index 6b7af77..332d6e2 100644
+--- a/node_modules/@wdio/tauri-service/dist/cjs/index.js
++++ b/node_modules/@wdio/tauri-service/dist/cjs/index.js
+@@ -2036,7 +2036,7 @@ class TauriLaunchService {
+         // resolved. msedgedriver is a single machine-global driver, so one check
+         // (matched to the first resolved binary) covers every instance. Keep this
+         // outside the resolution loop: a break here would skip the remaining caps.
+-        if (process.platform === 'win32' && firstResolvedBinaryPath !== undefined) {
++        if (process.platform === 'win32' && firstResolvedBinaryPath !== undefined && !isEmbedded) {
+             const autoDownloadEdgeDriver = this.options.autoDownloadEdgeDriver ?? true;
+             log$6.debug('Checking Edge WebDriver compatibility...');
+             const edgeDriverResult = await ensureMsEdgeDriver(firstResolvedBinaryPath, autoDownloadEdgeDriver);
+diff --git a/node_modules/@wdio/tauri-service/dist/esm/index.js b/node_modules/@wdio/tauri-service/dist/esm/index.js
+index 160a6f5..663779c 100644
+--- a/node_modules/@wdio/tauri-service/dist/esm/index.js
++++ b/node_modules/@wdio/tauri-service/dist/esm/index.js
+@@ -2032,7 +2032,7 @@ class TauriLaunchService {
+         // resolved. msedgedriver is a single machine-global driver, so one check
+         // (matched to the first resolved binary) covers every instance. Keep this
+         // outside the resolution loop: a break here would skip the remaining caps.
+-        if (process.platform === 'win32' && firstResolvedBinaryPath !== undefined) {
++        if (process.platform === 'win32' && firstResolvedBinaryPath !== undefined && !isEmbedded) {
+             const autoDownloadEdgeDriver = this.options.autoDownloadEdgeDriver ?? true;
+             log$6.debug('Checking Edge WebDriver compatibility...');
+             const edgeDriverResult = await ensureMsEdgeDriver(firstResolvedBinaryPath, autoDownloadEdgeDriver);

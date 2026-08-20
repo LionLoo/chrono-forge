@@ -10,6 +10,7 @@ use std::{
     fs,
     path::Path,
     sync::Mutex,
+    time::{SystemTime, UNIX_EPOCH},
 };
 
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
@@ -18,7 +19,7 @@ use sha2::{Digest, Sha256};
 use tauri::State;
 
 const DATABASE_FILE: &str = "chrono-forge.sqlite3";
-const SCHEMA_VERSION: i64 = 1;
+const SCHEMA_VERSION: i64 = 3;
 const MAX_ID_BYTES: usize = 64;
 const MAX_NAME_BYTES: usize = 120;
 const MAX_SNAPSHOT_BYTES: usize = 50 * 1024 * 1024;
@@ -79,12 +80,14 @@ pub struct LoadedSave {
     pub head_generation: Option<i64>,
     pub recovered_generation: i64,
     pub recovered_from_corruption: bool,
+    pub saved_at_ms: i64,
+    pub focus_session: Option<FocusSession>,
     pub snapshot: String,
     pub checksum: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct FocusSession {
     pub session_id: String,
     pub slot_id: Option<String>,
@@ -122,6 +125,7 @@ pub struct AppSettings {
     pub notifications_enabled: bool,
     pub sound_enabled: bool,
     pub breaks_enabled: bool,
+    pub active_slot_id: Option<String>,
 }
 
 impl Default for AppSettings {
@@ -137,6 +141,7 @@ impl Default for AppSettings {
             notifications_enabled: true,
             sound_enabled: true,
             breaks_enabled: false,
+            active_slot_id: None,
         }
     }
 }
@@ -277,9 +282,42 @@ impl PersistenceDatabase {
             ",
         )?;
         self.connection.execute(
-            "INSERT OR IGNORE INTO schema_migrations (version, applied_marker) VALUES (?1, 1)",
-            [SCHEMA_VERSION],
+            "INSERT OR IGNORE INTO schema_migrations (version, applied_marker) VALUES (1, 1)",
+            [],
         )?;
+        let newest_version: i64 =
+            self.connection
+                .query_row("SELECT MAX(version) FROM schema_migrations", [], |row| {
+                    row.get(0)
+                })?;
+        if newest_version < 2 {
+            let transaction = self
+                .connection
+                .transaction_with_behavior(TransactionBehavior::Immediate)?;
+            transaction.execute_batch(
+                "ALTER TABLE save_generations
+                 ADD COLUMN saved_at_ms INTEGER NOT NULL DEFAULT 0;",
+            )?;
+            transaction.execute(
+                "INSERT INTO schema_migrations (version, applied_marker) VALUES (2, 1)",
+                [],
+            )?;
+            transaction.commit()?;
+        }
+        if newest_version < 3 {
+            let transaction = self
+                .connection
+                .transaction_with_behavior(TransactionBehavior::Immediate)?;
+            transaction.execute_batch(
+                "ALTER TABLE save_generations ADD COLUMN focus_session_json TEXT;
+                 ALTER TABLE app_settings ADD COLUMN active_slot_id TEXT;",
+            )?;
+            transaction.execute(
+                "INSERT INTO schema_migrations (version, applied_marker) VALUES (3, 1)",
+                [],
+            )?;
+            transaction.commit()?;
+        }
         Ok(())
     }
 
@@ -322,15 +360,25 @@ impl PersistenceDatabase {
             let head = self
                 .connection
                 .query_row(
-                    "SELECT snapshot, checksum FROM save_generations
+                    "SELECT snapshot, checksum, saved_at_ms, focus_session_json FROM save_generations
                      WHERE slot_id = ?1 AND generation = ?2",
                     params![slot_id, head_generation],
-                    |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+                    |row| {
+                        Ok((
+                            row.get::<_, String>(0)?,
+                            row.get::<_, String>(1)?,
+                            row.get::<_, i64>(2)?,
+                            row.get::<_, Option<String>>(3)?,
+                        ))
+                    },
                 )
                 .optional()?;
-            if let Some((snapshot, checksum)) = head
+            if let Some((snapshot, checksum, saved_at_ms, focus_session_json)) = head
                 && validate_snapshot(&snapshot).is_ok()
                 && checksum == sha256_hex(&snapshot)
+                && saved_at_ms >= 0
+                && let Ok(focus_session) =
+                    parse_focus_checkpoint(slot_id, &snapshot, focus_session_json.as_deref())
             {
                 let head = LoadedSave {
                     slot_id: slot_id.to_owned(),
@@ -338,6 +386,8 @@ impl PersistenceDatabase {
                     head_generation: Some(head_generation),
                     recovered_generation: head_generation,
                     recovered_from_corruption: false,
+                    saved_at_ms,
+                    focus_session,
                     snapshot,
                     checksum,
                 };
@@ -369,7 +419,7 @@ impl PersistenceDatabase {
         excluded_generation: Option<i64>,
     ) -> Result<Vec<LoadedSave>> {
         let mut statement = self.connection.prepare(
-            "SELECT generation, snapshot, checksum
+            "SELECT generation, snapshot, checksum, saved_at_ms, focus_session_json
              FROM save_generations
              WHERE slot_id = ?1 AND (?2 IS NULL OR generation != ?2)
              ORDER BY generation DESC",
@@ -379,18 +429,27 @@ impl PersistenceDatabase {
                 row.get::<_, i64>(0)?,
                 row.get::<_, String>(1)?,
                 row.get::<_, String>(2)?,
+                row.get::<_, i64>(3)?,
+                row.get::<_, Option<String>>(4)?,
             ))
         })?;
         let mut candidates = Vec::new();
         for generation in generations {
-            let (generation, snapshot, checksum) = generation?;
-            if validate_snapshot(&snapshot).is_ok() && checksum == sha256_hex(&snapshot) {
+            let (generation, snapshot, checksum, saved_at_ms, focus_session_json) = generation?;
+            if validate_snapshot(&snapshot).is_ok()
+                && checksum == sha256_hex(&snapshot)
+                && saved_at_ms >= 0
+                && let Ok(focus_session) =
+                    parse_focus_checkpoint(slot_id, &snapshot, focus_session_json.as_deref())
+            {
                 candidates.push(LoadedSave {
                     slot_id: slot_id.to_owned(),
                     name: name.to_owned(),
                     head_generation,
                     recovered_generation: generation,
                     recovered_from_corruption: true,
+                    saved_at_ms,
+                    focus_session,
                     snapshot,
                     checksum,
                 });
@@ -400,7 +459,24 @@ impl PersistenceDatabase {
     }
 
     fn commit_slot(&mut self, slot_id: &str, name: &str, snapshot: &str) -> Result<LoadedSave> {
-        self.commit_slot_inner(slot_id, name, snapshot, false)
+        self.commit_slot_inner(slot_id, name, snapshot, None, false)
+    }
+
+    fn commit_focus_checkpoint(
+        &mut self,
+        slot_id: &str,
+        name: &str,
+        snapshot: &str,
+        session: &FocusSession,
+    ) -> Result<LoadedSave> {
+        validate_focus_session(session)?;
+        if session.slot_id.as_deref() != Some(slot_id) {
+            return Err(PersistenceError::new(
+                "focus checkpoint session must belong to its save slot",
+            ));
+        }
+        validate_recap_event_references_in_snapshot(session, snapshot)?;
+        self.commit_slot_inner(slot_id, name, snapshot, Some(session), false)
     }
 
     fn commit_slot_inner(
@@ -408,12 +484,24 @@ impl PersistenceDatabase {
         slot_id: &str,
         name: &str,
         snapshot: &str,
+        focus_session: Option<&FocusSession>,
         fail_before_head_update: bool,
     ) -> Result<LoadedSave> {
         validate_identifier(slot_id, "slot ID")?;
         validate_name(name)?;
         validate_snapshot(snapshot)?;
+        if let Some(session) = focus_session {
+            validate_focus_session(session)?;
+            if session.slot_id.as_deref() != Some(slot_id) {
+                return Err(PersistenceError::new(
+                    "focus checkpoint session must belong to its save slot",
+                ));
+            }
+            validate_recap_event_references_in_snapshot(session, snapshot)?;
+        }
+        let saved_at_ms = current_unix_epoch_ms()?;
         let checksum = sha256_hex(snapshot);
+        let focus_session_json = focus_session.map(serde_json::to_string).transpose()?;
         let transaction = self
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
@@ -432,21 +520,41 @@ impl PersistenceDatabase {
             .checked_add(1)
             .ok_or_else(|| PersistenceError::new("save generation counter overflowed"))?;
         transaction.execute(
-            "INSERT INTO save_generations (slot_id, generation, snapshot, checksum)
-             VALUES (?1, ?2, ?3, ?4)",
-            params![slot_id, next_generation, snapshot, checksum],
+            "INSERT INTO save_generations
+             (slot_id, generation, saved_at_ms, focus_session_json, snapshot, checksum)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![
+                slot_id,
+                next_generation,
+                saved_at_ms,
+                focus_session_json,
+                snapshot,
+                checksum
+            ],
         )?;
         let inserted = transaction.query_row(
-            "SELECT snapshot, checksum FROM save_generations
+            "SELECT snapshot, checksum, focus_session_json FROM save_generations
              WHERE slot_id = ?1 AND generation = ?2",
             params![slot_id, next_generation],
-            |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, Option<String>>(2)?,
+                ))
+            },
         )?;
-        if inserted.0 != snapshot || inserted.1 != checksum || sha256_hex(&inserted.0) != inserted.1
+        if inserted.0 != snapshot
+            || inserted.1 != checksum
+            || inserted.2 != focus_session_json
+            || sha256_hex(&inserted.0) != inserted.1
         {
             return Err(PersistenceError::new(
                 "inserted save generation did not verify",
             ));
+        }
+        if let Some(session) = focus_session {
+            upsert_focus_session(&transaction, session)?;
         }
         if fail_before_head_update {
             return Err(PersistenceError::new(
@@ -468,6 +576,8 @@ impl PersistenceDatabase {
             head_generation: Some(next_generation),
             recovered_generation: next_generation,
             recovered_from_corruption: false,
+            saved_at_ms,
+            focus_session: focus_session.cloned(),
             snapshot: snapshot.to_owned(),
             checksum,
         })
@@ -479,22 +589,28 @@ impl PersistenceDatabase {
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
         let generations = {
             let mut statement = transaction.prepare(
-                "SELECT generation, snapshot, checksum FROM save_generations
-                 WHERE slot_id = ?1 ORDER BY generation DESC",
+                "SELECT generation, snapshot, checksum, saved_at_ms, focus_session_json
+                 FROM save_generations WHERE slot_id = ?1 ORDER BY generation DESC",
             )?;
             let rows = statement.query_map([slot_id], |row| {
                 Ok((
                     row.get::<_, i64>(0)?,
                     row.get::<_, String>(1)?,
                     row.get::<_, String>(2)?,
+                    row.get::<_, i64>(3)?,
+                    row.get::<_, Option<String>>(4)?,
                 ))
             })?;
             rows.collect::<std::result::Result<Vec<_>, _>>()?
         };
         let mut verified_count = 0;
         let mut generations_to_delete = Vec::new();
-        for (generation, snapshot, checksum) in generations {
-            if validate_snapshot(&snapshot).is_ok() && checksum == sha256_hex(&snapshot) {
+        for (generation, snapshot, checksum, saved_at_ms, focus_session_json) in generations {
+            if validate_snapshot(&snapshot).is_ok()
+                && checksum == sha256_hex(&snapshot)
+                && saved_at_ms >= 0
+                && parse_focus_checkpoint(slot_id, &snapshot, focus_session_json.as_deref()).is_ok()
+            {
                 if verified_count < RETAINED_GENERATIONS {
                     verified_count += 1;
                 } else {
@@ -514,10 +630,19 @@ impl PersistenceDatabase {
 
     fn delete_slot(&mut self, slot_id: &str) -> Result<bool> {
         validate_identifier(slot_id, "slot ID")?;
-        Ok(self
+        let transaction = self
             .connection
-            .execute("DELETE FROM save_slots WHERE slot_id = ?1", [slot_id])?
-            > 0)
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let deleted =
+            transaction.execute("DELETE FROM save_slots WHERE slot_id = ?1", [slot_id])? > 0;
+        if deleted {
+            transaction.execute(
+                "UPDATE app_settings SET active_slot_id = NULL WHERE active_slot_id = ?1",
+                [slot_id],
+            )?;
+        }
+        transaction.commit()?;
+        Ok(deleted)
     }
 
     #[cfg(test)]
@@ -601,40 +726,11 @@ impl PersistenceDatabase {
     fn record_focus_session(&mut self, session: &FocusSession) -> Result<()> {
         validate_focus_session(session)?;
         self.validate_recap_event_references(session)?;
-        let event_ids = serde_json::to_string(&session.recap_event_ids)?;
-        self.connection.execute(
-            "INSERT INTO focus_sessions
-             (session_id, slot_id, started_at_ms, ended_at_ms, planned_focus_ms, focused_ms,
-              planned_break_ms, break_ms, issued_simulation_ticks, status, state_json,
-              recap_event_ids_json)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
-             ON CONFLICT(session_id) DO UPDATE SET
-                 slot_id = excluded.slot_id,
-                 started_at_ms = excluded.started_at_ms,
-                 ended_at_ms = excluded.ended_at_ms,
-                 planned_focus_ms = excluded.planned_focus_ms,
-                 focused_ms = excluded.focused_ms,
-                 planned_break_ms = excluded.planned_break_ms,
-                 break_ms = excluded.break_ms,
-                 issued_simulation_ticks = excluded.issued_simulation_ticks,
-                 status = excluded.status,
-                 state_json = excluded.state_json,
-                 recap_event_ids_json = excluded.recap_event_ids_json",
-            params![
-                session.session_id,
-                session.slot_id,
-                session.started_at_ms,
-                session.ended_at_ms,
-                session.planned_focus_ms,
-                session.focused_ms,
-                session.planned_break_ms,
-                session.break_ms,
-                session.issued_simulation_ticks,
-                focus_status_to_db(&session.status),
-                session.state_json,
-                event_ids,
-            ],
-        )?;
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        upsert_focus_session(&transaction, session)?;
+        transaction.commit()?;
         Ok(())
     }
 
@@ -659,17 +755,7 @@ impl PersistenceDatabase {
             )
             .optional()?
             .ok_or_else(|| PersistenceError::new("focus recap source save is unavailable"))?;
-        let source_event_ids = world_event_ids(&snapshot)?;
-        if session
-            .recap_event_ids
-            .iter()
-            .any(|event_id| !source_event_ids.contains(event_id))
-        {
-            return Err(PersistenceError::new(
-                "focus recap references an event absent from its source save",
-            ));
-        }
-        Ok(())
+        validate_recap_event_references_in_snapshot(session, &snapshot)
     }
 
     fn list_focus_sessions(&self) -> Result<Vec<FocusSession>> {
@@ -713,7 +799,7 @@ impl PersistenceDatabase {
             .query_row(
                 "SELECT focus_to_sim_ratio, default_focus_minutes, default_break_minutes,
                         volume_percent, offline_progression_enabled, max_offline_hours, calm_mode,
-                        notifications_enabled, sound_enabled, breaks_enabled
+                        notifications_enabled, sound_enabled, breaks_enabled, active_slot_id
                  FROM app_settings WHERE singleton = 1",
                 [],
                 |row| {
@@ -728,6 +814,7 @@ impl PersistenceDatabase {
                         notifications_enabled: row.get::<_, i64>(7)? != 0,
                         sound_enabled: row.get::<_, i64>(8)? != 0,
                         breaks_enabled: row.get::<_, i64>(9)? != 0,
+                        active_slot_id: row.get(10)?,
                     })
                 },
             )
@@ -739,12 +826,24 @@ impl PersistenceDatabase {
 
     fn save_settings(&mut self, settings: &AppSettings) -> Result<AppSettings> {
         validate_settings(settings)?;
+        if let Some(active_slot_id) = &settings.active_slot_id {
+            let exists = self.connection.query_row(
+                "SELECT EXISTS(SELECT 1 FROM save_slots WHERE slot_id = ?1)",
+                [active_slot_id],
+                |row| row.get::<_, i64>(0),
+            )? != 0;
+            if !exists {
+                return Err(PersistenceError::new(
+                    "active slot ID does not reference an existing save slot",
+                ));
+            }
+        }
         self.connection.execute(
             "INSERT INTO app_settings
              (singleton, focus_to_sim_ratio, default_focus_minutes, default_break_minutes,
               volume_percent, offline_progression_enabled, max_offline_hours, calm_mode,
-              notifications_enabled, sound_enabled, breaks_enabled)
-             VALUES (1, ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
+              notifications_enabled, sound_enabled, breaks_enabled, active_slot_id)
+             VALUES (1, ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
              ON CONFLICT(singleton) DO UPDATE SET
                  focus_to_sim_ratio = excluded.focus_to_sim_ratio,
                  default_focus_minutes = excluded.default_focus_minutes,
@@ -755,7 +854,8 @@ impl PersistenceDatabase {
                  calm_mode = excluded.calm_mode,
                  notifications_enabled = excluded.notifications_enabled,
                  sound_enabled = excluded.sound_enabled,
-                 breaks_enabled = excluded.breaks_enabled",
+                 breaks_enabled = excluded.breaks_enabled,
+                 active_slot_id = excluded.active_slot_id",
             params![
                 settings.focus_to_sim_ratio,
                 settings.default_focus_minutes,
@@ -767,10 +867,91 @@ impl PersistenceDatabase {
                 bool_to_db(settings.notifications_enabled),
                 bool_to_db(settings.sound_enabled),
                 bool_to_db(settings.breaks_enabled),
+                settings.active_slot_id,
             ],
         )?;
         Ok(settings.clone())
     }
+}
+
+fn upsert_focus_session(
+    transaction: &rusqlite::Transaction<'_>,
+    session: &FocusSession,
+) -> Result<()> {
+    let event_ids = serde_json::to_string(&session.recap_event_ids)?;
+    transaction.execute(
+        "INSERT INTO focus_sessions
+         (session_id, slot_id, started_at_ms, ended_at_ms, planned_focus_ms, focused_ms,
+          planned_break_ms, break_ms, issued_simulation_ticks, status, state_json,
+          recap_event_ids_json)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
+         ON CONFLICT(session_id) DO UPDATE SET
+             slot_id = excluded.slot_id,
+             started_at_ms = excluded.started_at_ms,
+             ended_at_ms = excluded.ended_at_ms,
+             planned_focus_ms = excluded.planned_focus_ms,
+             focused_ms = excluded.focused_ms,
+             planned_break_ms = excluded.planned_break_ms,
+             break_ms = excluded.break_ms,
+             issued_simulation_ticks = excluded.issued_simulation_ticks,
+             status = excluded.status,
+             state_json = excluded.state_json,
+             recap_event_ids_json = excluded.recap_event_ids_json",
+        params![
+            session.session_id,
+            session.slot_id,
+            session.started_at_ms,
+            session.ended_at_ms,
+            session.planned_focus_ms,
+            session.focused_ms,
+            session.planned_break_ms,
+            session.break_ms,
+            session.issued_simulation_ticks,
+            focus_status_to_db(&session.status),
+            session.state_json,
+            event_ids,
+        ],
+    )?;
+    Ok(())
+}
+
+fn parse_focus_checkpoint(
+    slot_id: &str,
+    snapshot: &str,
+    focus_session_json: Option<&str>,
+) -> Result<Option<FocusSession>> {
+    let Some(focus_session_json) = focus_session_json else {
+        return Ok(None);
+    };
+    let session: FocusSession = serde_json::from_str(focus_session_json)?;
+    validate_focus_session(&session)?;
+    if session.slot_id.as_deref() != Some(slot_id) {
+        return Err(PersistenceError::new(
+            "focus checkpoint session must belong to its save slot",
+        ));
+    }
+    validate_recap_event_references_in_snapshot(&session, snapshot)?;
+    Ok(Some(session))
+}
+
+fn validate_recap_event_references_in_snapshot(
+    session: &FocusSession,
+    snapshot: &str,
+) -> Result<()> {
+    if session.recap_event_ids.is_empty() {
+        return Ok(());
+    }
+    let source_event_ids = world_event_ids(snapshot)?;
+    if session
+        .recap_event_ids
+        .iter()
+        .any(|event_id| !source_event_ids.contains(event_id))
+    {
+        return Err(PersistenceError::new(
+            "focus recap references an event absent from its source save",
+        ));
+    }
+    Ok(())
 }
 
 fn validate_identifier(value: &str, label: &str) -> Result<()> {
@@ -817,6 +998,9 @@ fn validate_settings(settings: &AppSettings) -> Result<()> {
         return Err(PersistenceError::new(
             "settings contain a value outside its supported range",
         ));
+    }
+    if let Some(active_slot_id) = &settings.active_slot_id {
+        validate_identifier(active_slot_id, "active slot ID")?;
     }
     Ok(())
 }
@@ -962,6 +1146,15 @@ fn sha256_hex(value: &str) -> String {
     encoded
 }
 
+fn current_unix_epoch_ms() -> Result<i64> {
+    let milliseconds = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|_| PersistenceError::new("system clock is before the Unix epoch"))?
+        .as_millis();
+    i64::try_from(milliseconds)
+        .map_err(|_| PersistenceError::new("system clock exceeds supported Unix milliseconds"))
+}
+
 fn bool_to_db(value: bool) -> i64 {
     i64::from(value)
 }
@@ -1016,6 +1209,22 @@ pub fn commit_save_slot(
     state
         .lock()
         .and_then(|mut database| database.commit_slot(&slot_id, &name, &snapshot))
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+pub fn commit_focus_checkpoint(
+    state: State<'_, PersistenceState>,
+    slot_id: String,
+    name: String,
+    snapshot: String,
+    session: FocusSession,
+) -> std::result::Result<LoadedSave, String> {
+    state
+        .lock()
+        .and_then(|mut database| {
+            database.commit_focus_checkpoint(&slot_id, &name, &snapshot, &session)
+        })
         .map_err(|error| error.to_string())
 }
 
@@ -1109,6 +1318,23 @@ mod tests {
         r#"{"version":1,"phase":"finished","focusDurationMs":100,"breakDurationMs":20,"accumulatedFocusMs":100,"accumulatedBreakMs":20,"totalIssuedSimulationTicks":1,"startedAtEpochMs":100,"endedAtEpochMs":220}"#.to_owned()
     }
 
+    fn completed_focus_session(slot_id: &str, recap_event_ids: Vec<u64>) -> FocusSession {
+        FocusSession {
+            session_id: "session-1".to_owned(),
+            slot_id: Some(slot_id.to_owned()),
+            started_at_ms: 100,
+            ended_at_ms: Some(220),
+            planned_focus_ms: 100,
+            focused_ms: 100,
+            planned_break_ms: 20,
+            break_ms: 20,
+            issued_simulation_ticks: 1,
+            status: FocusSessionStatus::Completed,
+            state_json: completed_focus_state_json(),
+            recap_event_ids,
+        }
+    }
+
     #[test]
     fn multiple_slots_are_independent_and_generations_are_immutable() {
         let mut database = PersistenceDatabase::in_memory().expect("database");
@@ -1160,7 +1386,7 @@ mod tests {
     #[test]
     fn corrupt_head_falls_back_without_deleting_evidence() {
         let mut database = PersistenceDatabase::in_memory().expect("database");
-        database
+        let first = database
             .commit_slot("alpha", "Alpha", &snapshot("one"))
             .expect("one");
         database
@@ -1174,6 +1400,7 @@ mod tests {
         let loaded = database.load_slot("alpha").expect("load").expect("present");
         assert_eq!(loaded.recovered_generation, 1);
         assert!(loaded.recovered_from_corruption);
+        assert_eq!(loaded.saved_at_ms, first.saved_at_ms);
         let count: i64 = database
             .connection
             .query_row(
@@ -1183,6 +1410,125 @@ mod tests {
             )
             .expect("count");
         assert_eq!(count, 2);
+    }
+
+    #[test]
+    fn focus_checkpoint_commits_world_history_and_head_as_one_generation() {
+        let mut database = PersistenceDatabase::in_memory().expect("database");
+        let session = completed_focus_session("alpha", vec![7, 9]);
+
+        let committed = database
+            .commit_focus_checkpoint("alpha", "Alpha", &snapshot("checkpoint"), &session)
+            .expect("checkpoint commit");
+
+        assert_eq!(committed.recovered_generation, 1);
+        assert_eq!(committed.focus_session, Some(session.clone()));
+        assert_eq!(
+            database.load_slot("alpha").expect("load").expect("present"),
+            committed
+        );
+        assert_eq!(
+            database.list_focus_sessions().expect("history"),
+            vec![session]
+        );
+    }
+
+    #[test]
+    fn fallback_returns_the_checkpoint_stored_on_that_exact_generation() {
+        let mut database = PersistenceDatabase::in_memory().expect("database");
+        database
+            .commit_slot("alpha", "Alpha", &snapshot("earlier"))
+            .expect("earlier generation");
+        let session = completed_focus_session("alpha", vec![7]);
+        database
+            .commit_focus_checkpoint("alpha", "Alpha", &snapshot("checkpoint"), &session)
+            .expect("checkpoint generation");
+        database
+            .connection
+            .execute(
+                "UPDATE save_generations SET checksum = 'corrupt'
+                 WHERE slot_id = 'alpha' AND generation = 2",
+                [],
+            )
+            .expect("corrupt checkpoint head");
+
+        let recovered = database.load_slot("alpha").expect("load").expect("present");
+        assert_eq!(recovered.recovered_generation, 1);
+        assert!(recovered.recovered_from_corruption);
+        assert_eq!(recovered.focus_session, None);
+        assert_eq!(
+            database.list_focus_sessions().expect("history"),
+            vec![session]
+        );
+    }
+
+    #[test]
+    fn invalid_checkpoint_material_skips_that_generation() {
+        let mut database = PersistenceDatabase::in_memory().expect("database");
+        database
+            .commit_slot("alpha", "Alpha", &snapshot("earlier"))
+            .expect("earlier generation");
+        database
+            .commit_focus_checkpoint(
+                "alpha",
+                "Alpha",
+                &snapshot("checkpoint"),
+                &completed_focus_session("alpha", vec![7]),
+            )
+            .expect("checkpoint generation");
+        database
+            .connection
+            .execute(
+                "UPDATE save_generations SET focus_session_json = '{}'
+                 WHERE slot_id = 'alpha' AND generation = 2",
+                [],
+            )
+            .expect("corrupt checkpoint");
+
+        let recovered = database.load_slot("alpha").expect("load").expect("present");
+        assert_eq!(recovered.recovered_generation, 1);
+        assert_eq!(recovered.focus_session, None);
+    }
+
+    #[test]
+    fn invalid_checkpoint_material_does_not_displace_recoverable_generations() {
+        let mut database = PersistenceDatabase::in_memory().expect("database");
+        for value in ["one", "two", "three"] {
+            database
+                .commit_slot("alpha", "Alpha", &snapshot(value))
+                .expect("normal generation");
+        }
+        database
+            .commit_focus_checkpoint(
+                "alpha",
+                "Alpha",
+                &snapshot("checkpoint"),
+                &completed_focus_session("alpha", vec![7]),
+            )
+            .expect("checkpoint generation");
+        database
+            .connection
+            .execute(
+                "UPDATE save_generations SET focus_session_json = '{}'
+                 WHERE slot_id = 'alpha' AND generation = 4",
+                [],
+            )
+            .expect("corrupt checkpoint");
+        database
+            .commit_slot("alpha", "Alpha", &snapshot("five"))
+            .expect("next generation");
+
+        let generations: Vec<i64> = database
+            .connection
+            .prepare(
+                "SELECT generation FROM save_generations WHERE slot_id = 'alpha' ORDER BY generation",
+            )
+            .expect("statement")
+            .query_map([], |row| row.get(0))
+            .expect("query")
+            .collect::<std::result::Result<_, _>>()
+            .expect("generations");
+        assert_eq!(generations, vec![2, 3, 4, 5]);
     }
 
     #[test]
@@ -1234,7 +1580,7 @@ mod tests {
             .expect("one");
         assert!(
             database
-                .commit_slot_inner("alpha", "Alpha", &snapshot("two"), true)
+                .commit_slot_inner("alpha", "Alpha", &snapshot("two"), None, true)
                 .is_err()
         );
 
@@ -1346,6 +1692,9 @@ mod tests {
             database.load_settings().expect("default"),
             AppSettings::default()
         );
+        database
+            .commit_slot("alpha", "Alpha", &snapshot("settings"))
+            .expect("save slot");
         let updated = AppSettings {
             focus_to_sim_ratio: 35,
             default_focus_minutes: 50,
@@ -1357,9 +1706,38 @@ mod tests {
             notifications_enabled: false,
             sound_enabled: false,
             breaks_enabled: true,
+            active_slot_id: Some("alpha".to_owned()),
         };
         assert_eq!(database.save_settings(&updated).expect("save"), updated);
         assert_eq!(database.load_settings().expect("load"), updated);
+    }
+
+    #[test]
+    fn deleting_the_active_slot_clears_the_persisted_identifier() {
+        let mut database = PersistenceDatabase::in_memory().expect("database");
+        database
+            .commit_slot("alpha", "Alpha", &snapshot("one"))
+            .expect("save");
+        database
+            .save_settings(&AppSettings {
+                active_slot_id: Some("alpha".to_owned()),
+                ..AppSettings::default()
+            })
+            .expect("active setting");
+
+        assert!(database.delete_slot("alpha").expect("delete"));
+        assert_eq!(
+            database.load_settings().expect("settings").active_slot_id,
+            None
+        );
+        assert!(
+            database
+                .save_settings(&AppSettings {
+                    active_slot_id: Some("missing".to_owned()),
+                    ..AppSettings::default()
+                })
+                .is_err()
+        );
     }
 
     #[test]
@@ -1373,17 +1751,71 @@ mod tests {
     }
 
     #[test]
-    fn migration_is_idempotent() {
-        let mut database = PersistenceDatabase::in_memory().expect("database");
-        database.migrate().expect("second migration");
-        let count: i64 = database
-            .connection
-            .query_row(
-                "SELECT COUNT(*) FROM schema_migrations WHERE version = 1",
-                [],
-                |row| row.get(0),
+    fn v1_to_v3_migration_marks_existing_generations_and_defaults_new_fields() {
+        let connection = Connection::open_in_memory().expect("connection");
+        connection
+            .execute_batch(
+                "
+                PRAGMA foreign_keys = ON;
+                CREATE TABLE schema_migrations (
+                    version INTEGER PRIMARY KEY,
+                    applied_marker INTEGER NOT NULL
+                );
+                INSERT INTO schema_migrations (version, applied_marker) VALUES (1, 1);
+                CREATE TABLE save_slots (
+                    slot_id TEXT PRIMARY KEY NOT NULL,
+                    name TEXT NOT NULL,
+                    head_generation INTEGER,
+                    FOREIGN KEY (slot_id, head_generation)
+                        REFERENCES save_generations(slot_id, generation)
+                        DEFERRABLE INITIALLY DEFERRED
+                );
+                CREATE TABLE save_generations (
+                    slot_id TEXT NOT NULL,
+                    generation INTEGER NOT NULL,
+                    snapshot TEXT NOT NULL,
+                    checksum TEXT NOT NULL,
+                    PRIMARY KEY (slot_id, generation),
+                    FOREIGN KEY (slot_id) REFERENCES save_slots(slot_id) ON DELETE CASCADE
+                );
+                INSERT INTO save_slots (slot_id, name, head_generation) VALUES ('alpha', 'Alpha', NULL);
+                ",
             )
-            .expect("migration count");
-        assert_eq!(count, 1);
+            .expect("v1 schema");
+        let legacy_snapshot = snapshot("legacy");
+        connection
+            .execute(
+                "INSERT INTO save_generations (slot_id, generation, snapshot, checksum)
+                 VALUES (?1, 1, ?2, ?3)",
+                params!["alpha", legacy_snapshot, sha256_hex(&snapshot("legacy"))],
+            )
+            .expect("legacy generation");
+        connection
+            .execute(
+                "UPDATE save_slots SET head_generation = 1 WHERE slot_id = 'alpha'",
+                [],
+            )
+            .expect("legacy head");
+
+        let mut database = PersistenceDatabase { connection };
+        database.migrate().expect("v2 migration");
+        let loaded = database.load_slot("alpha").expect("load").expect("present");
+        assert_eq!(loaded.saved_at_ms, 0);
+        assert_eq!(loaded.focus_session, None);
+        assert_eq!(
+            database.load_settings().expect("settings").active_slot_id,
+            None
+        );
+        database.migrate().expect("idempotent migration");
+
+        let versions: Vec<i64> = database
+            .connection
+            .prepare("SELECT version FROM schema_migrations ORDER BY version")
+            .expect("statement")
+            .query_map([], |row| row.get(0))
+            .expect("query")
+            .collect::<std::result::Result<_, _>>()
+            .expect("versions");
+        assert_eq!(versions, vec![1, 2, 3]);
     }
 }

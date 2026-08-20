@@ -24,6 +24,9 @@ export interface SaveSlotSummary {
 export interface LoadedSave extends SaveSlotSummary {
   readonly recoveredGeneration: number;
   readonly recoveredFromCorruption: boolean;
+  readonly savedAtMs: number;
+  /** Checkpoint stored with this exact immutable generation, never global history. */
+  readonly focusSession: FocusSession | null;
   readonly snapshot: string;
   readonly checksum: string;
 }
@@ -54,6 +57,7 @@ export interface AppSettings {
   readonly notificationsEnabled: boolean;
   readonly soundEnabled: boolean;
   readonly breaksEnabled: boolean;
+  readonly activeSlotId: string | null;
 }
 
 export const DEFAULT_APP_SETTINGS: AppSettings = {
@@ -67,12 +71,20 @@ export const DEFAULT_APP_SETTINGS: AppSettings = {
   notificationsEnabled: true,
   soundEnabled: true,
   breaksEnabled: false,
+  activeSlotId: null,
 };
 
 export interface PersistenceGateway {
   listSaveSlots(): Promise<readonly SaveSlotSummary[]>;
   loadSaveSlot(slotId: string): Promise<LoadedSave | null>;
   commitSaveSlot(slotId: string, name: string, snapshot: string): Promise<LoadedSave>;
+  commitFocusCheckpoint(
+    slotId: string,
+    name: string,
+    snapshot: string,
+    session: FocusSession,
+    sourceEventIds: readonly number[],
+  ): Promise<LoadedSave>;
   deleteSaveSlot(slotId: string): Promise<boolean>;
   exportSaveSlot(slotId: string): Promise<string>;
   importSaveSlot(savePackage: string): Promise<LoadedSave>;
@@ -124,6 +136,13 @@ export function createTauriPersistenceGateway(invoke: TauriInvoke): PersistenceG
     async commitSaveSlot(slotId, name, snapshot) {
       validateCommit(slotId, name, snapshot);
       return parseLoadedSave(await invoke<unknown>('commit_save_slot', { slotId, name, snapshot }));
+    },
+    async commitFocusCheckpoint(slotId, name, snapshot, session, sourceEventIds) {
+      validateCommit(slotId, name, snapshot);
+      validateFocusCheckpoint(slotId, snapshot, session, sourceEventIds);
+      return parseLoadedSave(
+        await invoke<unknown>('commit_focus_checkpoint', { slotId, name, snapshot, session }),
+      );
     },
     async deleteSaveSlot(slotId) {
       validateIdentifier(slotId, 'slot ID');
@@ -181,6 +200,8 @@ export function createTauriPersistenceGateway(invoke: TauriInvoke): PersistenceG
 
 interface InMemoryGeneration {
   readonly generation: number;
+  readonly savedAtMs: number;
+  readonly focusSession: FocusSession | null;
   readonly snapshot: string;
   readonly checksum: string;
 }
@@ -196,7 +217,9 @@ interface InMemorySlot {
  * Process-local deterministic substitute for browser previews and tests. It is
  * deliberately not durable storage and must never be presented as a native save.
  */
-export function createInMemoryPersistenceGateway(): PersistenceGateway {
+export function createInMemoryPersistenceGateway(
+  now: () => number = () => Date.now(),
+): PersistenceGateway {
   const slots = new Map<string, InMemorySlot>();
   const sessions = new Map<string, FocusSession>();
   let settings = { ...DEFAULT_APP_SETTINGS };
@@ -213,40 +236,56 @@ export function createInMemoryPersistenceGateway(): PersistenceGateway {
     if (generation?.checksum !== sha256Hex(generation?.snapshot ?? '')) {
       throw new Error('in-memory save slot has no verified head generation');
     }
+    if (generation.focusSession !== null) {
+      validateFocusCheckpoint(slotId, generation.snapshot, generation.focusSession, undefined);
+    }
     return {
       slotId: slot.slotId,
       name: slot.name,
       headGeneration: slot.headGeneration,
       recoveredGeneration: generation.generation,
       recoveredFromCorruption: false,
+      savedAtMs: generation.savedAtMs,
+      focusSession:
+        generation.focusSession === null ? null : cloneFocusSession(generation.focusSession),
       snapshot: generation.snapshot,
       checksum: generation.checksum,
     };
   };
 
-  const commit = (slotId: string, name: string, snapshot: string): LoadedSave => {
+  const commit = (
+    slotId: string,
+    name: string,
+    snapshot: string,
+    focusSession: FocusSession | null = null,
+  ): LoadedSave => {
     validateCommit(slotId, name, snapshot);
+    if (focusSession !== null) {
+      validateFocusCheckpoint(slotId, snapshot, focusSession, undefined);
+    }
     const existing = slots.get(slotId);
     const previousGeneration = existing?.generations.at(-1)?.generation ?? 0;
     const generation = previousGeneration + 1;
     const next: InMemoryGeneration = {
       generation,
+      savedAtMs: readSavedAtMs(now()),
+      focusSession: focusSession === null ? null : cloneFocusSession(focusSession),
       snapshot,
       checksum: sha256Hex(snapshot),
     };
-    const slot: InMemorySlot = existing ?? {
+    const slot: InMemorySlot = {
       slotId,
       name,
       headGeneration: generation,
-      generations: [],
+      generations: [...(existing?.generations ?? []), next],
     };
-    slot.name = name;
-    slot.generations.push(next);
     while (slot.generations.length > RETAINED_GENERATIONS) {
       slot.generations.shift();
     }
-    slot.headGeneration = generation;
     slots.set(slotId, slot);
+    if (focusSession !== null) {
+      sessions.set(focusSession.sessionId, cloneFocusSession(focusSession));
+    }
     return load(slotId) ?? fail('committed in-memory slot was not readable');
   };
 
@@ -269,6 +308,11 @@ export function createInMemoryPersistenceGateway(): PersistenceGateway {
       await Promise.resolve();
       return commit(slotId, name, snapshot);
     },
+    async commitFocusCheckpoint(slotId, name, snapshot, session, sourceEventIds) {
+      await Promise.resolve();
+      validateFocusCheckpoint(slotId, snapshot, session, sourceEventIds);
+      return commit(slotId, name, snapshot, session);
+    },
     async deleteSaveSlot(slotId) {
       await Promise.resolve();
       validateIdentifier(slotId, 'slot ID');
@@ -278,6 +322,9 @@ export function createInMemoryPersistenceGateway(): PersistenceGateway {
           if (session.slotId === slotId) {
             sessions.set(sessionId, { ...session, slotId: null });
           }
+        }
+        if (settings.activeSlotId === slotId) {
+          settings = { ...settings, activeSlotId: null };
         }
       }
       return deleted;
@@ -339,6 +386,9 @@ export function createInMemoryPersistenceGateway(): PersistenceGateway {
     async saveSettings(nextSettings) {
       await Promise.resolve();
       validateAppSettings(nextSettings);
+      if (nextSettings.activeSlotId !== null && !slots.has(nextSettings.activeSlotId)) {
+        throw new Error('activeSlotId does not reference an existing save slot');
+      }
       settings = { ...nextSettings };
       return { ...settings };
     },
@@ -369,6 +419,8 @@ function parseLoadedSave(value: unknown): LoadedSave {
       'headGeneration',
       'recoveredGeneration',
       'recoveredFromCorruption',
+      'savedAtMs',
+      'focusSession',
       'snapshot',
       'checksum',
     ],
@@ -387,11 +439,24 @@ function parseLoadedSave(value: unknown): LoadedSave {
     record.recoveredFromCorruption,
     'recoveredFromCorruption',
   );
+  const savedAtMs = expectNonNegativeInteger(record.savedAtMs, 'savedAtMs');
   const snapshot = expectString(record.snapshot, 'snapshot');
-  const checksum = expectString(record.checksum, 'checksum');
   validateSnapshot(snapshot);
+  const focusSession = record.focusSession === null ? null : parseFocusSession(record.focusSession);
+  if (focusSession !== null) {
+    validateFocusCheckpoint(summary.slotId, snapshot, focusSession, undefined);
+  }
+  const checksum = expectString(record.checksum, 'checksum');
   validateChecksum(checksum, snapshot);
-  return { ...summary, recoveredGeneration, recoveredFromCorruption, snapshot, checksum };
+  return {
+    ...summary,
+    recoveredGeneration,
+    recoveredFromCorruption,
+    savedAtMs,
+    focusSession,
+    snapshot,
+    checksum,
+  };
 }
 
 function parseFocusSession(value: unknown): FocusSession {
@@ -458,6 +523,7 @@ function parseAppSettings(value: unknown): AppSettings {
     notificationsEnabled: expectBoolean(record.notificationsEnabled, 'notificationsEnabled'),
     soundEnabled: expectBoolean(record.soundEnabled, 'soundEnabled'),
     breaksEnabled: expectBoolean(record.breaksEnabled, 'breaksEnabled'),
+    activeSlotId: expectNullableString(record.activeSlotId, 'activeSlotId'),
   };
   validateAppSettings(settings);
   return settings;
@@ -504,6 +570,13 @@ function validateCommit(slotId: string, name: string, snapshot: string): void {
   validateIdentifier(slotId, 'slot ID');
   validateName(name);
   validateSnapshot(snapshot);
+}
+
+function readSavedAtMs(value: number): number {
+  if (!Number.isSafeInteger(value) || value < 0) {
+    throw new RangeError('persistence clock must return a non-negative safe integer');
+  }
+  return value;
 }
 
 function validateIdentifier(value: string, label: string): void {
@@ -634,6 +707,23 @@ function validateRecapReferences(session: FocusSession, sourceEventIds: readonly
   }
 }
 
+function validateFocusCheckpoint(
+  slotId: string,
+  snapshot: string,
+  session: FocusSession,
+  sourceEventIds: readonly number[] | undefined,
+): void {
+  validateFocusSession(session);
+  if (session.slotId !== slotId) {
+    throw new TypeError('focus checkpoint session must belong to its save slot');
+  }
+  const snapshotEventIds = deserializeWorldSnapshot(snapshot).eventLog.map((event) => event.id);
+  validateRecapReferences(session, snapshotEventIds);
+  if (sourceEventIds !== undefined) {
+    validateRecapReferences(session, sourceEventIds);
+  }
+}
+
 function validateAppSettings(settings: AppSettings): void {
   if (
     !Number.isSafeInteger(settings.focusToSimRatio) ||
@@ -653,6 +743,9 @@ function validateAppSettings(settings: AppSettings): void {
     settings.maxOfflineHours > 168
   ) {
     throw new RangeError('settings contain a value outside its supported range');
+  }
+  if (settings.activeSlotId !== null) {
+    validateIdentifier(settings.activeSlotId, 'activeSlotId');
   }
 }
 
