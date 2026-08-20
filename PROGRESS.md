@@ -5,9 +5,9 @@ Last updated: 2026-08-19
 ## Release state
 
 - Goal: complete private Chrono Forge v1.0.0 release
-- Current milestone: M0 repository and architecture bootstrap
-- Current branch: `bootstrap/repository-harness` locally after the checkpoint commit
-- Remote: `https://github.com/LionLoo/chrono-forge` exists, is confirmed private, and has `main` plus `bootstrap/repository-harness` pushed
+- Current milestone: M0 repository and architecture bootstrap complete; M1 ready to begin
+- Current branch: `main` at merged checkpoint `844c22f`
+- Remote: `https://github.com/LionLoo/chrono-forge` exists, is confirmed private, and PR #1 is merged
 - Included-usage meter: no read-only ChatGPT/Codex weekly-allowance tool is exposed to this agent; the environment is using the included plan path and no API key or credit balance will be used
 - v1.0 completion: not yet satisfied
 
@@ -36,14 +36,16 @@ Last updated: 2026-08-19
 - Native visual smoke: the real release executable opened in a Tauri window, rendered the complete foundation scene, exposed the expected semantic document, and showed no blank/error/modal state.
 - `npm audit --audit-level=high`: 0 vulnerabilities when the dependency lock was established.
 - Independent reviewer: initial 2 findings fixed; remediation review found 0 remaining release-relevant findings.
+- Hosted CI run `32316392524`: web/E2E passed in 1m19s, Windows native tests/installer passed in 20m46s, and aggregate `Required` passed in 4s.
+- GitHub PR #1 merged into `main` at `844c22fa1c6a1758887a4d447cc1cb395b2a2bd4` on 2026-08-19 local time.
 
 ## Active risks and blockers
 
-- Hosted GitHub CI and branch protection remain unverified until the private origin is created and the bootstrap PR runs.
+- GitHub rejected branch protection for this private repository with HTTP 403 because the account requires GitHub Pro for that feature. The repository remains private; the project enforces the PR/green-`Required` policy operationally and must retry protection if the account plan changes.
 - Release code signing credentials have not been established. Unsigned private Windows artifacts remain technically usable but may trigger SmartScreen; no paid certificate will be purchased without authorization.
 - Remaining included weekly usage cannot currently be read programmatically. Before each new milestone, retry only if a read-only meter becomes available; never substitute API or credit-funded usage.
 - WebdriverIO/Tauri desktop E2E remains required for v1 but is deferred to M2 because the current WebdriverIO 9 dependency graph reports unresolved high-severity development-tool advisories. M2 must re-audit and add it only when the path is clean or a reviewed safer native driver is selected.
 
 ## Next task
 
-Open the M0 PR from `bootstrap/repository-harness` to `main`, wait for the required CI check, fix any failure, merge it, update this file with the PR/CI/merge evidence, and begin M1 only after the included-usage check.
+Check remaining included weekly usage if a read-only meter has become available. Then create `feature/deterministic-world-kernel` from `main` and implement the M1 seeded world, deterministic RNG streams, fixed-tick worker protocol, terrain/resources, pathfinding/flow fields, typed projections, and determinism/performance evidence defined in `PLAN.md`.

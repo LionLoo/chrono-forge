@@ -6,7 +6,7 @@ Chrono Forge is a local-first desktop focus timer and autonomous civilization si
 
 ## Status
 
-Chrono Forge is under active v1.0 development. The current checkpoint is the repository and architecture bootstrap; it is not yet a playable release. [PRODUCT_SPEC.md](PRODUCT_SPEC.md) is the authoritative v1 contract, [ROADMAP.md](ROADMAP.md) is its ordered milestone view, [PLAN.md](PLAN.md) is the decision-complete execution contract, and [PROGRESS.md](PROGRESS.md) is the durable status record.
+Chrono Forge is under active v1.0 development. The repository and architecture bootstrap is complete; the deterministic world kernel is next, and this is not yet a playable release. [PRODUCT_SPEC.md](PRODUCT_SPEC.md) is the authoritative v1 contract, [ROADMAP.md](ROADMAP.md) is its ordered milestone view, [PLAN.md](PLAN.md) is the decision-complete execution contract, and [PROGRESS.md](PROGRESS.md) is the durable status record.
 
 ## Supported release target
 
