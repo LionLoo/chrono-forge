@@ -1,13 +1,13 @@
 # Progress
 
-Last updated: 2026-08-19
+Last updated: 2026-08-20
 
 ## Release state
 
 - Goal: complete the private Chrono Forge v1.0.0 release.
-- Current milestone: M1 deterministic world and simulation kernel implementation, validation, and independent review are complete; the private pull request and hosted CI checkpoint remain.
-- Current branch: `feature/deterministic-world-kernel`, based on `main` checkpoint `5c489e4`.
-- Remote: `https://github.com/LionLoo/chrono-forge` is private; pull request #1 delivered M0.
+- Current milestone: M1 deterministic world and simulation kernel is complete; M2 focus loop and durable saves is next.
+- Current branch: `main` at M1 squash merge `f3560fc`.
+- Remote: `https://github.com/LionLoo/chrono-forge` is private; pull request #2 delivered M1.
 - Included-usage meter: no read-only ChatGPT/Codex weekly-allowance value is exposed in this harness. Work uses the included plan path only; no API key or purchased, promotional, or account credit is used.
 - v1.0 completion: not yet satisfied.
 
@@ -35,6 +35,8 @@ Last updated: 2026-08-19
 - `npm run build:desktop`: passed and produced `chrono-forge.exe` plus `Chrono Forge_0.1.0_x64-setup.exe`.
 - Native WebView2 inspection: title and canvas rendered, the resource overlay was readable, tick reached 100, and worker/main hashes both equaled `e2edd0cb`.
 - Independent M1 closure review: no release-relevant finding remains.
+- Hosted pull request #2 CI run `32344501724`: web quality/tests/E2E passed in 1m41s, Windows native tests/installer passed in 11m18s, and aggregate `Required` passed in 3s.
+- Pull request #2 was squash-merged to `main` as `f3560fc2e8afb6c4039e230a2774da9a4a50370a`.
 - M0 post-documentation `main` CI run `32317917110`: passed.
 
 ## Active risks and blockers
@@ -43,8 +45,7 @@ Last updated: 2026-08-19
 - Windows signing credentials are not established; the private unsigned-installer fallback remains documented for release if no existing credential is available.
 - Remaining included weekly usage is not readable through the available tools.
 - WebdriverIO desktop E2E remains deferred to M2 for the required dependency/security re-audit.
-- The M1 branch is not yet pushed or merged and has no hosted M1 CI evidence yet.
 
 ## Exact next action
 
-Inspect and stage only the intended M1 files, run the full local gate, commit the verified checkpoint, push the feature branch, open one private pull request, wait for hosted `Required` CI, fix any failure, and merge only after it is green. Then synchronize persistent status and begin M2 after checking for an exposed included-usage meter again.
+Commit and push this merged-M1 status checkpoint, verify its hosted `main` CI, check again for an exposed included-usage meter, then create `feature/focus-and-persistence` and lock the M2 implementation slices and acceptance evidence before editing.
