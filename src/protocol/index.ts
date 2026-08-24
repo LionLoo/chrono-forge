@@ -1,9 +1,49 @@
 import type { WorldConfig, WorldSeed } from '../simulation/world';
 
-export const WORKER_PROTOCOL_VERSION = 1;
+export const WORKER_PROTOCOL_VERSION = 2;
 
 export type WorkerProtocolVersion = typeof WORKER_PROTOCOL_VERSION;
 export type RunMode = 'paused' | 'running';
+
+/** Stable numeric encodings for the Worker-to-renderer projection. */
+export const AGENT_ACTION_CODES = Object.freeze({
+  idle: 0,
+  forage: 1,
+  collectWater: 2,
+  gatherTimber: 3,
+  gatherStone: 4,
+  transport: 5,
+  construct: 6,
+  repair: 7,
+  rest: 8,
+});
+
+export const STRUCTURE_KIND_CODES = Object.freeze({ shelter: 1, storehouse: 2 });
+
+export const STRUCTURE_STATE_CODES = Object.freeze({
+  planned: 1,
+  building: 2,
+  operational: 3,
+  damaged: 4,
+  abandoned: 5,
+  demolished: 6,
+});
+
+/**
+ * Compact read-only settlement totals calculated by the authoritative worker.
+ * These values are display data only; UI and renderer code must not derive or
+ * mutate the simulation from them.
+ */
+export interface SettlementSummary {
+  readonly population: number;
+  readonly food: number;
+  readonly water: number;
+  readonly timber: number;
+  readonly stone: number;
+  readonly operationalStructures: number;
+  readonly shelterCapacity: number;
+  readonly activeConstruction: number;
+}
 
 export interface WorldFrameProjection {
   readonly version: WorkerProtocolVersion;
@@ -15,6 +55,21 @@ export interface WorldFrameProjection {
   readonly resource: Uint16Array;
   readonly habitability: Uint8Array;
   readonly hazard: Uint8Array;
+  /** Stable-ID-sorted visible agents. Parallel arrays have exactly this length. */
+  readonly agentIds: Uint32Array;
+  readonly agentTiles: Uint32Array;
+  readonly agentHealth: Uint16Array;
+  readonly agentActions: Uint8Array;
+  /** Stable-ID-sorted visible structures. Parallel arrays have exactly this length. */
+  readonly structureIds: Uint32Array;
+  readonly structureTiles: Uint32Array;
+  readonly structureKinds: Uint8Array;
+  readonly structureStates: Uint8Array;
+  /** Normalized authoritative units from 0 through 1,000. */
+  readonly structureProgress: Uint16Array;
+  /** Normalized authoritative units from 0 through 1,000. */
+  readonly structureCondition: Uint16Array;
+  readonly settlementSummary: SettlementSummary;
 }
 
 interface RequestBase {
@@ -342,6 +397,9 @@ export interface WorkerEvent {
   readonly tick: number;
   readonly type: string;
   readonly subjectId: number;
+  readonly targetId: number;
+  readonly tileIndex: number;
+  readonly amount: number;
 }
 
 export type WorkerToUiMessage =
@@ -359,5 +417,15 @@ export function projectionTransferables(frame: WorldFrameProjection): readonly A
     frame.resource.buffer as ArrayBuffer,
     frame.habitability.buffer as ArrayBuffer,
     frame.hazard.buffer as ArrayBuffer,
+    frame.agentIds.buffer as ArrayBuffer,
+    frame.agentTiles.buffer as ArrayBuffer,
+    frame.agentHealth.buffer as ArrayBuffer,
+    frame.agentActions.buffer as ArrayBuffer,
+    frame.structureIds.buffer as ArrayBuffer,
+    frame.structureTiles.buffer as ArrayBuffer,
+    frame.structureKinds.buffer as ArrayBuffer,
+    frame.structureStates.buffer as ArrayBuffer,
+    frame.structureProgress.buffer as ArrayBuffer,
+    frame.structureCondition.buffer as ArrayBuffer,
   ];
 }

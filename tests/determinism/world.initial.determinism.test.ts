@@ -12,9 +12,12 @@ describe('world determinism', () => {
     const right = createInitialWorld(seed);
 
     expect(hashWorldState(left)).toBe(hashWorldState(right));
-    expect(left.eventLog).toStrictEqual([{ id: 1, tick: 0, kind: 'world-generated' }]);
+    expect(left.eventLog.map((event) => event.kind)).toStrictEqual([
+      'world-generated',
+      'founders-arrived',
+    ]);
     expect(left.eventLog).toStrictEqual(right.eventLog);
-    expect(left.nextEventId).toBe(2);
+    expect(left.nextEventId).toBe(3);
     expect(canonicalWorldJson(stepWorld(left, 10_000))).toBe(
       canonicalWorldJson(stepWorld(right, 10_000)),
     );

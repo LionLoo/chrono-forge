@@ -2,7 +2,7 @@
 
 `PRODUCT_SPEC.md` is the product contract and `PLAN.md` contains the decision-complete acceptance criteria, branches, and validation for each item. Milestones run in this order:
 
-Current checkpoint: M2 focus sessions and durable saves is merged through private PR #3 after independent review and green local/hosted desktop gates. The durable `main` checkpoint and root rotation are active; M3 autonomous survival and construction follows.
+Current checkpoint: M2 is merged through private PR #3. M3 autonomous survival and construction is locally acceptance-complete after independent review/fixes and the release-style local gate; private PR #4, hosted CI, merge, durable `main` CI, and root rotation are next. M4-M12 remain unchanged and release-blocking.
 
 | Order | Milestone                                                    | Outcome                                                                                       |
 | ----- | ------------------------------------------------------------ | --------------------------------------------------------------------------------------------- |

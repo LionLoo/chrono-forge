@@ -62,8 +62,23 @@ describe('worker runtime determinism', () => {
     const first = run();
     const second = run();
     expect(first).toStrictEqual(second);
-    expect(first.find((message) => message.type === 'eventBatch')).toMatchObject({
-      events: [{ id: 2, tick: 86, type: 'offline-catch-up' }],
+    const offlineBatch = first.find(
+      (message) =>
+        message.type === 'eventBatch' &&
+        message.events.some((event) => event.type === 'offline-catch-up'),
+    );
+    expect(offlineBatch).toMatchObject({
+      events: [
+        {
+          id: 3,
+          tick: 86,
+          type: 'offline-catch-up',
+          subjectId: 0,
+          targetId: 0,
+          tileIndex: -1,
+          amount: 0,
+        },
+      ],
     });
   });
 });

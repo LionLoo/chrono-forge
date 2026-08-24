@@ -164,8 +164,16 @@ function eventCopy(event: WorkerEvent): string {
       return `The founding world formed at tick ${event.tick}.`;
     case 'offline-catch-up':
       return `Bounded offline progression reached tick ${event.tick}.`;
+    case 'shelter-planned':
+    case 'storehouse-planned':
+      return `Structure ${event.targetId} was planned at tile ${event.tileIndex} on tick ${event.tick}.`;
+    case 'shelter-operational':
+    case 'storehouse-operational':
+      return `Structure ${event.targetId} became operational at tick ${event.tick}.`;
   }
-  return `Recorded ${event.type} at tick ${event.tick}.`;
+  return `Recorded ${event.type} at tick ${event.tick}${
+    event.subjectId > 0 ? ` for founder ${event.subjectId}` : ''
+  }${event.amount !== 0 ? ` (${event.amount})` : ''}.`;
 }
 
 function isTerminalSession(session: FocusSession): boolean {

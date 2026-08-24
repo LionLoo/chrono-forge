@@ -34,7 +34,6 @@ function createSimulation(): {
       events: [],
       frame: null,
       loadSnapshot,
-      mainThreadHash: null,
       performOfflineCatchUp,
       requestSave: vi.fn<() => Promise<string>>().mockResolvedValue(snapshot),
       status: 'ready',
@@ -64,7 +63,6 @@ function createStatefulSimulation(initialWorld?: WorldState): {
         world = deserializeWorldSnapshot(savedSnapshot);
         await Promise.resolve();
       }),
-      mainThreadHash: null,
       performOfflineCatchUp: vi.fn().mockResolvedValue(undefined),
       requestSave: vi.fn(async () => {
         await Promise.resolve();

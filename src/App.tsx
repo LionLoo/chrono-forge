@@ -2,6 +2,7 @@ import { useMemo, useState } from 'react';
 
 import { getFocusAlerts, type FocusAlerts } from './adapters/focus-alerts';
 import { getRuntimePersistence, type RuntimePersistence } from './adapters/runtime-persistence';
+import { STRUCTURE_STATE_CODES } from './protocol';
 import { INITIAL_WORLD_CAMERA, panCamera, zoomCamera } from './rendering/camera';
 import { WorldMapCanvas } from './rendering/WorldMapCanvas';
 import { WORLD_OVERLAYS, type WorldOverlay } from './rendering/world-palette';
@@ -14,6 +15,20 @@ import {
   type SimulationWorkerFactory,
 } from './ui/useWorldSimulation';
 
+const STRUCTURE_KIND_LABELS: Readonly<Record<number, string>> = Object.freeze({
+  1: 'Shelter',
+  2: 'Storehouse',
+});
+
+const STRUCTURE_STATUS_LABELS: Readonly<Record<number, string>> = Object.freeze({
+  [STRUCTURE_STATE_CODES.planned]: 'planned',
+  [STRUCTURE_STATE_CODES.building]: 'under construction',
+  [STRUCTURE_STATE_CODES.operational]: 'operational',
+  [STRUCTURE_STATE_CODES.damaged]: 'damaged',
+  [STRUCTURE_STATE_CODES.abandoned]: 'abandoned',
+  [STRUCTURE_STATE_CODES.demolished]: 'demolished',
+});
+
 interface AppProps {
   readonly focusAlerts?: FocusAlerts;
   readonly focusClock?: FocusClock;
@@ -25,14 +40,45 @@ function seedLabel(): string {
   return DEMO_WORLD_SEED.map((word) => word.toString(16).padStart(8, '0')).join('-');
 }
 
+function factualEventCopy(event: {
+  readonly amount: number;
+  readonly subjectId: number;
+  readonly targetId: number;
+  readonly tick: number;
+  readonly tileIndex: number;
+  readonly type: string;
+}): string {
+  const structure = event.targetId > 0 ? `Structure ${event.targetId}` : 'The settlement';
+  switch (event.type) {
+    case 'world-generated':
+      return `The founding world formed at tick ${event.tick}.`;
+    case 'offline-catch-up':
+      return `Bounded offline progression reached tick ${event.tick}.`;
+    case 'shelter-planned':
+    case 'storehouse-planned':
+      return `${structure} was planned at tile ${event.tileIndex} on tick ${event.tick}.`;
+    case 'shelter-operational':
+    case 'storehouse-operational':
+      return `${structure} became operational at tick ${event.tick}.`;
+    default:
+      return `Recorded ${event.type} at tick ${event.tick}${
+        event.subjectId > 0 ? ` for founder ${event.subjectId}` : ''
+      }${event.amount !== 0 ? ` (${event.amount})` : ''}.`;
+  }
+}
+
+function conditionTier(condition: number): 'sound' | 'worn' | 'critical' {
+  if (condition >= 667) return 'sound';
+  if (condition >= 334) return 'worn';
+  return 'critical';
+}
+
 export function App({ focusAlerts, focusClock, persistence, workerFactory }: AppProps) {
   const simulation = useWorldSimulation(workerFactory);
   const completionAlerts = focusAlerts ?? getFocusAlerts();
   const runtimePersistence = persistence ?? getRuntimePersistence();
   const [camera, setCamera] = useState(INITIAL_WORLD_CAMERA);
   const [overlay, setOverlay] = useState<WorldOverlay>('terrain');
-  const deterministicMatch =
-    simulation.frame !== null && simulation.frame.stateHash === simulation.mainThreadHash;
   const worldSummary = useMemo(() => {
     const frame = simulation.frame;
     if (frame === null) return null;
@@ -45,15 +91,61 @@ export function App({ focusAlerts, focusClock, persistence, workerFactory }: App
     }
     return { habitableTiles, resourceTiles, totalTiles: frame.width * frame.height };
   }, [simulation.frame]);
+  const constructionSummary = useMemo(() => {
+    const frame = simulation.frame;
+    if (frame === null || frame.settlementSummary.activeConstruction === 0) return null;
+
+    let progressTotal = 0;
+    let activeCount = 0;
+    for (let index = 0; index < frame.structureProgress.length; index += 1) {
+      const progress = frame.structureProgress[index] ?? 0;
+      const state = frame.structureStates[index] ?? 0;
+      if (state === STRUCTURE_STATE_CODES.planned || state === STRUCTURE_STATE_CODES.building) {
+        progressTotal += progress;
+        activeCount += 1;
+      }
+    }
+    const denominator =
+      activeCount === 0 ? frame.settlementSummary.activeConstruction : activeCount;
+    return {
+      count: frame.settlementSummary.activeConstruction,
+      percent: Math.round((progressTotal * 100) / (1_000 * denominator)),
+    };
+  }, [simulation.frame]);
+  const lowestStructureCondition = useMemo(() => {
+    const conditions = simulation.frame?.structureCondition;
+    if (conditions === undefined || conditions.length === 0) return null;
+    let lowest = 1_000;
+    for (const condition of conditions) {
+      lowest = Math.min(lowest, condition);
+    }
+    return Math.round(lowest / 10);
+  }, [simulation.frame]);
+  const visibleStructures = useMemo(() => {
+    const frame = simulation.frame;
+    if (frame === null) return [];
+
+    return Array.from(frame.structureIds, (id, index) => {
+      const condition = frame.structureCondition[index] ?? 0;
+      return {
+        condition: Math.round(condition / 10),
+        conditionTier: conditionTier(condition),
+        id,
+        kind: STRUCTURE_KIND_LABELS[frame.structureKinds[index] ?? 0] ?? 'Structure',
+        progress: Math.round((frame.structureProgress[index] ?? 0) / 10),
+        status: STRUCTURE_STATUS_LABELS[frame.structureStates[index] ?? 0] ?? 'unknown status',
+        tile: frame.structureTiles[index] ?? 0,
+      };
+    });
+  }, [simulation.frame]);
+  const recentEvents = useMemo(() => simulation.events.slice(-4).reverse(), [simulation.events]);
 
   const statusCopy =
     simulation.status === 'booting'
       ? 'Forging deterministic world…'
       : simulation.status === 'faulted'
         ? `Simulation fault: ${simulation.error ?? 'unknown error'}`
-        : deterministicMatch
-          ? 'Worker synchronized · deterministic match'
-          : 'Determinism mismatch detected';
+        : 'Worker projection ready · autonomous settlement active';
 
   return (
     <div className="app-shell">
@@ -70,12 +162,12 @@ export function App({ focusAlerts, focusClock, persistence, workerFactory }: App
       <main id="main" className="world-lab" tabIndex={-1}>
         <section className="lab-intro" aria-labelledby="hero-title">
           <div>
-            <p className="eyebrow">Milestone 2 · Focus becomes history</p>
+            <p className="eyebrow">Milestone 3 · A settlement survives and builds</p>
             <h1 id="hero-title">{PROJECT_META.promise}</h1>
           </div>
           <p>
-            Begin a calm session and accepted focus time advances this deterministic world. Local
-            saves preserve both civilization state and factual focus history without an account.
+            Begin a calm session and accepted focus time advances a Worker-owned settlement.
+            Founders choose their own work; the surface only reports their factual progress.
           </p>
         </section>
 
@@ -84,7 +176,7 @@ export function App({ focusAlerts, focusClock, persistence, workerFactory }: App
             <header className="card-heading">
               <div>
                 <p>Projection 01</p>
-                <h2 id="world-map-title">Founding region</h2>
+                <h2 id="world-map-title">Founding settlement</h2>
               </div>
               <span>
                 {simulation.frame ? `${simulation.frame.width} × ${simulation.frame.height}` : '—'}
@@ -202,7 +294,7 @@ export function App({ focusAlerts, focusClock, persistence, workerFactory }: App
             <header className="card-heading">
               <div>
                 <p>Authoritative simulation</p>
-                <h2 id="telemetry-title">World telemetry</h2>
+                <h2 id="telemetry-title">Settlement status</h2>
               </div>
             </header>
 
@@ -221,6 +313,22 @@ export function App({ focusAlerts, focusClock, persistence, workerFactory }: App
                 <dd>{simulation.frame?.tick ?? '—'}</dd>
               </div>
               <div>
+                <dt>Living founders</dt>
+                <dd>{simulation.frame?.settlementSummary.population ?? '—'}</dd>
+              </div>
+              <div>
+                <dt>Operational structures</dt>
+                <dd>{simulation.frame?.settlementSummary.operationalStructures ?? '—'}</dd>
+              </div>
+              <div>
+                <dt>Shelter capacity</dt>
+                <dd>{simulation.frame?.settlementSummary.shelterCapacity ?? '—'}</dd>
+              </div>
+              <div>
+                <dt>Lowest structure condition</dt>
+                <dd>{lowestStructureCondition === null ? '—' : `${lowestStructureCondition}%`}</dd>
+              </div>
+              <div>
                 <dt>Habitable tiles</dt>
                 <dd>
                   {worldSummary
@@ -234,20 +342,86 @@ export function App({ focusAlerts, focusClock, persistence, workerFactory }: App
               </div>
             </dl>
 
+            <dl className="settlement-stores" aria-label="Settlement stores">
+              <div>
+                <dt>Food</dt>
+                <dd>{simulation.frame?.settlementSummary.food ?? '—'}</dd>
+              </div>
+              <div>
+                <dt>Water</dt>
+                <dd>{simulation.frame?.settlementSummary.water ?? '—'}</dd>
+              </div>
+              <div>
+                <dt>Timber</dt>
+                <dd>{simulation.frame?.settlementSummary.timber ?? '—'}</dd>
+              </div>
+              <div>
+                <dt>Stone</dt>
+                <dd>{simulation.frame?.settlementSummary.stone ?? '—'}</dd>
+              </div>
+            </dl>
+
+            {constructionSummary ? (
+              <div className="construction-status">
+                <span>
+                  Active construction: {constructionSummary.count} structure
+                  {constructionSummary.count === 1 ? '' : 's'}
+                </span>
+                <progress
+                  aria-label={`Construction progress, ${constructionSummary.percent}%`}
+                  max={100}
+                  value={constructionSummary.percent}
+                >
+                  {constructionSummary.percent}%
+                </progress>
+                <strong>{constructionSummary.percent}% complete</strong>
+              </div>
+            ) : (
+              <p className="construction-idle">No active construction.</p>
+            )}
+
+            <section className="structure-inspector" aria-labelledby="visible-structures-title">
+              <h3 id="visible-structures-title">Visible structures</h3>
+              {visibleStructures.length === 0 ? (
+                <p>No structures are visible in this projection.</p>
+              ) : (
+                <ul>
+                  {visibleStructures.map((structure) => (
+                    <li
+                      aria-label={`${structure.kind} ${structure.id}: status ${structure.status}; condition ${structure.condition}% (${structure.conditionTier}); progress ${structure.progress}%; tile ${structure.tile}.`}
+                      key={structure.id}
+                    >
+                      <span
+                        aria-hidden="true"
+                        className={`structure-condition-marker structure-condition-marker-${structure.conditionTier}`}
+                      />
+                      <span>
+                        {structure.kind} {structure.id}: status {structure.status}; condition{' '}
+                        {structure.condition}% ({structure.conditionTier}); progress{' '}
+                        {structure.progress}%; tile {structure.tile}.
+                      </span>
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </section>
+
+            <section className="factual-events" aria-labelledby="factual-events-title">
+              <h3 id="factual-events-title">Recent factual events</h3>
+              {recentEvents.length === 0 ? (
+                <p>No authoritative events recorded yet.</p>
+              ) : (
+                <ol>
+                  {recentEvents.map((event) => (
+                    <li key={event.id}>{factualEventCopy(event)}</li>
+                  ))}
+                </ol>
+              )}
+            </section>
+
             <div className="seed-panel">
               <span>Visible 128-bit seed</span>
               <code>{seedLabel()}</code>
-            </div>
-
-            <div className="hash-panel">
-              <div>
-                <span>Worker hash</span>
-                <code>{simulation.frame?.stateHash ?? 'waiting'}</code>
-              </div>
-              <div>
-                <span>Main-thread hash</span>
-                <code>{simulation.mainThreadHash ?? 'waiting'}</code>
-              </div>
             </div>
 
             <button
@@ -258,11 +432,11 @@ export function App({ focusAlerts, focusClock, persistence, workerFactory }: App
               }}
               type="button"
             >
-              Advance 100 fixed ticks
+              Observe 100 fixed ticks
             </button>
             <p className="milestone-note">
-              Focus time advances fixed logical ticks; observing or moving the camera never changes
-              the authoritative outcome.
+              Focus time advances fixed logical ticks. Observing, moving the camera, and changing
+              overlays never changes an autonomous outcome.
             </p>
           </aside>
         </div>

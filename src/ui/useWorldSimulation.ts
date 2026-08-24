@@ -7,21 +7,8 @@ import {
   type WorkerToUiMessage,
   type WorldFrameProjection,
 } from '../protocol';
-import { deserializeWorldSnapshot } from '../simulation/persistence';
-import {
-  appendWorldEvent,
-  createInitialWorld,
-  hashWorldState,
-  stepWorld,
-  type WorldConfig,
-  type WorldSeed,
-  type WorldState,
-} from '../simulation/world';
-import {
-  MAX_OFFLINE_CATCH_UP_MILLISECONDS,
-  MAX_OFFLINE_CATCH_UP_TICKS,
-  OFFLINE_CATCH_UP_POLICY_VERSION,
-} from '../workers/simulation-runtime';
+import type { WorldConfig, WorldSeed } from '../simulation/world';
+import { OFFLINE_CATCH_UP_POLICY_VERSION } from '../workers/simulation-runtime';
 
 export const DEMO_WORLD_SEED: WorldSeed = Object.freeze([
   0x4348_524f, 0x4e4f_464f, 0x5247_4531, 0x0000_0001,
@@ -63,7 +50,6 @@ export interface WorldSimulationView {
   readonly events: readonly WorkerEvent[];
   readonly frame: WorldFrameProjection | null;
   readonly loadSnapshot: (snapshot: string) => Promise<void>;
-  readonly mainThreadHash: string | null;
   readonly performOfflineCatchUp: (elapsedMilliseconds: number, rate: number) => Promise<void>;
   readonly requestSave: () => Promise<string>;
   readonly status: 'booting' | 'ready' | 'faulted';
@@ -75,28 +61,14 @@ function assertNonNegativeSafeInteger(value: number, label: string): void {
   }
 }
 
-function mirrorOfflineCatchUp(
-  world: WorldState,
-  elapsedMilliseconds: number,
-  rate: number,
-): WorldState {
-  const elapsed = Math.min(elapsedMilliseconds, MAX_OFFLINE_CATCH_UP_MILLISECONDS);
-  const ticks = Math.min(Math.floor((elapsed * rate) / 1_000), MAX_OFFLINE_CATCH_UP_TICKS);
-  return ticks === 0 ? world : appendWorldEvent(stepWorld(world, ticks), 'offline-catch-up');
-}
-
 export function useWorldSimulation(
   workerFactory: SimulationWorkerFactory = createBrowserWorker,
 ): WorldSimulationView {
   const [frame, setFrame] = useState<WorldFrameProjection | null>(null);
-  const [mainThreadHash, setMainThreadHash] = useState<string | null>(null);
   const [events, setEvents] = useState<readonly WorkerEvent[]>([]);
   const [error, setError] = useState<string | null>(null);
   const workerRef = useRef<SimulationWorkerPort | null>(null);
-  const mirrorWorldRef = useRef<WorldState | null>(null);
-  const projectedWorldRef = useRef<WorldState | null>(null);
   const requestSequenceRef = useRef(0);
-  const expectedWorldsRef = useRef(new Map<string, WorldState>());
   const pendingSavesRef = useRef(new Map<string, PendingSaveRequest>());
   const pendingLoadsRef = useRef(new Map<string, PendingVoidRequest>());
   const pendingOfflineRef = useRef(new Map<string, PendingVoidRequest>());
@@ -120,7 +92,6 @@ export function useWorldSimulation(
     }
 
     workerRef.current = worker;
-    const expectedWorlds = expectedWorldsRef.current;
     const pendingSaves = pendingSavesRef.current;
     const pendingLoads = pendingLoadsRef.current;
     const pendingOffline = pendingOfflineRef.current;
@@ -149,30 +120,10 @@ export function useWorldSimulation(
       pendingLoads.clear();
       pendingOffline.clear();
     };
-    const applyFrame = (
-      requestId: string,
-      nextFrame: WorldFrameProjection,
-      replaceEvents: boolean,
-    ) => {
-      const expectedWorld = expectedWorlds.get(requestId);
+    const applyFrame = (nextFrame: WorldFrameProjection, replaceEvents: boolean) => {
       setFrame(nextFrame);
-      setMainThreadHash(expectedWorld === undefined ? null : hashWorldState(expectedWorld));
-      if (expectedWorld !== undefined) {
-        mirrorWorldRef.current = expectedWorld;
-        expectedWorlds.delete(requestId);
-        if (expectedWorlds.size === 0) projectedWorldRef.current = expectedWorld;
-        if (replaceEvents) {
-          setEvents(
-            expectedWorld.eventLog.map((worldEvent) => ({
-              id: worldEvent.id,
-              tick: worldEvent.tick,
-              type: worldEvent.kind,
-              subjectId: 0,
-            })),
-          );
-        }
-      }
-      if (expectedWorld !== undefined) setError(null);
+      if (replaceEvents) setEvents([]);
+      setError(null);
     };
 
     worker.onmessage = (event) => {
@@ -186,17 +137,13 @@ export function useWorldSimulation(
 
       switch (message.type) {
         case 'ready': {
-          applyFrame(message.requestId, message.frame, true);
-          const pending = pendingLoads.get(message.requestId);
-          if (pending !== undefined) {
-            pendingLoads.delete(message.requestId);
-            pending.resolve();
-          }
+          applyFrame(message.frame, true);
           return;
         }
-        case 'frameDelta':
-          applyFrame(message.requestId, message.frame, false);
+        case 'frameDelta': {
+          applyFrame(message.frame, false);
           return;
+        }
         case 'eventBatch':
           setEvents((current) => {
             const byId = new Map(current.map((worldEvent) => [worldEvent.id, worldEvent]));
@@ -215,17 +162,20 @@ export function useWorldSimulation(
           return;
         }
         case 'metrics': {
-          const pending = pendingOffline.get(message.requestId);
-          if (pending !== undefined) {
+          const pendingLoad = pendingLoads.get(message.requestId);
+          if (pendingLoad !== undefined) {
+            pendingLoads.delete(message.requestId);
+            pendingLoad.resolve();
+          }
+          const pendingOfflineRequest = pendingOffline.get(message.requestId);
+          if (pendingOfflineRequest !== undefined) {
             pendingOffline.delete(message.requestId);
-            pending.resolve();
+            pendingOfflineRequest.resolve();
           }
           return;
         }
         case 'fault': {
           const reason = new Error(message.message);
-          expectedWorlds.clear();
-          projectedWorldRef.current = mirrorWorldRef.current;
           rejectRequest(message.requestId, reason);
           rejectAll(reason);
           setError(message.message);
@@ -241,10 +191,7 @@ export function useWorldSimulation(
       setError(reason.message);
     };
 
-    const initialWorld = createInitialWorld(DEMO_WORLD_SEED, DEMO_WORLD_CONFIG);
-    projectedWorldRef.current = initialWorld;
     const requestId = nextRequestId('initialize');
-    expectedWorlds.set(requestId, initialWorld);
     worker.postMessage({
       type: 'initialize',
       protocolVersion: WORKER_PROTOCOL_VERSION,
@@ -256,9 +203,6 @@ export function useWorldSimulation(
     return () => {
       const reason = new Error('The simulation worker was closed before the request completed.');
       rejectAll(reason);
-      expectedWorlds.clear();
-      projectedWorldRef.current = null;
-      mirrorWorldRef.current = null;
       workerRef.current = null;
       worker.onmessage = null;
       worker.onerror = null;
@@ -270,12 +214,8 @@ export function useWorldSimulation(
     (ticks: number) => {
       assertNonNegativeSafeInteger(ticks, 'Advance ticks');
       const worker = workerRef.current;
-      const mirror = projectedWorldRef.current;
-      if (worker === null || mirror === null) return;
-      const nextMirror = stepWorld(mirror, ticks);
-      projectedWorldRef.current = nextMirror;
+      if (worker === null) return;
       const requestId = nextRequestId('advance');
-      expectedWorldsRef.current.set(requestId, nextMirror);
       worker.postMessage({
         type: 'advanceTicks',
         protocolVersion: WORKER_PROTOCOL_VERSION,
@@ -306,17 +246,7 @@ export function useWorldSimulation(
       const worker = workerRef.current;
       if (worker === null)
         return Promise.reject(new Error('The simulation worker is unavailable.'));
-      let mirror: WorldState;
-      try {
-        mirror = deserializeWorldSnapshot(snapshot);
-      } catch (snapshotError) {
-        return Promise.reject(
-          snapshotError instanceof Error ? snapshotError : new Error('The snapshot is invalid.'),
-        );
-      }
-      projectedWorldRef.current = mirror;
       const requestId = nextRequestId('load');
-      expectedWorldsRef.current.set(requestId, mirror);
       const promise = new Promise<void>((resolve, reject) => {
         pendingLoadsRef.current.set(requestId, { resolve, reject });
       });
@@ -337,13 +267,9 @@ export function useWorldSimulation(
       assertNonNegativeSafeInteger(rate, 'Offline simulation rate');
       if (rate > 1_000) throw new RangeError('Offline simulation rate cannot exceed 1000.');
       const worker = workerRef.current;
-      const mirror = projectedWorldRef.current;
-      if (worker === null || mirror === null)
+      if (worker === null)
         return Promise.reject(new Error('The simulation worker is unavailable.'));
-      const nextMirror = mirrorOfflineCatchUp(mirror, elapsedMilliseconds, rate);
-      projectedWorldRef.current = nextMirror;
       const requestId = nextRequestId('offline');
-      expectedWorldsRef.current.set(requestId, nextMirror);
       const promise = new Promise<void>((resolve, reject) => {
         pendingOfflineRef.current.set(requestId, { resolve, reject });
       });
@@ -367,20 +293,10 @@ export function useWorldSimulation(
       events,
       frame,
       loadSnapshot,
-      mainThreadHash,
       performOfflineCatchUp,
       requestSave,
       status: error === null ? (frame === null ? 'booting' : 'ready') : 'faulted',
     }),
-    [
-      advanceTicks,
-      error,
-      events,
-      frame,
-      loadSnapshot,
-      mainThreadHash,
-      performOfflineCatchUp,
-      requestSave,
-    ],
+    [advanceTicks, error, events, frame, loadSnapshot, performOfflineCatchUp, requestSave],
   );
 }

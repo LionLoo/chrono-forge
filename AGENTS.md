@@ -43,6 +43,8 @@ Create a same-directory peer task for this saved Chrono Forge checkout when the 
 
 If true same-project root creation or ownership transfer is unavailable, record the limitation in `PROGRESS.md` and perform a logical repo-based reset: discard chat-derived assumptions, reread every source-of-truth document, recheck Git/GitHub/CI and validation evidence, and continue only from the persisted exact next task.
 
+When the task UI exposes chat-title controls, title the active root chat `INPROGRESS`. After a successor has reconstructed repository state and accepted ownership, retitle the relinquishing root chat `RETIRED` before it stops. Title changes are status markers only; repository evidence remains authoritative. If title mutation is unsupported, record that UI limitation in `PROGRESS.md` during rotation and continue the repository-based handoff without weakening it.
+
 ## Commands
 
 - Install: `npm ci`

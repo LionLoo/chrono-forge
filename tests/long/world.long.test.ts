@@ -18,11 +18,15 @@ describe('accelerated deterministic world horizon', () => {
 
       expect(advanced.tick).toBe(LONG_HORIZON);
       expect(advanced.elevation).toBe(initial.elevation);
-      expect(advanced.eventLog).toStrictEqual([{ id: 1, tick: 0, kind: 'world-generated' }]);
-      expect(advanced.nextEventId).toBe(2);
+      expect(advanced.eventLog.slice(0, 2)).toStrictEqual(initial.eventLog);
+      expect(advanced.eventLog.map((event) => event.id)).toStrictEqual(
+        Array.from({ length: advanced.eventLog.length }, (_, index) => index + 1),
+      );
+      expect(advanced.eventLog.every((event) => event.tick <= advanced.tick)).toBe(true);
+      expect(advanced.nextEventId).toBe(advanced.eventLog.length + 1);
       expect(hashWorldState(advanced)).toBe(hashWorldState(repeated));
     }
-  });
+  }, 30_000);
 
   it('keeps the worker checkpoint equal to the main runtime at the long horizon', () => {
     const responses: WorkerToUiMessage[] = [];

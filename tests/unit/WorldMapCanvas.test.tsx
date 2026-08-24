@@ -2,7 +2,8 @@ import { fireEvent, render, waitFor } from '@testing-library/react';
 import { vi } from 'vitest';
 
 import { INITIAL_WORLD_CAMERA } from '../../src/rendering/camera';
-import { WorldMapCanvas } from '../../src/rendering/WorldMapCanvas';
+import { STRUCTURE_KIND_CODES, STRUCTURE_STATE_CODES } from '../../src/protocol';
+import { WorldMapCanvas, type WorldMapProjection } from '../../src/rendering/WorldMapCanvas';
 
 const pixiMocks = vi.hoisted(() => {
   class MockContainer {
@@ -13,8 +14,10 @@ const pixiMocks = vi.hoisted(() => {
 
   class MockGraphics {
     readonly clear = vi.fn(() => this);
+    readonly circle = vi.fn(() => this);
     readonly fill = vi.fn(() => this);
     readonly rect = vi.fn(() => this);
+    readonly stroke = vi.fn(() => this);
   }
 
   const applications: MockApplication[] = [];
@@ -85,7 +88,17 @@ const projection = {
   resource: new Uint16Array([200, 500]),
   habitability: new Uint8Array([160, 180]),
   hazard: new Uint8Array([20, 40]),
-};
+  agentIds: new Uint32Array(),
+  agentTiles: new Uint32Array(),
+  agentHealth: new Uint16Array(),
+  agentActions: new Uint8Array(),
+  structureIds: new Uint32Array(),
+  structureTiles: new Uint32Array(),
+  structureKinds: new Uint8Array(),
+  structureStates: new Uint8Array(),
+  structureProgress: new Uint16Array(),
+  structureCondition: new Uint16Array(),
+} satisfies WorldMapProjection;
 
 describe('Pixi world projection', () => {
   beforeEach(() => {
@@ -104,7 +117,7 @@ describe('Pixi world projection', () => {
     );
 
     await waitFor(() => {
-      expect(view.getByRole('img', { name: 'Generated Chrono Forge world' })).toBeVisible();
+      expect(view.getByRole('img', { name: /Autonomous settlement map/ })).toBeVisible();
     });
     const graphics = pixiMocks.graphics[0];
     const worldLayer = pixiMocks.containers[0];
@@ -167,6 +180,38 @@ describe('Pixi world projection', () => {
       );
       expect(pixiMocks.applications[0]?.destroy).toHaveBeenCalledWith(true, { children: true });
     });
+  });
+
+  it('draws separate agent and construction layers with progress, condition outlines, and redundant condition marks', async () => {
+    const view = render(
+      <WorldMapCanvas
+        camera={INITIAL_WORLD_CAMERA}
+        onCameraChange={vi.fn()}
+        overlay="terrain"
+        projection={{
+          ...projection,
+          agentIds: new Uint32Array([1]),
+          agentTiles: new Uint32Array([0]),
+          agentHealth: new Uint16Array([700]),
+          agentActions: new Uint8Array([1]),
+          structureIds: new Uint32Array([1]),
+          structureTiles: new Uint32Array([1]),
+          structureKinds: new Uint8Array([STRUCTURE_KIND_CODES.shelter]),
+          structureStates: new Uint8Array([STRUCTURE_STATE_CODES.building]),
+          structureProgress: new Uint16Array([500]),
+          structureCondition: new Uint16Array([600]),
+        }}
+      />,
+    );
+
+    await waitFor(() => {
+      expect(view.getByRole('img', { name: /1 visible agents and 1 structures/ })).toBeVisible();
+    });
+    expect(pixiMocks.graphics[1]?.rect).toHaveBeenCalled();
+    expect(pixiMocks.graphics[1]?.stroke).toHaveBeenCalled();
+    expect(pixiMocks.graphics[1]?.rect).toHaveBeenCalledTimes(4);
+    expect(pixiMocks.graphics[2]?.circle).toHaveBeenCalled();
+    expect(pixiMocks.graphics[2]?.rect).toHaveBeenCalled();
   });
 
   it('destroys an application whose async initialization finishes after unmount', async () => {
