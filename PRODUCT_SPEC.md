@@ -38,6 +38,18 @@ Food, water, shelter, health, safety, gathering, storage, transportation, produc
 
 Birth, aging, death, generations, relationships, families/equivalents, migration, groups, leaders, institutions, cooperation, disagreement, crime, conflict, reconciliation, emergent/changing government or coordination, inequality, stability/social pressure, named important people, and inspectable biographies.
 
+### Persistent interpersonal relationships and family life
+
+V1 must maintain a sparse, bounded, persistent interpersonal graph rather than treating social life as parent IDs, household membership, settlement-wide averages, temporary counters, or one generic bond. As culturally appropriate, people can become acquaintances, friends and close friends, rivals or enemies, mentors or proteges, romantic or equivalent partners, long-term partners or spouses, separated/broken-up/divorced former partners or equivalents, estranged relatives, reconciled relatives, and widowed survivors. Bonds have durable identity and history; they can form, strengthen, weaken, change type, end, reconcile, and remain influential over decades. Parent-child, sibling, household, and practical extended-kin connections must be meaningful and inspectable beyond genealogy alone.
+
+Relationship formation and change arise autonomously from personality and traits, compatibility, proximity, repeated interaction, shared work, memories and recorded experiences, culture, kinship, cooperation, conflict, scarcity, disasters, migration, political or social events, and controlled deterministic randomness. Important positive and negative experiences between the same people affect their future bond and choices. Household membership evolves as people mature, partner, separate, migrate, care for family, or have children, allowing recognizable families and lineages to emerge across generations.
+
+Relationships must materially influence person-specific behavior, including preferred cooperation and help, resource sharing and caregiving, household and partner formation, culturally appropriate reproduction, migration, knowledge transfer, political support and faction formation, retaliation and conflict, reconciliation, crisis protection or assistance, and inheritance or family resource transfer where applicable. Births must arise from an established relationship, household, or explicit culturally appropriate family structure recorded by the simulation—not from an arbitrary eligible-adult pairing. The model may remain biologically abstract and culturally flexible.
+
+Deliberate inspection must expose a person's parents, children, siblings, partner or equivalent, relevant former partners, household members, close friends, rivals or enemies, and other especially significant bonds. A relationship view must make its type or roles, underlying state, strength, direction of change, beginning, and significant shared source events understandable where applicable. Biographies and history may describe significant relationship changes only from recorded factual events, supporting readable multi-decade lives without cluttering normal focus mode.
+
+The graph, genealogy, household state, relationship RNG streams, and source-event references must be deterministic, canonical, migration-safe, and fully persistent across save/load and version upgrades. Work and storage must be proportional to represented salient edges and indexed kin/household records, never every possible pair; bounded detailed state and explicit aggregation rules must remain compatible with M8 scale targets.
+
 ### Culture and factual history
 
 Generated personal/settlement/civilization names, preferences, beliefs/philosophies, architectural styles, traditions, institutions, alliances/rivalries, discovery, disaster, migration, war/peace, golden ages, decline, collapse, and recovery. A browsable timeline and recaps may state only events the simulation recorded.
@@ -89,6 +101,7 @@ Do not declare completion until all required systems above function without plac
 - a new player creates a world and focus session;
 - representative 30–60 minute sessions provide satisfying factual feedback without compressing long-term civilization development;
 - founders autonomously survive, gather, build, and expand while visibly constructing;
+- multi-generation evidence shows persistent friendships, rivalries, partnerships or cultural equivalents, meaningful family bonds, dynamic households, relationship-grounded child arrival and decisions, and factual interpersonal life histories that remain inspectable after save/reload;
 - normal buildings/jobs require no player assignment;
 - multiple settlements/societies, contextual technology, disasters, interventions, collapse/recovery, advanced cities, space colonies, and alien encounters work visually and mechanically;
 - factual history/recaps, saves, autosaves, offline catch-up, import/export, corruption recovery, and migrations work;
