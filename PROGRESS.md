@@ -6,7 +6,7 @@ Last updated: 2026-08-23
 
 - Goal: build, verify, package, and privately release the complete Chrono Forge v1.0.0 contract; do not stop at a prototype or partial roadmap.
 - Current milestone: M3 autonomous survival, agents, and construction is locally acceptance-complete after two independent reviews and fixes; final closure review and the private PR #4 gate remain.
-- Current branch: `feature/autonomous-settlement`, created from durable M2 documentation commit `8439ec7c1470e0117b77d3339a08cbdf11ac9319`; M2 integration commit is `b0d5ac69a76e194ab4a84774da1fb5e9e9f67a7d` from squash-merged PR #3.
+- Current branch: `feature/autonomous-settlement`; verified M3 implementation checkpoint `00387bf11b65f37136d73fe6780e585b741a3ced` is based on durable M2 documentation commit `8439ec7c1470e0117b77d3339a08cbdf11ac9319`.
 - Remote: `https://github.com/LionLoo/chrono-forge` is private. PR #3 replacement run `32409846530` and the durable `main` run `32412473633` passed, including aggregate `Required`.
 - Included-usage meter: no read-only weekly allowance value is exposed. Work uses only the included ChatGPT/Codex plan path; no API key, purchased/promotional credit, or account credit is used.
 - v1.0 completion: not satisfied. M4-M12 remain release-blocking after M3 merges.
@@ -69,4 +69,4 @@ Last updated: 2026-08-23
 
 ## Exact next action
 
-Commit the verified M3 checkpoint, push `feature/autonomous-settlement`, open private PR #4, and require green hosted CI before merge.
+Push `feature/autonomous-settlement`, open private PR #4 from the verified M3 checkpoint, and require green hosted CI before merge.
