@@ -5,8 +5,8 @@ Last updated: 2026-08-23
 ## Release state
 
 - Goal: build, verify, package, and privately release the complete Chrono Forge v1.0.0 contract; never stop at a prototype or partial roadmap.
-- Current milestone: M4 economy, generations, society, culture, and factual history is implemented, independently reviewed, and fully locally gated on `feature/living-societies`. The private PR, hosted CI, merge, and durable `main` handoff remain before M5.
-- Git checkpoint: verified M4 implementation/acceptance commit is `c974fd1`; this file is its succeeding documentation checkpoint. The branch began from synchronized `main` at `6b5b37aa5b485ca51cd9d3b69df00705b0b0c9cb`; private origin is `https://github.com/LionLoo/chrono-forge`.
+- Current milestone: M4 economy, generations, society, culture, and factual history is implemented, independently reviewed, and fully locally gated on `feature/living-societies`. Private PR #5 is open; hosted CI, merge, and durable `main` handoff remain before M5.
+- Git checkpoint: verified M4 implementation/acceptance commit is `c974fd1`, followed by durable docs at pushed branch head `b2a0558`. The branch began from synchronized `main` at `6b5b37aa5b485ca51cd9d3b69df00705b0b0c9cb`; private origin is `https://github.com/LionLoo/chrono-forge`.
 - Included usage: no read-only weekly allowance meter is exposed. Only the included ChatGPT/Codex plan path is used; no API key, purchased/promotional credit, or account credit is used.
 - v1.0 completion: not satisfied. M5-M12 and release remain fully blocking.
 
@@ -46,4 +46,4 @@ Last updated: 2026-08-23
 
 ## Exact next action
 
-Commit only the reviewed M4-owned paths, push `feature/living-societies`, open the private M4 PR, require green aggregate hosted CI, merge, update the durable `main` handoff, and rotate the root before beginning M5.
+Wait for private PR #5 aggregate hosted CI. If every required job is green, merge it, verify durable `main` CI, update the `main` handoff, and rotate the root before beginning M5.
