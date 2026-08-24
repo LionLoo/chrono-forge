@@ -2,7 +2,7 @@
 
 `PRODUCT_SPEC.md` is the product contract and `PLAN.md` contains the decision-complete acceptance criteria, branches, and validation for each item. Milestones run in this order:
 
-Current checkpoint: M4 living societies is implemented on `feature/living-societies`, independently reviewed, and at its full local/hosted merge gate. M0-M3 remain merged and verified. After M4 merges and a durable `main` handoff rotates the root, M5 contextual technology and disasters is next; M5-M12 remain unchanged and release-blocking.
+Current checkpoint: M0-M4 are merged, independently reviewed, and verified on `main` at `98f07cd`; main CI run `32694827633` is green. M4.5 deep interpersonal relationships and family life is now the next release-blocking product milestone. It must be completed before M5 begins; M4.5-M12 and release remain blocking.
 
 | Order | Milestone                                                    | Outcome                                                                                       |
 | ----- | ------------------------------------------------------------ | --------------------------------------------------------------------------------------------- |
@@ -11,6 +11,7 @@ Current checkpoint: M4 living societies is implemented on `feature/living-societ
 | M2    | Focus loop and durable saves                                 | Timer/breaks/history/recap, SQLite slots, recovery, migration, bounded offline progression    |
 | M3    | Autonomous survival, agents, and construction                | Needs/decisions/occupations, economy foundations, autonomous settlement building              |
 | M4    | Economy, generations, society, culture, and history          | Multi-generation living societies, institutions, identities, biographies, factual timeline    |
+| M4.5  | Deep interpersonal relationships and family life             | Persistent social bonds, dynamic households, relationship-grounded families and life stories  |
 | M5    | Contextual technology and disasters                          | Emergent knowledge branches/loss, modeled crises, indirect player interventions               |
 | M6    | Multiple settlements, civilizations, diplomacy, and conflict | Trade, divergence, alliances, war, federation/fragmentation, ruins                            |
 | M7    | Visual eras, inspection, and accessibility                   | Rich readable animated world, overlays/inspection, calm focus UX, full accessibility controls |
