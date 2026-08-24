@@ -1,5 +1,6 @@
 import { render, screen, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
+import { vi } from 'vitest';
 
 import { SocietyPanel, type SocietyPanelProps } from '../../src/ui/SocietyPanel';
 
@@ -55,19 +56,25 @@ const cultures: SocietyPanelProps['cultures'] = [
 ];
 
 function renderPanel(overrides: Partial<SocietyPanelProps> = {}) {
-  return render(
+  const onTimelinePageRequest =
+    overrides.onTimelinePageRequest ?? vi.fn<(offset: number) => void>();
+  const result = render(
     <SocietyPanel
       cultures={cultures}
       dashboard={dashboard}
+      onTimelinePageRequest={onTimelinePageRequest}
       people={people}
-      timeline={Array.from({ length: 9 }, (_, index) => ({
+      timeline={Array.from({ length: 8 }, (_, index) => ({
         id: index + 1,
         tick: (index + 1) * 100,
         summary: `Recorded event ${index + 1}.`,
       }))}
+      timelineOffset={0}
+      timelineTotal={9}
       {...overrides}
     />,
   );
+  return { ...result, onTimelinePageRequest };
 }
 
 describe('SocietyPanel', () => {
@@ -98,9 +105,9 @@ describe('SocietyPanel', () => {
     expect(screen.queryByText('Event #41 · tick 900:')).not.toBeInTheDocument();
   });
 
-  it('keeps timeline input order and paginates eight entries at a time', async () => {
+  it('keeps timeline input order and requests bounded Worker-backed pages', async () => {
     const user = userEvent.setup();
-    renderPanel();
+    const { onTimelinePageRequest } = renderPanel();
 
     const timeline = screen.getByRole('heading', { name: 'Timeline' }).parentElement;
     if (timeline === null) throw new Error('Expected timeline section');
@@ -112,14 +119,11 @@ describe('SocietyPanel', () => {
     expect(screen.getByRole('button', { name: 'Next' })).toBeEnabled();
 
     await user.click(screen.getByRole('button', { name: 'Next' }));
-    expect(within(timeline).getByText('Recorded event 9.')).toBeVisible();
-    expect(screen.getByText('Page 2 of 2')).toBeVisible();
-    expect(screen.getByRole('button', { name: 'Previous' })).toBeEnabled();
-    expect(screen.getByRole('button', { name: 'Next' })).toBeDisabled();
+    expect(onTimelinePageRequest).toHaveBeenCalledWith(8);
   });
 
   it('reports explicit empty states and disables pagination when history is absent', () => {
-    renderPanel({ cultures: [], people: [], timeline: [] });
+    renderPanel({ cultures: [], people: [], timeline: [], timelineTotal: 0 });
 
     expect(screen.getByText('No people are available in this projection.')).toBeVisible();
     expect(screen.getByText('No cultures are available in this projection.')).toBeVisible();

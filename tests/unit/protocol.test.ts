@@ -58,6 +58,19 @@ describe('versioned worker protocol', () => {
       shelterCapacity: 0,
       activeConstruction: 0,
     });
+    expect(frame.society.dashboard).toMatchObject({
+      population: 6,
+      households: 3,
+      government: 'council',
+    });
+    expect(frame.society.people.map((person) => person.id)).toStrictEqual([1, 2, 3, 4, 5, 6]);
+    expect(frame.society.cultures).toHaveLength(2);
+    expect(frame.society.timeline).toStrictEqual([
+      { id: 1, tick: 0, summary: 'The founding world formed.' },
+      { id: 2, tick: 0, summary: '6 named founders established the first settlement.' },
+    ]);
+    expect(frame.society.timelineOffset).toBe(0);
+    expect(frame.society.timelineTotal).toBe(2);
     expect(projectionTransferables(frame)).toStrictEqual([
       frame.biome.buffer,
       frame.resource.buffer,

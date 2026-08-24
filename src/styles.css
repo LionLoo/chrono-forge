@@ -797,8 +797,128 @@ textarea:focus-visible,
   font-size: 0.76rem;
 }
 
+.society-panel {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 18px;
+  margin-top: 18px;
+  padding: 22px;
+  border: 1px solid rgba(238, 220, 181, 0.13);
+  background: rgba(14, 22, 17, 0.89);
+  box-shadow: 0 26px 70px rgba(0, 0, 0, 0.2);
+}
+
+.society-panel > .card-heading {
+  grid-column: 1 / -1;
+}
+
+.society-panel > section {
+  min-width: 0;
+  padding: 16px;
+  border: 1px solid rgba(218, 202, 167, 0.12);
+  background: #0a120d;
+}
+
+.society-panel h3,
+.society-panel h4,
+.society-panel h5 {
+  margin: 0 0 12px;
+  color: #e9d6a5;
+}
+
+.society-dashboard,
+.biography-panel dl,
+.culture-list dl {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+  margin: 0;
+}
+
+.society-dashboard > div,
+.biography-panel dl > div,
+.culture-list dl > div {
+  min-width: 0;
+  padding: 9px;
+  background: #101b14;
+}
+
+.society-panel dt {
+  color: #93a392;
+  font-size: 0.68rem;
+}
+
+.society-panel dd {
+  margin: 5px 0 0;
+  overflow-wrap: anywhere;
+  color: #f0e2b9;
+  font-size: 0.78rem;
+}
+
+.society-panel label {
+  display: grid;
+  gap: 7px;
+  color: #cbd8c9;
+  font-size: 0.78rem;
+}
+
+.society-panel select {
+  width: 100%;
+  min-height: 42px;
+  border: 1px solid #4f6452;
+  border-radius: 3px;
+  background: #0a110d;
+  color: #f0f5ee;
+  padding: 9px 11px;
+}
+
+.biography-panel {
+  margin-top: 14px;
+}
+
+.biography-panel ol,
+.timeline-list,
+.culture-list {
+  margin: 0;
+  padding-left: 20px;
+  color: #bdcabb;
+  font-size: 0.78rem;
+  line-height: 1.6;
+}
+
+.culture-list {
+  display: grid;
+  gap: 12px;
+  list-style: none;
+  padding: 0;
+}
+
+.timeline-pagination {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  margin-top: 14px;
+}
+
+.timeline-pagination button {
+  min-height: 40px;
+  border: 1px solid #667967;
+  border-radius: 3px;
+  background: #17241b;
+  color: #edf5ea;
+  cursor: pointer;
+  padding: 8px 12px;
+}
+
+.timeline-pagination button:disabled {
+  cursor: not-allowed;
+  opacity: 0.48;
+}
+
 .calm-mode .lab-intro,
 .calm-mode .telemetry-card,
+.calm-mode .society-panel,
 .calm-mode .world-card > .card-heading,
 .calm-mode .overlay-picker,
 .calm-mode .camera-toolbar {
@@ -816,6 +936,7 @@ textarea:focus-visible,
 @media (max-width: 980px) {
   .lab-intro,
   .lab-grid,
+  .society-panel,
   .focus-layout,
   .focus-lower-grid {
     grid-template-columns: 1fr;
@@ -878,6 +999,12 @@ textarea:focus-visible,
   }
 
   .history-panel dl {
+    grid-template-columns: 1fr;
+  }
+
+  .society-dashboard,
+  .biography-panel dl,
+  .culture-list dl {
     grid-template-columns: 1fr;
   }
 }

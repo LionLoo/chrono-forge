@@ -102,6 +102,43 @@ describe('deterministic living societies core', () => {
     expect(first.people.every((person) => person.name.length > 0)).toBe(true);
     expect(first.cultures).toHaveLength(2);
     expect(first.cultures).not.toStrictEqual(distinct.cultures);
+    for (const cultureSeed of [
+      [0, 0, 0, 0],
+      [1, 2, 3, 4],
+      [0xffff_ffff, 0, 0x8000_0000, 17],
+      [9, 8, 7, 6],
+    ] as const) {
+      const cultures = createInitialSociety({
+        seed: cultureSeed,
+        tick: 0,
+        centerTileIndex: 10,
+        yearTicks: ACCELERATED_YEAR_TICKS,
+        people: observations(),
+      }).cultures;
+      expect(
+        new Set(
+          cultures.map((culture) =>
+            [culture.preference, culture.belief, culture.tradition, culture.architectureStyle].join(
+              '|',
+            ),
+          ),
+        ).size,
+      ).toBe(2);
+      expect(new Set(cultures.map((culture) => culture.name)).size).toBe(2);
+      expect(new Set(cultures.map((culture) => culture.name)).size).toBe(2);
+    }
+    expect(() =>
+      assertSocietyInvariants({
+        ...first,
+        cultures: [first.cultures[0]!, { ...first.cultures[0]!, id: 2 }],
+      }),
+    ).toThrow(/distinct identities/i);
+    expect(() =>
+      assertSocietyInvariants({
+        ...first,
+        cultures: [first.cultures[0]!, { ...first.cultures[1]!, name: first.cultures[0]!.name }],
+      }),
+    ).toThrow(/names must be unique/i);
     expect(() => assertSocietyInvariants(first)).not.toThrow();
   });
 

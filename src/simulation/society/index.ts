@@ -8,7 +8,8 @@ export const MAX_BIOGRAPHY_EVENT_IDS = 16;
 
 export type EconomicRole = 'grower' | 'maker' | 'trader' | 'caretaker';
 export type GovernmentKind = 'council' | 'stewardship';
-export type EntityKind = 'person' | 'household' | 'culture' | 'group' | 'institution' | 'world';
+export type EntityKind =
+  'person' | 'structure' | 'household' | 'culture' | 'group' | 'institution' | 'world';
 export type OfferKind = 'meal' | 'tool';
 
 export interface SocietyEntityRef {
@@ -52,6 +53,7 @@ export interface SocietyPulseInput {
 export interface SocietyPerson {
   readonly id: number;
   readonly name: string;
+  readonly origin: 'founder' | 'birth' | 'migration';
   readonly alive: boolean;
   readonly birthTick: number;
   readonly deathTick: number;
@@ -251,6 +253,7 @@ const GOVERNMENTS = Object.freeze([
 ] as const satisfies readonly GovernmentKind[]);
 const ENTITY_KINDS = Object.freeze([
   'person',
+  'structure',
   'household',
   'culture',
   'group',
@@ -445,6 +448,12 @@ function addBiographyFact(
   });
 }
 
+function cultureIdentity(culture: SocietyCulture): string {
+  return [culture.preference, culture.belief, culture.tradition, culture.architectureStyle].join(
+    '\u001f',
+  );
+}
+
 /** Creates a deterministic, self-contained M4 social graph from current authoritative people. */
 export function createInitialSociety(input: SocietyInitializationInput): SocietyState {
   assertInteger(input.tick, 'Society initial tick');
@@ -471,12 +480,29 @@ export function createInitialSociety(input: SocietyInitializationInput): Society
       architectureStyle: STYLES[rng.nextInt(STYLES.length)]!,
     }),
   );
+  if (cultureIdentity(cultures[0]!) === cultureIdentity(cultures[1]!)) {
+    const duplicate = cultures[1]!;
+    cultures[1] = Object.freeze({
+      ...duplicate,
+      preference: ROLES[(ROLES.indexOf(duplicate.preference) + 1) % ROLES.length]!,
+    });
+  }
+  if (cultures[0]!.name === cultures[1]!.name) {
+    const duplicate = cultures[1]!;
+    const stem = duplicate.name.slice(0, -' folk'.length);
+    const nextStem =
+      CULTURE_STEMS[
+        (CULTURE_STEMS.indexOf(stem as (typeof CULTURE_STEMS)[number]) + 1) % CULTURE_STEMS.length
+      ]!;
+    cultures[1] = Object.freeze({ ...duplicate, name: `${nextStem} folk` });
+  }
   const people: SocietyPerson[] = observations.map((observation, index) => {
     const cultureId = (index % cultures.length) + 1;
     const householdId = Math.floor(index / 2) + 1;
     return Object.freeze({
       id: observation.id,
       name: nameFor(rng, observation.id, cultureId),
+      origin: 'founder',
       alive: observation.alive,
       birthTick: input.tick - 24 * input.yearTicks,
       deathTick: 0,
@@ -606,11 +632,58 @@ export function advanceSociety(state: SocietyState, input: SocietyPulseInput): S
     });
   });
   if (input.tick % civilPeriodTicks(state.yearTicks) !== 0) {
+    const households = state.households.map((household) =>
+      Object.freeze({
+        ...household,
+        adultIds: Object.freeze(
+          people
+            .filter(
+              (person) =>
+                person.alive &&
+                person.householdId === household.id &&
+                input.tick - person.birthTick >= 18 * state.yearTicks,
+            )
+            .map((person) => person.id)
+            .sort((left, right) => left - right),
+        ),
+      }),
+    );
+    const groups = state.groups.map((group) =>
+      Object.freeze({
+        ...group,
+        memberIds: Object.freeze(
+          people
+            .filter((person) => person.alive && person.cultureId === group.cultureId)
+            .map((person) => person.id)
+            .sort((left, right) => left - right),
+        ),
+      }),
+    );
+    let institution = state.institution;
+    if (
+      institution.leaderId !== 0 &&
+      !people.some((person) => person.id === institution.leaderId && person.alive)
+    ) {
+      const leaderId = chooseLeader(people, households);
+      institution = Object.freeze({ ...institution, leaderId, changedTick: input.tick });
+      const governmentDraft = event(
+        'government-changed',
+        ref('institution', institution.id),
+        leaderId === 0 ? ref('world', 0) : ref('person', leaderId),
+        state.stability,
+        `The council selected ${people.find((person) => person.id === leaderId)?.name ?? 'no leader'} for ${institution.government}.`,
+      );
+      events.push(governmentDraft);
+      if (leaderId !== 0) addBiographyFact(facts, leaderId, governmentDraft);
+    }
     const next: SocietyState = Object.freeze({
       ...state,
       lastTick: input.tick,
       centerTileIndex: input.centerTileIndex,
       people: Object.freeze(people),
+      households: Object.freeze(households),
+      groups: Object.freeze(groups),
+      institution,
       pendingBiographyFacts: Object.freeze(facts),
       operationCount: state.operationCount + people.length + events.length,
     });
@@ -636,6 +709,7 @@ export function advanceSociety(state: SocietyState, input: SocietyPulseInput): S
       Object.freeze({
         id: observation.id,
         name: nameFor(rng, observation.id, cultureId),
+        origin: 'migration',
         alive: observation.alive,
         birthTick: input.tick - 24 * state.yearTicks,
         deathTick: observation.alive ? 0 : input.tick,
@@ -668,6 +742,20 @@ export function advanceSociety(state: SocietyState, input: SocietyPulseInput): S
       });
     }
   }
+  households = households.map((household) => ({
+    ...household,
+    adultIds: Object.freeze(
+      people
+        .filter(
+          (person) =>
+            person.alive &&
+            person.householdId === household.id &&
+            input.tick - person.birthTick >= 18 * state.yearTicks,
+        )
+        .map((person) => person.id)
+        .sort((left, right) => left - right),
+    ),
+  }));
   const shortage = Math.max(
     0,
     people.filter((person) => person.alive).length * 2 - input.communalStockpile.food,
@@ -868,7 +956,7 @@ export function advanceSociety(state: SocietyState, input: SocietyPulseInput): S
       }
     }
     const eligibleHousehold =
-      parents === undefined || scarcity >= 65 || living().length >= input.shelterCapacity
+      parents === undefined || scarcity >= 65 || living().length > input.shelterCapacity
         ? undefined
         : households.find(
             (household) =>
@@ -1074,7 +1162,8 @@ export function advanceSociety(state: SocietyState, input: SocietyPulseInput): S
     0,
     100,
   );
-  const collapsed = stability <= 15 || (state.collapsed && scarcity >= 50);
+  const recovered = state.collapsed && scarcity < 30 && stability >= 60;
+  const collapsed = state.collapsed ? !recovered : stability <= 15;
   if (!state.collapsed && collapsed)
     events.push(
       event(
@@ -1085,7 +1174,7 @@ export function advanceSociety(state: SocietyState, input: SocietyPulseInput): S
         'The settlement collapsed under scarcity and instability.',
       ),
     );
-  if (state.collapsed && !collapsed && scarcity < 30)
+  if (recovered)
     events.push(
       event(
         'settlement-recovered',
@@ -1110,7 +1199,7 @@ export function advanceSociety(state: SocietyState, input: SocietyPulseInput): S
     const governmentDraft = event(
       'government-changed',
       ref('institution', institution.id),
-      ref('person', leaderId),
+      leaderId === 0 ? ref('world', 0) : ref('person', leaderId),
       stability,
       `The council selected ${people.find((person) => person.id === leaderId)?.name ?? 'no leader'} for ${government}.`,
     );
@@ -1289,6 +1378,8 @@ export function assertSocietyInvariants(state: SocietyState): void {
     if (personIds.has(person.id)) throw new Error('Society person ids must be unique.');
     personIds.add(person.id);
     assertBoundedString(person.name, 'Society person name');
+    if (!['founder', 'birth', 'migration'].includes(person.origin))
+      throw new Error('Society person origin is invalid.');
     assertInteger(person.birthTick, 'Society person birth tick', Number.MIN_SAFE_INTEGER);
     assertInteger(person.deathTick, 'Society person death tick');
     if (!person.alive !== person.deathTick > 0)
@@ -1352,6 +1443,8 @@ export function assertSocietyInvariants(state: SocietyState): void {
     assertInteger(household.tools, 'Household tools');
   }
   if (state.cultures.length < 2) throw new Error('Society requires two cultures.');
+  const cultureIdentities = new Set<string>();
+  const cultureNames = new Set<string>();
   for (const culture of state.cultures) {
     assertInteger(culture.id, 'Society culture id', 1);
     assertBoundedString(culture.name, 'Society culture name');
@@ -1360,6 +1453,12 @@ export function assertSocietyInvariants(state: SocietyState): void {
     assertBoundedString(culture.architectureStyle, 'Society culture architecture style');
     if (!ROLES.includes(culture.preference))
       throw new Error('Society culture preference is invalid.');
+    const identity = cultureIdentity(culture);
+    if (cultureIdentities.has(identity))
+      throw new Error('Society cultures must have distinct identities.');
+    cultureIdentities.add(identity);
+    if (cultureNames.has(culture.name)) throw new Error('Society culture names must be unique.');
+    cultureNames.add(culture.name);
   }
   for (const group of state.groups) {
     assertInteger(group.id, 'Society group id', 1);
@@ -1429,6 +1528,8 @@ export function assertSocietyInvariants(state: SocietyState): void {
     switch (entity.kind) {
       case 'person':
         return personIds.has(entity.id);
+      case 'structure':
+        return entity.id > 0;
       case 'household':
         return householdIds.has(entity.id);
       case 'culture':

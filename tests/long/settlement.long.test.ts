@@ -38,7 +38,14 @@ describe('settlement long horizon', () => {
     (...seed) => {
       const world = stepWorld(createInitialWorld(seed), 1_000_000);
       expect(world.civilization.operationCount).toBeGreaterThan(0);
-      expect(world.civilization.agents.filter((agent) => agent.alive)).toHaveLength(6);
+      expect(
+        world.civilization.agents.filter((agent) => agent.alive).length,
+      ).toBeGreaterThanOrEqual(6);
+      expect(
+        world.civilization.agents
+          .filter((agent) => agent.id <= 6)
+          .every((founder) => founder.alive),
+      ).toBe(true);
       expect(
         world.civilization.agents.some(
           (agent) => agent.activity.foodGathered + agent.activity.waterGathered > 100,

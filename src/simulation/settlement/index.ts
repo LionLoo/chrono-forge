@@ -1,5 +1,17 @@
 import { findLocalPath } from '../pathfinding';
 import { deriveXoshiro128State, type Xoshiro128State, Xoshiro128StarStar } from '../random';
+import {
+  NORMAL_YEAR_TICKS,
+  SOCIETY_PULSE_TICKS,
+  advanceSociety,
+  assertSocietyInvariants,
+  createInitialSociety,
+  societyDto,
+  type EntityKind,
+  type SocietyPersonDraft,
+  type SocietyPersonObservation,
+  type SocietyState,
+} from '../society';
 
 export const SETTLEMENT_FOUNDER_COUNT = 6;
 export const SETTLEMENT_ACTION_PULSE_TICKS = 100;
@@ -41,6 +53,8 @@ export interface FactualMemory {
   readonly eventId: number;
   readonly tick: number;
   readonly kind: string;
+  readonly summary: string;
+  readonly targetKind: EntityKind;
   readonly targetId: number;
 }
 
@@ -130,6 +144,7 @@ export interface CivilizationState {
   readonly agents: readonly SettlementAgent[];
   readonly relationships: readonly Relationship[];
   readonly structures: readonly SettlementStructure[];
+  readonly society: SocietyState;
   readonly resourceDepletion: readonly ResourceDepletion[];
   readonly pathDemand: Uint16Array;
   readonly systemRng: Xoshiro128State;
@@ -150,7 +165,10 @@ export interface SettlementTerrain {
 
 export interface SettlementEventDraft {
   readonly kind: string;
+  readonly summary: string;
+  readonly subjectKind: EntityKind;
   readonly subjectId: number;
+  readonly targetKind: EntityKind;
   readonly targetId: number;
   readonly tileIndex: number;
   readonly amount: number;
@@ -277,10 +295,23 @@ function skillTuple(rng: Xoshiro128StarStar): readonly [number, number, number, 
   return [20 + rng.nextInt(31), 20 + rng.nextInt(31), 20 + rng.nextInt(31), 20 + rng.nextInt(31)];
 }
 
+function societyObservation(agent: SettlementAgent): SocietyPersonObservation {
+  return Object.freeze({
+    id: agent.id,
+    alive: agent.alive,
+    health: agent.health,
+    tileIndex: agent.tileIndex,
+    skills: agent.skills,
+    occupation: agent.occupation,
+  });
+}
+
 /** Creates six deterministic founders and no player-issued work assignments. */
 export function createInitialCivilization(
   seed: Xoshiro128State,
   terrain: SettlementTerrain,
+  tick = 0,
+  societyYearTicks = NORMAL_YEAR_TICKS,
 ): CivilizationState {
   const centerTileIndex = centerTile(terrain);
   const agents: SettlementAgent[] = [];
@@ -335,6 +366,14 @@ export function createInitialCivilization(
       );
     }
   }
+  const society = createInitialSociety({
+    seed,
+    tick,
+    centerTileIndex,
+    yearTicks: societyYearTicks,
+    people: agents.map(societyObservation),
+  });
+  const names = new Map(society.people.map((person) => [person.id, person.name]));
   return Object.freeze({
     nextAgentId: SETTLEMENT_FOUNDER_COUNT + 1,
     nextRelationshipId,
@@ -342,9 +381,12 @@ export function createInitialCivilization(
     nextMemoryId: 1,
     centerTileIndex,
     stockpile: Object.freeze({ food: 48, water: 48, timber: 25, stone: 5 }),
-    agents: Object.freeze(agents),
+    agents: Object.freeze(
+      agents.map((agent) => Object.freeze({ ...agent, name: names.get(agent.id) ?? agent.name })),
+    ),
     relationships: Object.freeze(relationships),
     structures: Object.freeze([]),
+    society,
     resourceDepletion: Object.freeze([]),
     pathDemand: new Uint16Array(terrain.width * terrain.height),
     systemRng: deriveXoshiro128State(seed, 'settlement-system'),
@@ -366,7 +408,7 @@ export function createCivilizationAtTick(
   tick: number,
 ): CivilizationState {
   assertSafeInteger(tick, 'Legacy civilization tick');
-  return createInitialCivilization(seed, terrain);
+  return createInitialCivilization(seed, terrain, tick);
 }
 
 function depletionAt(
@@ -991,6 +1033,202 @@ function sortedAgents(agents: readonly SettlementAgent[]): readonly SettlementAg
   return Object.freeze([...agents].sort((left, right) => left.id - right.id));
 }
 
+function averageTuple(
+  first: readonly [number, number, number, number],
+  second: readonly [number, number, number, number],
+  adjustment = 0,
+): readonly [number, number, number, number] {
+  return [0, 1, 2, 3].map((index) =>
+    clamp(Math.trunc(((first[index] ?? 0) + (second[index] ?? 0)) / 2) + adjustment, 0, 100),
+  ) as unknown as readonly [number, number, number, number];
+}
+
+function agentFromSocietyDraft(
+  draft: SocietyPersonDraft,
+  civilization: CivilizationState,
+): SettlementAgent {
+  const rng = new Xoshiro128StarStar(
+    deriveXoshiro128State(civilization.systemRng, `m4-person-${draft.id}`),
+  );
+  const parents = draft.parentIds
+    .map((id) => civilization.agents.find((agent) => agent.id === id))
+    .filter((agent): agent is SettlementAgent => agent !== undefined);
+  const traits =
+    parents.length === 2 ? averageTuple(parents[0]!.traits, parents[1]!.traits) : traitTuple(rng);
+  const skills =
+    parents.length === 2
+      ? averageTuple(parents[0]!.skills, parents[1]!.skills, -15)
+      : skillTuple(rng);
+  const homeStructureId =
+    parents.find((parent) => parent.homeStructureId !== 0)?.homeStructureId ??
+    civilization.structures.find(
+      (structure) => structure.kind === 'shelter' && structure.status === 'operational',
+    )?.id ??
+    0;
+  return Object.freeze({
+    id: draft.id,
+    name: draft.name,
+    alive: true,
+    tileIndex: draft.tileIndex,
+    ageTicks: draft.origin === 'migration' ? 20 * 365 * 24 * 60 * 60 * 10 : 0,
+    health: draft.origin === 'migration' ? 80 : 100,
+    hunger: draft.origin === 'migration' ? 30 : 0,
+    thirst: draft.origin === 'migration' ? 24 : 0,
+    fatigue: 0,
+    safety: homeStructureId === 0 ? 55 : 75,
+    traits,
+    skills,
+    action: 'idle',
+    targetTileIndex: draft.tileIndex,
+    route: Object.freeze([]),
+    routeCursor: 0,
+    carryingKind: 'none',
+    carryingAmount: 0,
+    plan: Object.freeze([]),
+    planIndex: 0,
+    homeStructureId,
+    personalGoal: 'survive',
+    communalGoal: 'sustain-stores',
+    occupation: 'generalist',
+    knownTiles: Object.freeze(
+      [...new Set([civilization.centerTileIndex, draft.tileIndex])].sort(
+        (left, right) => left - right,
+      ),
+    ),
+    memories: Object.freeze([]),
+    rng: rng.save(),
+    activity: EMPTY_ACTIVITY,
+  });
+}
+
+function applySocietyPulse(
+  civilization: CivilizationState,
+  terrain: SettlementTerrain,
+  tick: number,
+): SettlementPulseResult {
+  const shelterCapacity = civilization.structures
+    .filter((structure) => structure.kind === 'shelter' && structure.status === 'operational')
+    .reduce((total, structure) => total + structure.capacity, 0);
+  const pulse = advanceSociety(civilization.society, {
+    tick,
+    centerTileIndex: civilization.centerTileIndex,
+    worldWidth: terrain.width,
+    people: civilization.agents.map(societyObservation),
+    communalStockpile: civilization.stockpile,
+    shelterCapacity,
+  });
+  const deaths = new Set(pulse.deathPersonIds);
+  const relief = new Map(
+    pulse.roleOrNeedReliefPatches.map((patch) => [patch.personId, patch] as const),
+  );
+  const stockpile: MutableStockpile = { ...pulse.communalStockpile };
+  let agents = civilization.agents.map((agent) => {
+    if (deaths.has(agent.id)) {
+      if (agent.carryingKind !== 'none') stockpile[agent.carryingKind] += agent.carryingAmount;
+      return Object.freeze({
+        ...agent,
+        alive: false,
+        health: 0,
+        action: 'idle' as const,
+        targetTileIndex: agent.tileIndex,
+        route: Object.freeze([]),
+        routeCursor: 0,
+        carryingKind: 'none' as const,
+        carryingAmount: 0,
+        plan: Object.freeze([]),
+        planIndex: 0,
+      });
+    }
+    const patch = relief.get(agent.id);
+    return patch === undefined
+      ? agent
+      : Object.freeze({
+          ...agent,
+          hunger: clamp(agent.hunger - patch.hungerRelief, 0, 100),
+          thirst: clamp(agent.thirst - patch.thirstRelief, 0, 100),
+        });
+  });
+  const exchangeVolume = pulse.society.offers.reduce(
+    (total, offer) => total + offer.fulfilledAmount,
+    0,
+  );
+  const traderId = pulse.society.people
+    .filter((person) => person.alive && person.role === 'trader')
+    .sort((left, right) => left.id - right.id)[0]?.id;
+  if (exchangeVolume > 0 && traderId !== undefined) {
+    agents = agents.map((agent) =>
+      agent.id === traderId
+        ? Object.freeze({
+            ...agent,
+            action: 'transport' as const,
+            targetTileIndex: civilization.centerTileIndex,
+            plan: Object.freeze([]),
+            planIndex: 0,
+            route: Object.freeze([]),
+            routeCursor: 0,
+            activity: activityWith(agent.activity, {
+              transported: agent.activity.transported + exchangeVolume,
+            }),
+          })
+        : agent,
+    );
+  }
+  for (const draft of [...pulse.personBirthDrafts, ...pulse.personMigrationDrafts].sort(
+    (left, right) => left.id - right.id,
+  )) {
+    agents = [...agents, agentFromSocietyDraft(draft, { ...civilization, agents })];
+  }
+  const relationshipPairs = new Set(
+    civilization.relationships.map(
+      (relationship) => `${relationship.firstAgentId}:${relationship.secondAgentId}`,
+    ),
+  );
+  let nextRelationshipId = civilization.nextRelationshipId;
+  const relationships = [...civilization.relationships];
+  for (const draft of pulse.personBirthDrafts) {
+    for (const parentId of draft.parentIds) {
+      if (parentId === 0) continue;
+      const firstAgentId = Math.min(parentId, draft.id);
+      const secondAgentId = Math.max(parentId, draft.id);
+      const key = `${firstAgentId}:${secondAgentId}`;
+      if (relationshipPairs.has(key)) continue;
+      relationshipPairs.add(key);
+      relationships.push(
+        Object.freeze({
+          id: nextRelationshipId++,
+          firstAgentId,
+          secondAgentId,
+          affinity: 75,
+          trust: 70,
+        }),
+      );
+    }
+  }
+  const next: CivilizationState = Object.freeze({
+    ...civilization,
+    nextAgentId: Math.max(civilization.nextAgentId, ...agents.map((agent) => agent.id + 1)),
+    nextRelationshipId,
+    stockpile: freezeStockpile(stockpile),
+    agents: sortedAgents(agents),
+    relationships: Object.freeze(relationships.sort((left, right) => left.id - right.id)),
+    society: pulse.society,
+  });
+  const events = pulse.events.map((draft) =>
+    Object.freeze({
+      kind: draft.kind,
+      summary: draft.summary,
+      subjectKind: draft.subject.kind,
+      subjectId: draft.subject.id,
+      targetKind: draft.target.kind,
+      targetId: draft.target.id,
+      tileIndex: civilization.centerTileIndex,
+      amount: draft.amount,
+    }),
+  );
+  assertCivilizationInvariants(next, terrain);
+  return Object.freeze({ civilization: next, events: Object.freeze(events) });
+}
+
 /** Advances one fixed settlement action pulse. Call only at deterministic pulse boundaries. */
 export function advanceCivilization(
   civilization: CivilizationState,
@@ -1014,7 +1252,10 @@ export function advanceCivilization(
     nextStructureId += 1;
     events.push({
       kind: `${newStructure.kind}-planned`,
+      summary: `${newStructure.kind === 'shelter' ? 'Shelter' : 'Storehouse'} ${newStructure.id} was planned.`,
+      subjectKind: 'world',
       subjectId: 0,
+      targetKind: 'structure',
       targetId: newStructure.id,
       tileIndex: newStructure.tileIndex,
       amount: 0,
@@ -1162,7 +1403,10 @@ export function advanceCivilization(
     if (prior !== undefined && prior.level !== structure.level)
       events.push({
         kind: `${structure.kind}-expanded`,
+        summary: `${structure.kind === 'shelter' ? 'Shelter' : 'Storehouse'} ${structure.id} expanded to capacity ${structure.capacity}.`,
+        subjectKind: 'world',
         subjectId: 0,
+        targetKind: 'structure',
         targetId: structure.id,
         tileIndex: structure.tileIndex,
         amount: structure.capacity,
@@ -1172,7 +1416,10 @@ export function advanceCivilization(
     if (beforeStatus.get(structure.id) !== 'operational' && structure.status === 'operational') {
       events.push({
         kind: `${structure.kind}-operational`,
+        summary: `${structure.kind === 'shelter' ? 'Shelter' : 'Storehouse'} ${structure.id} became operational.`,
+        subjectKind: 'world',
         subjectId: 0,
+        targetKind: 'structure',
         targetId: structure.id,
         tileIndex: structure.tileIndex,
         amount: structure.capacity,
@@ -1210,7 +1457,7 @@ export function advanceCivilization(
       }),
     ),
   );
-  const next: CivilizationState = Object.freeze({
+  let next: CivilizationState = Object.freeze({
     ...civilization,
     nextStructureId,
     stockpile: freezeStockpile(stockpile),
@@ -1222,6 +1469,15 @@ export function advanceCivilization(
     systemRng: systemRng.save(),
     operationCount: civilization.operationCount + civilization.agents.length + pathExpansions,
   });
+  while (next.society.lastTick + SOCIETY_PULSE_TICKS <= tick) {
+    const societyPulse = applySocietyPulse(
+      next,
+      terrain,
+      next.society.lastTick + SOCIETY_PULSE_TICKS,
+    );
+    next = societyPulse.civilization;
+    events.push(...societyPulse.events);
+  }
   assertCivilizationInvariants(next, terrain);
   return Object.freeze({ civilization: next, events: Object.freeze(events) });
 }
@@ -1232,7 +1488,10 @@ export function attachFactualMemories(
     readonly id: number;
     readonly tick: number;
     readonly kind: string;
+    readonly summary: string;
+    readonly subjectKind: EntityKind;
     readonly subjectId: number;
+    readonly targetKind: EntityKind;
     readonly targetId: number;
   }[],
 ): CivilizationState {
@@ -1240,9 +1499,16 @@ export function attachFactualMemories(
   const bySubject = new Map<number, readonly FactualMemory[]>();
   for (const event of events) {
     const recipients =
-      event.subjectId === 0
-        ? civilization.agents.filter((agent) => agent.alive)
-        : civilization.agents.filter((agent) => agent.id === event.subjectId);
+      event.subjectKind === 'person'
+        ? civilization.agents.filter((agent) => agent.id === event.subjectId)
+        : event.subjectKind === 'household'
+          ? civilization.agents.filter(
+              (agent) =>
+                agent.alive &&
+                civilization.society.people.find((person) => person.id === agent.id)
+                  ?.householdId === event.subjectId,
+            )
+          : civilization.agents.filter((agent) => agent.alive);
     for (const agent of recipients) {
       const existing = bySubject.get(agent.id) ?? agent.memories;
       bySubject.set(
@@ -1255,6 +1521,8 @@ export function attachFactualMemories(
               eventId: event.id,
               tick: event.tick,
               kind: event.kind,
+              summary: event.summary,
+              targetKind: event.targetKind,
               targetId: event.targetId,
             }),
           ].slice(-MAX_AGENT_MEMORIES),
@@ -1295,7 +1563,7 @@ export function isViableSettlement(civilization: CivilizationState): boolean {
     0,
   );
   return (
-    summary.aliveAgents === SETTLEMENT_FOUNDER_COUNT &&
+    summary.aliveAgents >= SETTLEMENT_FOUNDER_COUNT &&
     summary.operationalShelters >= 1 &&
     summary.stockpile.food >= 12 &&
     summary.stockpile.water >= 12 &&
@@ -1348,6 +1616,7 @@ export function civilizationDto(
     pathDemand: Array.from(civilization.pathDemand),
     relationships: civilization.relationships.map((relationship) => ({ ...relationship })),
     resourceDepletion: civilization.resourceDepletion.map((entry) => ({ ...entry })),
+    society: societyDto(civilization.society),
     stockpile: { ...civilization.stockpile },
     structures: civilization.structures.map((structure) => ({ ...structure })),
     systemRng: [...civilization.systemRng],
@@ -1358,6 +1627,7 @@ export function assertCivilizationInvariants(
   civilization: CivilizationState,
   terrain: SettlementTerrain,
 ): void {
+  assertSocietyInvariants(civilization.society);
   if (civilization.pathDemand.length !== terrain.width * terrain.height)
     throw new Error('Path demand dimensions are invalid.');
   for (const value of [
@@ -1401,6 +1671,15 @@ export function assertCivilizationInvariants(
       throw new Error('Agent knowledge exceeds its bound.');
     if (agent.memories.length > MAX_AGENT_MEMORIES)
       throw new Error('Agent memories exceed their bound.');
+    for (const memory of agent.memories) {
+      if (
+        memory.summary.length < 1 ||
+        memory.summary.length > 160 ||
+        memory.targetId < 0 ||
+        (memory.targetKind === 'world' ? memory.targetId !== 0 : memory.targetId === 0)
+      )
+        throw new Error('Agent factual memory is invalid.');
+    }
     if (
       agent.plan.length > MAX_AGENT_PLAN_STEPS ||
       agent.planIndex < 0 ||
@@ -1412,6 +1691,17 @@ export function assertCivilizationInvariants(
       throw new Error('Agent plan or route exceeds its bound.');
   }
   const agentIds = new Set(civilization.agents.map((agent) => agent.id));
+  const societyPersonIds = new Set(civilization.society.people.map((person) => person.id));
+  if (
+    agentIds.size !== societyPersonIds.size ||
+    [...agentIds].some((id) => !societyPersonIds.has(id)) ||
+    civilization.nextAgentId !== civilization.society.nextPersonId
+  )
+    throw new Error('Settlement agents and society people must share one stable ID graph.');
+  for (const person of civilization.society.people) {
+    if (civilization.agents.find((agent) => agent.id === person.id)?.name !== person.name)
+      throw new Error('Settlement and society person names must match.');
+  }
   const relationshipPairs = new Set<string>();
   for (const relationship of civilization.relationships) {
     if (

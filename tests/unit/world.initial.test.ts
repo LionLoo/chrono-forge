@@ -67,7 +67,12 @@ describe('initial world generation', () => {
   it('creates the documented dense chunked default world', () => {
     const world = createInitialWorld(seed);
 
-    expect(world.config).toStrictEqual({ width: 96, height: 64, chunkSize: 32 });
+    expect(world.config).toStrictEqual({
+      width: 96,
+      height: 64,
+      chunkSize: 32,
+      societyYearTicks: 100_000,
+    });
     expect(world.chunks).toHaveLength(6);
     expect(world.chunks.map((chunk) => chunk.id)).toStrictEqual([0, 1, 2, 3, 4, 5]);
     for (const field of [
@@ -96,7 +101,10 @@ describe('initial world generation', () => {
         id: 1,
         tick: 0,
         kind: 'world-generated',
+        summary: 'The founding world formed.',
+        subjectKind: 'world',
         subjectId: 0,
+        targetKind: 'world',
         targetId: 0,
         tileIndex: -1,
         amount: 0,
@@ -105,7 +113,10 @@ describe('initial world generation', () => {
         id: 2,
         tick: 0,
         kind: 'founders-arrived',
+        summary: '6 named founders established the first settlement.',
+        subjectKind: 'world',
         subjectId: 0,
+        targetKind: 'world',
         targetId: 0,
         tileIndex: world.civilization.centerTileIndex,
         amount: 6,

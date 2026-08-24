@@ -1,6 +1,7 @@
 import type { WorldConfig, WorldSeed } from '../simulation/world';
+import { ACCELERATED_YEAR_TICKS, NORMAL_YEAR_TICKS } from '../simulation/society';
 
-export const WORKER_PROTOCOL_VERSION = 2;
+export const WORKER_PROTOCOL_VERSION = 3;
 
 export type WorkerProtocolVersion = typeof WORKER_PROTOCOL_VERSION;
 export type RunMode = 'paused' | 'running';
@@ -45,6 +46,63 @@ export interface SettlementSummary {
   readonly activeConstruction: number;
 }
 
+export interface SocietyBiographyProjection {
+  readonly eventId: number;
+  readonly tick: number;
+  readonly summary: string;
+}
+
+export interface SocietyPersonProjection {
+  readonly id: number;
+  readonly name: string;
+  readonly ageYears: number;
+  readonly lifeStage: string;
+  readonly status: string;
+  readonly role: string;
+  readonly cultureName: string;
+  readonly householdName: string;
+  readonly biography: readonly SocietyBiographyProjection[];
+}
+
+export interface SocietyCultureProjection {
+  readonly id: number;
+  readonly name: string;
+  readonly preference: string;
+  readonly belief: string;
+  readonly tradition: string;
+  readonly architectureStyle: string;
+}
+
+export interface SocietyTimelineProjection {
+  readonly id: number;
+  readonly tick: number;
+  readonly summary: string;
+}
+
+export interface SocietyDashboardProjection {
+  readonly year: number;
+  readonly population: number;
+  readonly households: number;
+  readonly meals: number;
+  readonly tools: number;
+  readonly exchangeVolume: number;
+  readonly transportDemand: number;
+  readonly scarcity: number;
+  readonly stability: number;
+  readonly inequality: number;
+  readonly government: string;
+  readonly leaderName: string;
+}
+
+export interface SocietyProjection {
+  readonly dashboard: SocietyDashboardProjection;
+  readonly people: readonly SocietyPersonProjection[];
+  readonly cultures: readonly SocietyCultureProjection[];
+  readonly timeline: readonly SocietyTimelineProjection[];
+  readonly timelineOffset: number;
+  readonly timelineTotal: number;
+}
+
 export interface WorldFrameProjection {
   readonly version: WorkerProtocolVersion;
   readonly width: number;
@@ -70,6 +128,7 @@ export interface WorldFrameProjection {
   /** Normalized authoritative units from 0 through 1,000. */
   readonly structureCondition: Uint16Array;
   readonly settlementSummary: SettlementSummary;
+  readonly society: SocietyProjection;
 }
 
 interface RequestBase {
@@ -112,6 +171,11 @@ export interface RequestSaveRequest extends RequestBase {
   readonly type: 'requestSave';
 }
 
+export interface RequestTimelinePageRequest extends RequestBase {
+  readonly type: 'requestTimelinePage';
+  readonly offset: number;
+}
+
 export interface PerformOfflineCatchUpRequest extends RequestBase {
   readonly type: 'performOfflineCatchUp';
   readonly elapsedMilliseconds: number;
@@ -126,6 +190,7 @@ export type UiToWorkerMessage =
   | SetRunModeRequest
   | AdvanceTicksRequest
   | RequestSaveRequest
+  | RequestTimelinePageRequest
   | PerformOfflineCatchUpRequest;
 
 export const INVALID_REQUEST_ID = 'invalid-request';
@@ -173,13 +238,25 @@ function optionalConfig(value: unknown): Partial<WorldConfig> | undefined | 'inv
   if (!isRecord(value)) {
     return 'invalid';
   }
-  const config: { width?: number; height?: number; chunkSize?: number } = {};
-  for (const key of ['width', 'height', 'chunkSize'] as const) {
+  const config: {
+    width?: number;
+    height?: number;
+    chunkSize?: number;
+    societyYearTicks?: number;
+  } = {};
+  for (const key of ['width', 'height', 'chunkSize', 'societyYearTicks'] as const) {
     const candidate = value[key];
     if (candidate === undefined) {
       continue;
     }
     if (!isNonNegativeSafeInteger(candidate) || candidate < 1) {
+      return 'invalid';
+    }
+    if (
+      key === 'societyYearTicks' &&
+      candidate !== NORMAL_YEAR_TICKS &&
+      candidate !== ACCELERATED_YEAR_TICKS
+    ) {
       return 'invalid';
     }
     config[key] = candidate;
@@ -311,6 +388,18 @@ export function validateUiToWorkerMessage(input: unknown): WorkerRequestValidati
         kind: 'valid',
         message: { type: 'requestSave', protocolVersion: WORKER_PROTOCOL_VERSION, requestId },
       };
+    case 'requestTimelinePage':
+      return isNonNegativeSafeInteger(input.offset)
+        ? {
+            kind: 'valid',
+            message: {
+              type: 'requestTimelinePage',
+              protocolVersion: WORKER_PROTOCOL_VERSION,
+              requestId,
+              offset: input.offset,
+            },
+          }
+        : invalid(requestId, 'requestTimelinePage.offset must be a non-negative safe integer.');
     case 'performOfflineCatchUp':
       return isNonNegativeSafeInteger(input.elapsedMilliseconds) &&
         isNonNegativeSafeInteger(input.rate) &&
@@ -368,6 +457,13 @@ export interface SaveSnapshotResponse extends ResponseBase {
   readonly snapshot: string;
 }
 
+export interface TimelinePageResponse extends ResponseBase {
+  readonly type: 'timelinePage';
+  readonly offset: number;
+  readonly total: number;
+  readonly timeline: readonly SocietyTimelineProjection[];
+}
+
 export interface SimulationMetrics {
   readonly tick: number;
   readonly runMode: RunMode;
@@ -396,7 +492,10 @@ export interface WorkerEvent {
   readonly id: number;
   readonly tick: number;
   readonly type: string;
+  readonly summary: string;
+  readonly subjectKind: string;
   readonly subjectId: number;
+  readonly targetKind: string;
   readonly targetId: number;
   readonly tileIndex: number;
   readonly amount: number;
@@ -408,6 +507,7 @@ export type WorkerToUiMessage =
   | FrameDeltaResponse
   | EventBatchResponse
   | SaveSnapshotResponse
+  | TimelinePageResponse
   | MetricsResponse
   | FaultResponse;
 

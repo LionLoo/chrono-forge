@@ -35,6 +35,53 @@ function versionOneSnapshot(worldJson: string): string {
   });
 }
 
+function versionTwoSnapshot(): {
+  readonly snapshot: string;
+  readonly source: ReturnType<typeof stepWorld>;
+} {
+  const source = stepWorld(createInitialWorld([31, 37, 41, 43]), 15_000);
+  const envelope = JSON.parse(serializeWorldSnapshot(source)) as {
+    payload: Record<string, unknown>;
+  };
+  const payload = { ...envelope.payload };
+  const config = payload.config as Record<string, unknown>;
+  payload.config = { chunkSize: config.chunkSize, height: config.height, width: config.width };
+  const civilization = { ...(payload.civilization as Record<string, unknown>) };
+  delete civilization.society;
+  civilization.agents = (civilization.agents as Record<string, unknown>[]).map((agent) => ({
+    ...agent,
+    memories: (agent.memories as Record<string, unknown>[]).map((memory) => ({
+      id: memory.id,
+      eventId: memory.eventId,
+      tick: memory.tick,
+      kind: memory.kind,
+      targetId: memory.targetId,
+    })),
+  }));
+  payload.civilization = civilization;
+  payload.eventLog = (payload.eventLog as Record<string, unknown>[]).map((event) => ({
+    amount: event.amount,
+    id: event.id,
+    kind: event.kind,
+    subjectId: event.subjectId,
+    targetId: event.targetId,
+    tick: event.tick,
+    tileIndex: event.tileIndex,
+  }));
+  const payloadJson = JSON.stringify(payload);
+  return {
+    source,
+    snapshot: JSON.stringify({
+      checksum: hashCanonicalJson(payloadJson),
+      contentVersion: 2,
+      engineVersion: 2,
+      format: WORLD_SNAPSHOT_FORMAT,
+      formatVersion: 2,
+      payload,
+    }),
+  };
+}
+
 describe('versioned world snapshots', () => {
   it('round-trips canonical authority without sharing mutable arrays', () => {
     const original = stepWorld(createInitialWorld([7, 11, 13, 17], { width: 8, height: 6 }), 4321);
@@ -55,7 +102,7 @@ describe('versioned world snapshots', () => {
     ['v0', JSON.stringify(legacyWorldV0)],
     ['v1', versionOneSnapshot(legacyWorldV0.worldJson)],
   ])(
-    'migrates the committed legacy %s envelope to a founded v2 civilization',
+    'migrates the committed legacy %s envelope to a founded v3 civilization',
     (_version, legacy) => {
       const migrated = migrateWorldSnapshot(legacy);
       const loaded = deserializeWorldSnapshot(migrated);
@@ -81,6 +128,8 @@ describe('versioned world snapshots', () => {
             eventId: 2,
             tick: 0,
             kind: 'founders-arrived',
+            summary: '6 named founders established the first settlement.',
+            targetKind: 'world',
             targetId: 0,
           },
         ]),
@@ -119,10 +168,179 @@ describe('versioned world snapshots', () => {
           eventId: 2,
           tick: Number.MAX_SAFE_INTEGER,
           kind: 'founders-arrived',
+          summary: '6 named founders established the first settlement.',
+          targetKind: 'world',
           targetId: 0,
         },
       ]),
     );
+  });
+
+  it('migrates a canonical v2 fixture without changing event identities or agent names', () => {
+    const { snapshot, source } = versionTwoSnapshot();
+    const loaded = deserializeWorldSnapshot(migrateWorldSnapshot(snapshot));
+
+    expect(JSON.parse(migrateWorldSnapshot(snapshot))).toMatchObject({ formatVersion: 3 });
+    expect(loaded.eventLog.map((event) => [event.id, event.kind])).toStrictEqual(
+      source.eventLog.map((event) => [event.id, event.kind]),
+    );
+    expect(loaded.eventLog).toHaveLength(source.eventLog.length);
+    expect(loaded.civilization.agents.map((agent) => agent.name)).toStrictEqual(
+      source.civilization.agents.map((agent) => agent.name),
+    );
+    expect(loaded.civilization.society.people.map((person) => person.name)).toStrictEqual(
+      source.civilization.agents.map((agent) => agent.name),
+    );
+  });
+
+  it.each([
+    [
+      'invalid parent reference',
+      (payload: Record<string, unknown>) => {
+        const people = (
+          (payload.civilization as Record<string, unknown>).society as Record<string, unknown>
+        ).people as Record<string, unknown>[];
+        people[5]!.generation = 1;
+        people[5]!.parentIds = [1, 999];
+        people[5]!.birthTick = -1_800_000;
+      },
+      /parent/i,
+    ],
+    [
+      'invalid household reference',
+      (payload: Record<string, unknown>) => {
+        const people = (
+          (payload.civilization as Record<string, unknown>).society as Record<string, unknown>
+        ).people as Record<string, unknown>[];
+        people[0]!.householdId = 999;
+      },
+      /household/i,
+    ],
+    [
+      'invalid group member reference',
+      (payload: Record<string, unknown>) => {
+        const groups = (
+          (payload.civilization as Record<string, unknown>).society as Record<string, unknown>
+        ).groups as Record<string, unknown>[];
+        groups[0]!.memberIds = [999];
+      },
+      /group member/i,
+    ],
+    [
+      'invalid institution reference',
+      (payload: Record<string, unknown>) => {
+        const institution = (
+          (payload.civilization as Record<string, unknown>).society as Record<string, unknown>
+        ).institution as Record<string, unknown>;
+        institution.leaderId = 999;
+      },
+      /institution/i,
+    ],
+    [
+      'invalid offer reference',
+      (payload: Record<string, unknown>) => {
+        const society = (payload.civilization as Record<string, unknown>).society as Record<
+          string,
+          unknown
+        >;
+        society.offers = [
+          {
+            amount: 1,
+            buyerHouseholdId: 999,
+            fulfilledAmount: 0,
+            id: 1,
+            kind: 'meal',
+            price: 1,
+            sellerHouseholdId: 1,
+            transportDemand: 0,
+          },
+        ];
+        society.nextOfferId = 2;
+      },
+      /offer household/i,
+    ],
+    [
+      'invalid biography event reference',
+      (payload: Record<string, unknown>) => {
+        const people = (
+          (payload.civilization as Record<string, unknown>).society as Record<string, unknown>
+        ).people as Record<string, unknown>[];
+        people[0]!.biographyEventIds = [999];
+      },
+      /biography/i,
+    ],
+    [
+      'invalid pending biography structure reference',
+      (payload: Record<string, unknown>) => {
+        const society = (payload.civilization as Record<string, unknown>).society as Record<
+          string,
+          unknown
+        >;
+        society.pendingBiographyFacts = [
+          {
+            kind: 'recorded-structure',
+            personId: 1,
+            source: { id: 1, kind: 'person' },
+            summary: 'Recorded an impossible structure.',
+            target: { id: 999, kind: 'structure' },
+          },
+        ];
+      },
+      /unknown structure/i,
+    ],
+    [
+      'invalid typed event reference',
+      (payload: Record<string, unknown>) => {
+        const events = payload.eventLog as Record<string, unknown>[];
+        events[0]!.targetKind = 'person';
+        events[0]!.targetId = 999;
+      },
+      /event target/i,
+    ],
+    [
+      'unsorted society IDs',
+      (payload: Record<string, unknown>) => {
+        const cultures = (
+          (payload.civilization as Record<string, unknown>).society as Record<string, unknown>
+        ).cultures as Record<string, unknown>[];
+        const first = cultures[0]!;
+        cultures[0] = cultures[1]!;
+        cultures[1] = first;
+      },
+      /sorted/i,
+    ],
+    [
+      'invalid economy enum',
+      (payload: Record<string, unknown>) => {
+        const people = (
+          (payload.civilization as Record<string, unknown>).society as Record<string, unknown>
+        ).people as Record<string, unknown>[];
+        people[0]!.role = 'invalid';
+      },
+      /role/i,
+    ],
+    [
+      'invalid calendar',
+      (payload: Record<string, unknown>) => {
+        (payload.config as Record<string, unknown>).societyYearTicks = 17;
+      },
+      /calendar/i,
+    ],
+    [
+      'invalid factual summary',
+      (payload: Record<string, unknown>) => {
+        (payload.eventLog as Record<string, unknown>[])[0]!.summary = '';
+      },
+      /summary/i,
+    ],
+  ])('rejects checksummed v3 authority with %s', (_label, mutate, expectedError) => {
+    const record = JSON.parse(serializeWorldSnapshot(createInitialWorld([3, 5, 7, 11]))) as {
+      checksum: string;
+      payload: Record<string, unknown>;
+    };
+    mutate(record.payload);
+    record.checksum = hashCanonicalJson(JSON.stringify(record.payload));
+    expect(() => deserializeWorldSnapshot(JSON.stringify(record))).toThrow(expectedError);
   });
 
   it('rejects checksum corruption, noncanonical payloads, invalid fields, and future versions', () => {

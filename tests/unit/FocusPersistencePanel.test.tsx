@@ -36,7 +36,9 @@ function createSimulation(): {
       loadSnapshot,
       performOfflineCatchUp,
       requestSave: vi.fn<() => Promise<string>>().mockResolvedValue(snapshot),
+      requestTimelinePage: vi.fn(),
       status: 'ready',
+      timeline: { entries: [], offset: 0, total: 0 },
     },
     loadSnapshot,
     performOfflineCatchUp,
@@ -68,7 +70,9 @@ function createStatefulSimulation(initialWorld?: WorldState): {
         await Promise.resolve();
         return serializeWorldSnapshot(world);
       }),
+      requestTimelinePage: vi.fn(),
       status: 'ready',
+      timeline: { entries: [], offset: 0, total: 0 },
     },
     currentTick: () => world.tick,
     advanceTicks,

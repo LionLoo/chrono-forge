@@ -1,6 +1,13 @@
 import { hashCanonicalJson } from '../canonical';
 import { deriveXoshiro128State, Xoshiro128StarStar } from '../random';
 import {
+  ACCELERATED_YEAR_TICKS,
+  NORMAL_YEAR_TICKS,
+  attachSocietyBiographyEventIds,
+  type EntityKind,
+  type SocietyAuthoritativeEvent,
+} from '../society';
+import {
   advanceCivilization,
   assertCivilizationInvariants,
   attachFactualMemories,
@@ -28,6 +35,7 @@ export interface WorldConfig {
   readonly width: number;
   readonly height: number;
   readonly chunkSize: number;
+  readonly societyYearTicks: number;
 }
 
 export interface WorldChunk {
@@ -42,14 +50,20 @@ export interface WorldEvent {
   readonly id: number;
   readonly tick: number;
   readonly kind: string;
+  readonly summary: string;
+  readonly subjectKind: EntityKind;
   readonly subjectId: number;
+  readonly targetKind: EntityKind;
   readonly targetId: number;
   readonly tileIndex: number;
   readonly amount: number;
 }
 
 export interface WorldEventDetails {
+  readonly summary?: string;
+  readonly subjectKind?: EntityKind;
   readonly subjectId?: number;
+  readonly targetKind?: EntityKind;
   readonly targetId?: number;
   readonly tileIndex?: number;
   readonly amount?: number;
@@ -84,10 +98,44 @@ export interface WorldState extends WorldTileFields {
   readonly tiles: WorldTileFields;
 }
 
+const ENTITY_KINDS: readonly EntityKind[] = Object.freeze([
+  'person',
+  'structure',
+  'household',
+  'culture',
+  'group',
+  'institution',
+  'world',
+]);
+
+function isEntityKind(value: unknown): value is EntityKind {
+  return typeof value === 'string' && (ENTITY_KINDS as readonly string[]).includes(value);
+}
+
+function worldReferenceExists(state: WorldState, kind: EntityKind, id: number): boolean {
+  switch (kind) {
+    case 'world':
+      return id === 0;
+    case 'person':
+      return state.civilization.agents.some((agent) => agent.id === id);
+    case 'structure':
+      return state.civilization.structures.some((structure) => structure.id === id);
+    case 'household':
+      return state.civilization.society.households.some((household) => household.id === id);
+    case 'culture':
+      return state.civilization.society.cultures.some((culture) => culture.id === id);
+    case 'group':
+      return state.civilization.society.groups.some((group) => group.id === id);
+    case 'institution':
+      return state.civilization.society.institution.id === id;
+  }
+}
+
 export const DEFAULT_WORLD_CONFIG: WorldConfig = Object.freeze({
   width: 96,
   height: 64,
   chunkSize: 32,
+  societyYearTicks: NORMAL_YEAR_TICKS,
 });
 
 const MAX_WORLD_TILES = 1_000_000;
@@ -118,6 +166,7 @@ function normalizeConfig(partialConfig: Partial<WorldConfig> | undefined): World
     width: partialConfig?.width ?? DEFAULT_WORLD_CONFIG.width,
     height: partialConfig?.height ?? DEFAULT_WORLD_CONFIG.height,
     chunkSize: partialConfig?.chunkSize ?? DEFAULT_WORLD_CONFIG.chunkSize,
+    societyYearTicks: partialConfig?.societyYearTicks ?? DEFAULT_WORLD_CONFIG.societyYearTicks,
   };
 
   if (
@@ -127,6 +176,8 @@ function normalizeConfig(partialConfig: Partial<WorldConfig> | undefined): World
     config.width < 1 ||
     config.height < 1 ||
     config.chunkSize < 1 ||
+    (config.societyYearTicks !== NORMAL_YEAR_TICKS &&
+      config.societyYearTicks !== ACCELERATED_YEAR_TICKS) ||
     config.width * config.height > MAX_WORLD_TILES
   ) {
     throw new RangeError('World dimensions must be positive integers within the tile limit.');
@@ -368,6 +419,25 @@ export function createInitialWorld(
     }
   }
 
+  const hasFoundingTile = Array.from({ length: tileCount }, (_, index) => index).some(
+    (index) =>
+      water[index] === 0 && (habitability[index] ?? 0) >= 80 && (hazard[index] ?? 255) < 180,
+  );
+  if (!hasFoundingTile) {
+    const index = Math.trunc(config.height / 2) * config.width + Math.trunc(config.width / 2);
+    elevation[index] = Math.max(elevation[index] ?? 0, 160);
+    water[index] = 0;
+    biome[index] = Biome.Grassland;
+    freshWater[index] = Math.max(freshWater[index] ?? 0, 120);
+    food[index] = Math.max(food[index] ?? 0, 160);
+    timber[index] = Math.max(timber[index] ?? 0, 80);
+    stone[index] = Math.max(stone[index] ?? 0, 40);
+    habitability[index] = Math.max(habitability[index] ?? 0, 100);
+    hazard[index] = Math.min(hazard[index] ?? 255, 40);
+    plants[index] = Math.max(plants[index] ?? 0, 180);
+    animals[index] = Math.max(animals[index] ?? 0, 60);
+  }
+
   const tiles: WorldTileFields = Object.freeze({
     elevation,
     water,
@@ -400,13 +470,21 @@ export function createInitialWorld(
       (habitability[index] ?? 0) >= 80 &&
       (hazard[index] ?? 255) < 180,
   });
-  const civilization = createInitialCivilization(normalizedSeed, settlementTerrain);
+  const civilization = createInitialCivilization(
+    normalizedSeed,
+    settlementTerrain,
+    0,
+    config.societyYearTicks,
+  );
   const initialEvents: readonly WorldEvent[] = Object.freeze([
     Object.freeze({
       id: 1,
       tick: 0,
       kind: 'world-generated',
+      summary: 'The founding world formed.',
+      subjectKind: 'world',
       subjectId: 0,
+      targetKind: 'world',
       targetId: 0,
       tileIndex: -1,
       amount: 0,
@@ -415,7 +493,10 @@ export function createInitialWorld(
       id: 2,
       tick: 0,
       kind: 'founders-arrived',
+      summary: `${SETTLEMENT_FOUNDER_COUNT} named founders established the first settlement.`,
+      subjectKind: 'world',
       subjectId: 0,
+      targetKind: 'world',
       targetId: 0,
       tileIndex: civilization.centerTileIndex,
       amount: SETTLEMENT_FOUNDER_COUNT,
@@ -474,7 +555,21 @@ export function stepWorld(state: WorldState, ticks = 1): WorldState {
     }
     next = Object.freeze({
       ...next,
-      civilization: attachFactualMemories(next.civilization, createdEvents),
+      civilization: Object.freeze({
+        ...attachFactualMemories(next.civilization, createdEvents),
+        society: attachSocietyBiographyEventIds(
+          next.civilization.society,
+          createdEvents.map((event): SocietyAuthoritativeEvent =>
+            Object.freeze({
+              id: event.id,
+              kind: event.kind,
+              summary: event.summary,
+              subject: Object.freeze({ kind: event.subjectKind, id: event.subjectId }),
+              target: Object.freeze({ kind: event.targetKind, id: event.targetId }),
+            }),
+          ),
+        ),
+      }),
     });
     assertWorldInvariants(next);
     pulseTick += SETTLEMENT_ACTION_PULSE_TICKS;
@@ -503,10 +598,15 @@ export function appendWorldEvent(
     throw new RangeError('World event id and tick must remain valid safe integers.');
   }
   const subjectId = details.subjectId ?? 0;
+  const subjectKind = details.subjectKind ?? 'world';
   const targetId = details.targetId ?? 0;
+  const targetKind = details.targetKind ?? 'world';
   const tileIndex = details.tileIndex ?? -1;
   const amount = details.amount ?? 0;
+  const summary = details.summary ?? `Recorded ${kind} at tick ${eventTick}.`;
   if (
+    !isEntityKind(subjectKind) ||
+    !isEntityKind(targetKind) ||
     !Number.isSafeInteger(subjectId) ||
     subjectId < 0 ||
     !Number.isSafeInteger(targetId) ||
@@ -515,7 +615,13 @@ export function appendWorldEvent(
     tileIndex < -1 ||
     tileIndex >= state.config.width * state.config.height ||
     !Number.isSafeInteger(amount) ||
-    amount < 0
+    amount < 0 ||
+    summary.length < 1 ||
+    summary.length > 160 ||
+    (subjectKind === 'world' ? subjectId !== 0 : subjectId === 0) ||
+    (targetKind === 'world' ? targetId !== 0 : targetId === 0) ||
+    !worldReferenceExists(state, subjectKind, subjectId) ||
+    !worldReferenceExists(state, targetKind, targetId)
   ) {
     throw new RangeError('World event references must be canonical non-negative IDs and amounts.');
   }
@@ -523,7 +629,10 @@ export function appendWorldEvent(
     id: state.nextEventId,
     tick: eventTick,
     kind,
+    summary,
+    subjectKind,
     subjectId,
+    targetKind,
     targetId,
     tileIndex,
     amount,
@@ -533,6 +642,123 @@ export function appendWorldEvent(
     nextEventId: state.nextEventId + 1,
     eventLog: Object.freeze([...state.eventLog, event]),
   });
+}
+
+const SUPPLY_SHORTAGE_COLLAPSE_SEVERITY = 75;
+
+function shortageRemainder(value: number, severity: number, protectedAmount = 0): number {
+  const removed = Math.max(1, Math.ceil((value * severity) / 100));
+  return Math.max(Math.min(value, protectedAmount), value - removed);
+}
+
+/**
+ * Applies a recorded M4 economic supply shock without advancing logical time.
+ * Recovery, migration, and mortality remain consequences of subsequent normal pulses.
+ */
+export function applyRecordedSupplyShortage(state: WorldState, severity: number): WorldState {
+  assertWorldInvariants(state);
+  if (!Number.isSafeInteger(severity) || severity < 1 || severity > 100) {
+    throw new RangeError('Supply shortage severity must be an integer from 1 through 100.');
+  }
+  const stockpile = Object.freeze({
+    food: shortageRemainder(state.civilization.stockpile.food, severity),
+    water: shortageRemainder(state.civilization.stockpile.water, severity),
+    timber: shortageRemainder(state.civilization.stockpile.timber, severity),
+    stone: shortageRemainder(state.civilization.stockpile.stone, severity),
+  });
+  const households = Object.freeze(
+    state.civilization.society.households.map((household) =>
+      Object.freeze({
+        ...household,
+        meals: shortageRemainder(household.meals, severity, household.id % 2),
+        tools: shortageRemainder(household.tools, severity, (household.id + 1) % 2),
+      }),
+    ),
+  );
+  const healthLoss = Math.max(1, severity - 1);
+  const agents = Object.freeze(
+    state.civilization.agents.map((agent) =>
+      !agent.alive
+        ? agent
+        : Object.freeze({
+            ...agent,
+            hunger: clamp(agent.hunger + severity, 0, 100),
+            thirst: clamp(agent.thirst + severity, 0, 100),
+            health: Math.max(1, agent.health - healthLoss),
+          }),
+    ),
+  );
+  const agentById = new Map(agents.map((agent) => [agent.id, agent]));
+  const people = Object.freeze(
+    state.civilization.society.people.map((person) => {
+      const agent = agentById.get(person.id);
+      return agent === undefined
+        ? person
+        : Object.freeze({ ...person, alive: agent.alive, health: agent.health });
+    }),
+  );
+  let damaged = false;
+  const structures = Object.freeze(
+    state.civilization.structures.map((structure) => {
+      if (damaged || structure.kind !== 'shelter' || structure.status !== 'operational') {
+        return structure;
+      }
+      damaged = true;
+      const condition = clamp(structure.condition - Math.max(1, severity * 6), 0, 1_000);
+      return Object.freeze({
+        ...structure,
+        condition,
+        status: condition <= 150 ? 'damaged' : 'operational',
+        changedTick: state.tick,
+      });
+    }),
+  );
+  const enteredCollapse =
+    !state.civilization.society.collapsed && severity >= SUPPLY_SHORTAGE_COLLAPSE_SEVERITY;
+  const society = Object.freeze({
+    ...state.civilization.society,
+    people,
+    households,
+    scarcity: Math.max(state.civilization.society.scarcity, severity),
+    stability: clamp(state.civilization.society.stability - severity, 0, 100),
+    collapsed:
+      state.civilization.society.collapsed || severity >= SUPPLY_SHORTAGE_COLLAPSE_SEVERITY,
+    operationCount: state.civilization.society.operationCount + 1,
+  });
+  const shocked: WorldState = Object.freeze({
+    ...state,
+    civilization: Object.freeze({
+      ...state.civilization,
+      stockpile,
+      agents,
+      structures,
+      society,
+      operationCount: state.civilization.operationCount + 1,
+    }),
+  });
+  assertWorldInvariants(shocked);
+  let recorded = appendWorldEvent(shocked, 'supply-shortage', state.tick, {
+    summary: `A recorded supply shortage of severity ${severity} depleted settlement stores.`,
+    subjectKind: 'world',
+    subjectId: 0,
+    targetKind: 'institution',
+    targetId: society.institution.id,
+    tileIndex: state.civilization.centerTileIndex,
+    amount: severity,
+  });
+  if (enteredCollapse) {
+    recorded = appendWorldEvent(recorded, 'settlement-collapsed', state.tick, {
+      summary: 'The settlement collapsed under a recorded supply shortage.',
+      subjectKind: 'institution',
+      subjectId: society.institution.id,
+      targetKind: 'world',
+      targetId: 0,
+      tileIndex: state.civilization.centerTileIndex,
+      amount: severity,
+    });
+  }
+  assertWorldInvariants(recorded);
+  return recorded;
 }
 
 export function tileIndex(state: WorldState, x: number, y: number): number {
@@ -576,6 +802,30 @@ export function assertWorldInvariants(state: WorldState): void {
   assertCivilizationInvariants(state.civilization, settlementTerrain(state));
   const agentIds = new Set(state.civilization.agents.map((agent) => agent.id));
   const structureIds = new Set(state.civilization.structures.map((structure) => structure.id));
+  const householdIds = new Set(
+    state.civilization.society.households.map((household) => household.id),
+  );
+  const cultureIds = new Set(state.civilization.society.cultures.map((culture) => culture.id));
+  const groupIds = new Set(state.civilization.society.groups.map((group) => group.id));
+  const institutionIds = new Set([state.civilization.society.institution.id]);
+  const referenceExists = (kind: EntityKind, id: number): boolean => {
+    switch (kind) {
+      case 'world':
+        return id === 0;
+      case 'person':
+        return agentIds.has(id);
+      case 'structure':
+        return structureIds.has(id);
+      case 'household':
+        return householdIds.has(id);
+      case 'culture':
+        return cultureIds.has(id);
+      case 'group':
+        return groupIds.has(id);
+      case 'institution':
+        return institutionIds.has(id);
+    }
+  };
   const eventsById = new Map<number, WorldEvent>();
   let previousEventId = 0;
   for (const event of state.eventLog) {
@@ -588,6 +838,9 @@ export function assertWorldInvariants(state: WorldState): void {
       typeof event.kind !== 'string' ||
       event.kind.length < 1 ||
       event.kind.length > 64 ||
+      typeof event.summary !== 'string' ||
+      event.summary.length < 1 ||
+      event.summary.length > 160 ||
       !Number.isSafeInteger(event.subjectId) ||
       event.subjectId < 0 ||
       !Number.isSafeInteger(event.targetId) ||
@@ -599,9 +852,9 @@ export function assertWorldInvariants(state: WorldState): void {
       event.amount < 0
     )
       throw new Error('World event invariant failed.');
-    if (event.subjectId !== 0 && !agentIds.has(event.subjectId))
+    if (!referenceExists(event.subjectKind, event.subjectId))
       throw new Error('World event subject is invalid.');
-    if (event.targetId !== 0 && !agentIds.has(event.targetId) && !structureIds.has(event.targetId))
+    if (!referenceExists(event.targetKind, event.targetId))
       throw new Error('World event target is invalid.');
     eventsById.set(event.id, event);
     previousEventId = event.id;
@@ -612,10 +865,26 @@ export function assertWorldInvariants(state: WorldState): void {
       if (
         memory.tick !== sourceEvent?.tick ||
         memory.kind !== sourceEvent?.kind ||
+        memory.summary !== sourceEvent?.summary ||
+        memory.targetKind !== sourceEvent?.targetKind ||
         memory.targetId !== sourceEvent?.targetId
       ) {
         throw new Error('Agent memory must match its factual source event.');
       }
+    }
+  }
+  for (const person of state.civilization.society.people) {
+    let previousBiographyId = 0;
+    for (const eventId of person.biographyEventIds) {
+      const sourceEvent = eventsById.get(eventId);
+      if (
+        eventId <= previousBiographyId ||
+        sourceEvent === undefined ||
+        (sourceEvent.subjectKind !== 'person' && sourceEvent.targetKind !== 'person') ||
+        (sourceEvent.subjectId !== person.id && sourceEvent.targetId !== person.id)
+      )
+        throw new Error('Society biography must reference a matching factual world event.');
+      previousBiographyId = eventId;
     }
   }
   if (!Number.isSafeInteger(state.nextEventId) || state.nextEventId <= previousEventId)
@@ -628,7 +897,10 @@ export function canonicalWorldJson(state: WorldState): string {
     amount: event.amount,
     id: event.id,
     kind: event.kind,
+    subjectKind: event.subjectKind,
     subjectId: event.subjectId,
+    summary: event.summary,
+    targetKind: event.targetKind,
     targetId: event.targetId,
     tick: event.tick,
     tileIndex: event.tileIndex,
@@ -647,6 +919,7 @@ export function canonicalWorldJson(state: WorldState): string {
     config: {
       chunkSize: state.config.chunkSize,
       height: state.config.height,
+      societyYearTicks: state.config.societyYearTicks,
       width: state.config.width,
     },
     elevation: arrayDto(state.elevation),

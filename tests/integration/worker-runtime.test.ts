@@ -4,10 +4,13 @@ import {
   type UiToWorkerMessage,
   type WorkerToUiMessage,
 } from '../../src/protocol';
+import { serializeWorldSnapshot } from '../../src/simulation/persistence';
+import { appendWorldEvent, createInitialWorld } from '../../src/simulation/world';
 import {
   createSimulationRuntime,
   MAX_OFFLINE_CATCH_UP_MILLISECONDS,
   MAX_OFFLINE_CATCH_UP_TICKS,
+  MAX_RECENT_WORKER_EVENTS,
   OFFLINE_CATCH_UP_POLICY_VERSION,
 } from '../../src/workers/simulation-runtime';
 
@@ -77,6 +80,81 @@ describe('simulation worker runtime', () => {
     const frame = messageOfType(responses, 'frameDelta');
     expect(frame.frame.tick).toBe(7);
     expect(lastMessageOfType(responses, 'metrics').metrics.tick).toBe(7);
+  });
+
+  it('projects M4 society facts and serves every history page through the Worker', () => {
+    const responses: WorkerToUiMessage[] = [];
+    const runtime = createSimulationRuntime((message) => responses.push(message));
+    runtime.handleMessage({
+      type: 'initialize',
+      protocolVersion: WORKER_PROTOCOL_VERSION,
+      requestId: 'society-initialize',
+      seed: [101, 202, 303, 404],
+      config: { width: 12, height: 8, chunkSize: 4, societyYearTicks: 5_000 },
+    });
+    runtime.handleMessage({
+      type: 'advanceTicks',
+      protocolVersion: WORKER_PROTOCOL_VERSION,
+      requestId: 'society-advance',
+      ticks: 30_000,
+    });
+
+    const society = lastMessageOfType(responses, 'frameDelta').frame.society;
+    expect(society.dashboard.population).toBeGreaterThanOrEqual(6);
+    expect(society.people).toHaveLength(society.dashboard.population);
+    expect(society.cultures).toHaveLength(2);
+    expect(society.timelineTotal).toBeGreaterThan(8);
+
+    runtime.handleMessage({
+      type: 'requestTimelinePage',
+      protocolVersion: WORKER_PROTOCOL_VERSION,
+      requestId: 'history-first',
+      offset: 0,
+    });
+    const first = lastMessageOfType(responses, 'timelinePage');
+    expect(first.offset).toBe(0);
+    expect(first.timeline).toHaveLength(8);
+    expect(first.timeline[0]).toMatchObject({ id: 1, summary: 'The founding world formed.' });
+
+    runtime.handleMessage({
+      type: 'requestTimelinePage',
+      protocolVersion: WORKER_PROTOCOL_VERSION,
+      requestId: 'history-last',
+      offset: Number.MAX_SAFE_INTEGER,
+    });
+    const last = lastMessageOfType(responses, 'timelinePage');
+    expect(last.total).toBe(first.total);
+    expect(last.offset).toBe(Math.floor((last.total - 1) / 8) * 8);
+    expect(last.timeline.at(-1)?.id).toBe(society.timeline.at(-1)?.id);
+  });
+
+  it('bounds recent event batches while keeping older history Worker-browsable', () => {
+    let world = createInitialWorld([1, 2, 3, 4], { width: 4, height: 3, chunkSize: 2 });
+    for (let index = 0; index < MAX_RECENT_WORKER_EVENTS + 12; index += 1) {
+      world = appendWorldEvent(world, 'bounded-history-fixture', world.tick, {
+        summary: `Recorded bounded history fixture ${index + 1}.`,
+      });
+    }
+    const responses: WorkerToUiMessage[] = [];
+    const runtime = createSimulationRuntime((message) => responses.push(message));
+    runtime.handleMessage({
+      type: 'load',
+      protocolVersion: WORKER_PROTOCOL_VERSION,
+      requestId: 'bounded-load',
+      snapshot: serializeWorldSnapshot(world),
+    });
+
+    expect(messageOfType(responses, 'eventBatch').events).toHaveLength(MAX_RECENT_WORKER_EVENTS);
+    expect(messageOfType(responses, 'ready').frame.society.timelineTotal).toBe(
+      MAX_RECENT_WORKER_EVENTS + 14,
+    );
+    runtime.handleMessage({
+      type: 'requestTimelinePage',
+      protocolVersion: WORKER_PROTOCOL_VERSION,
+      requestId: 'bounded-first-page',
+      offset: 0,
+    });
+    expect(lastMessageOfType(responses, 'timelinePage').timeline[0]).toMatchObject({ id: 1 });
   });
 
   it('returns typed faults for uninitialized, unsupported, and wrong-version operations', () => {
@@ -189,7 +267,10 @@ describe('simulation worker runtime', () => {
         id: 3,
         tick: 10,
         type: 'offline-catch-up',
+        summary: 'Bounded offline progression reached tick 10.',
+        subjectKind: 'world',
         subjectId: 0,
+        targetKind: 'world',
         targetId: 0,
         tileIndex: -1,
         amount: 0,

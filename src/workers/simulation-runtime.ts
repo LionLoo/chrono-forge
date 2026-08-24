@@ -11,8 +11,10 @@ import {
   type LoadRequest,
   type PerformOfflineCatchUpRequest,
   type RequestSaveRequest,
+  type RequestTimelinePageRequest,
   type RunMode,
   type SettlementSummary,
+  type SocietyProjection,
   type WorkerEvent,
   type WorkerFaultCode,
   type WorkerToUiMessage,
@@ -37,6 +39,7 @@ import type {
 export const OFFLINE_CATCH_UP_POLICY_VERSION = 1;
 export const MAX_OFFLINE_CATCH_UP_MILLISECONDS = 7 * 24 * 60 * 60 * 1_000;
 export const MAX_OFFLINE_CATCH_UP_TICKS = 1_000_000;
+export const MAX_RECENT_WORKER_EVENTS = 256;
 
 export type RuntimePost = (message: WorkerToUiMessage, transfer: readonly ArrayBuffer[]) => void;
 
@@ -161,6 +164,99 @@ function projectSettlementSummary(
   });
 }
 
+export const TIMELINE_PAGE_SIZE = 8;
+
+function projectTimelinePage(
+  state: WorldState,
+  requestedOffset: number,
+): {
+  readonly offset: number;
+  readonly total: number;
+  readonly timeline: readonly SocietyProjection['timeline'][number][];
+} {
+  const total = state.eventLog.length;
+  const lastOffset = Math.max(
+    0,
+    Math.floor(Math.max(0, total - 1) / TIMELINE_PAGE_SIZE) * TIMELINE_PAGE_SIZE,
+  );
+  const offset = Math.min(requestedOffset, lastOffset);
+  return Object.freeze({
+    offset,
+    total,
+    timeline: Object.freeze(
+      state.eventLog
+        .slice(offset, offset + TIMELINE_PAGE_SIZE)
+        .map((event) => Object.freeze({ id: event.id, tick: event.tick, summary: event.summary })),
+    ),
+  });
+}
+
+function projectSociety(state: WorldState): SocietyProjection {
+  const society = state.civilization.society;
+  const eventsById = new Map(state.eventLog.map((event) => [event.id, event]));
+  const culturesById = new Map(society.cultures.map((culture) => [culture.id, culture]));
+  const leaderName =
+    society.people.find((person) => person.id === society.institution.leaderId)?.name ?? 'None';
+  const people = society.people.map((person) => {
+    const ageYears = Math.max(0, Math.floor((state.tick - person.birthTick) / society.yearTicks));
+    return Object.freeze({
+      id: person.id,
+      name: person.name,
+      ageYears,
+      lifeStage: person.alive
+        ? ageYears < 18
+          ? 'Child'
+          : ageYears < 65
+            ? 'Adult'
+            : 'Elder'
+        : 'Deceased',
+      status: person.alive ? 'Living' : `Died at tick ${person.deathTick}`,
+      role: person.role,
+      cultureName: culturesById.get(person.cultureId)?.name ?? 'Unknown culture',
+      householdName: `Household ${person.householdId}`,
+      biography: Object.freeze(
+        person.biographyEventIds.map((eventId) => {
+          const source = eventsById.get(eventId);
+          if (source === undefined) throw new Error('Projected biography source event is missing.');
+          return Object.freeze({ eventId, tick: source.tick, summary: source.summary });
+        }),
+      ),
+    });
+  });
+  const cultures = society.cultures.map((culture) =>
+    Object.freeze({
+      id: culture.id,
+      name: culture.name,
+      preference: culture.preference,
+      belief: culture.belief,
+      tradition: culture.tradition,
+      architectureStyle: culture.architectureStyle,
+    }),
+  );
+  const timelinePage = projectTimelinePage(state, state.eventLog.length);
+  return Object.freeze({
+    dashboard: Object.freeze({
+      year: Math.floor(state.tick / society.yearTicks),
+      population: society.people.filter((person) => person.alive).length,
+      households: society.households.length,
+      meals: society.households.reduce((total, household) => total + household.meals, 0),
+      tools: society.households.reduce((total, household) => total + household.tools, 0),
+      exchangeVolume: society.offers.reduce((total, offer) => total + offer.fulfilledAmount, 0),
+      transportDemand: society.offers.reduce((total, offer) => total + offer.transportDemand, 0),
+      scarcity: society.scarcity,
+      stability: society.stability,
+      inequality: society.inequality,
+      government: society.institution.government,
+      leaderName,
+    }),
+    people: Object.freeze(people),
+    cultures: Object.freeze(cultures),
+    timeline: timelinePage.timeline,
+    timelineOffset: timelinePage.offset,
+    timelineTotal: timelinePage.total,
+  });
+}
+
 /** Creates a copied, transfer-ready UI read model without exposing world authority. */
 export function projectWorldFrame(state: WorldState): WorldFrameProjection {
   const { width, height } = state.config;
@@ -260,6 +356,7 @@ export function projectWorldFrame(state: WorldState): WorldFrameProjection {
     structureCondition[index] = toSettlementUnit(structure.condition, 'Structure condition');
   }
   const settlementSummary = projectSettlementSummary(state.civilization, visibleStructures);
+  const society = projectSociety(state);
 
   return Object.freeze({
     version: WORKER_PROTOCOL_VERSION,
@@ -282,6 +379,7 @@ export function projectWorldFrame(state: WorldState): WorldFrameProjection {
     structureProgress,
     structureCondition,
     settlementSummary,
+    society,
   });
 }
 
@@ -315,7 +413,10 @@ export function createSimulationRuntime(post: RuntimePost): SimulationRuntime {
       id: event.id,
       tick: event.tick,
       type: event.kind,
+      summary: event.summary,
+      subjectKind: event.subjectKind,
       subjectId: event.subjectId,
+      targetKind: event.targetKind,
       targetId: event.targetId,
       tileIndex: event.tileIndex,
       amount: event.amount,
@@ -341,7 +442,7 @@ export function createSimulationRuntime(post: RuntimePost): SimulationRuntime {
       requestId: request.requestId,
       frame: projectWorldFrame(world),
     });
-    emitEvents(request.requestId, world.eventLog);
+    emitEvents(request.requestId, world.eventLog.slice(-MAX_RECENT_WORKER_EVENTS));
     metrics(request.requestId);
   }
 
@@ -373,7 +474,7 @@ export function createSimulationRuntime(post: RuntimePost): SimulationRuntime {
       requestId: request.requestId,
       frame: projectWorldFrame(world),
     });
-    emitEvents(request.requestId, world.eventLog);
+    emitEvents(request.requestId, world.eventLog.slice(-MAX_RECENT_WORKER_EVENTS));
     metrics(request.requestId);
   }
 
@@ -387,6 +488,20 @@ export function createSimulationRuntime(post: RuntimePost): SimulationRuntime {
       protocolVersion: WORKER_PROTOCOL_VERSION,
       requestId: request.requestId,
       snapshot: serializeWorldSnapshot(world),
+    });
+  }
+
+  function requestTimelinePage(request: RequestTimelinePageRequest): void {
+    if (world === undefined) {
+      fault(request.requestId, 'not-initialized', 'Initialize a world before requesting history.');
+      return;
+    }
+    const page = projectTimelinePage(world, request.offset);
+    emit({
+      type: 'timelinePage',
+      protocolVersion: WORKER_PROTOCOL_VERSION,
+      requestId: request.requestId,
+      ...page,
     });
   }
 
@@ -411,7 +526,10 @@ export function createSimulationRuntime(post: RuntimePost): SimulationRuntime {
     const ticks = Math.min(requestedTicks, MAX_OFFLINE_CATCH_UP_TICKS);
     const priorEventCount = world.eventLog.length;
     if (ticks > 0) {
-      world = appendWorldEvent(stepWorld(world, ticks), 'offline-catch-up');
+      world = stepWorld(world, ticks);
+      world = appendWorldEvent(world, 'offline-catch-up', world.tick, {
+        summary: `Bounded offline progression reached tick ${world.tick}.`,
+      });
     }
     emit({
       type: 'frameDelta',
@@ -464,6 +582,9 @@ export function createSimulationRuntime(post: RuntimePost): SimulationRuntime {
             return;
           case 'requestSave':
             requestSave(message);
+            return;
+          case 'requestTimelinePage':
+            requestTimelinePage(message);
             return;
           case 'performOfflineCatchUp':
             performOfflineCatchUp(message);

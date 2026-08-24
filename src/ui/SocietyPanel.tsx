@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react';
+import { useState } from 'react';
 
 const TIMELINE_PAGE_SIZE = 8;
 
@@ -55,6 +55,9 @@ export interface SocietyPanelProps {
   readonly people: readonly SocietyPerson[];
   readonly cultures: readonly SocietyCulture[];
   readonly timeline: readonly SocietyTimelineEntry[];
+  readonly timelineOffset: number;
+  readonly timelineTotal: number;
+  readonly onTimelinePageRequest: (offset: number) => void;
 }
 
 function DashboardMetric({
@@ -77,18 +80,20 @@ function DashboardMetric({
  * supplied by the caller so this surface cannot manufacture history or mutate
  * simulation authority.
  */
-export function SocietyPanel({ dashboard, people, cultures, timeline }: SocietyPanelProps) {
+export function SocietyPanel({
+  dashboard,
+  people,
+  cultures,
+  timeline,
+  timelineOffset,
+  timelineTotal,
+  onTimelinePageRequest,
+}: SocietyPanelProps) {
   const [selectedPersonId, setSelectedPersonId] = useState<number | null>(people[0]?.id ?? null);
-  const [timelinePage, setTimelinePage] = useState(0);
   const selectedPerson =
     people.find((person) => person.id === selectedPersonId) ?? people[0] ?? null;
-  const timelinePageCount = Math.ceil(timeline.length / TIMELINE_PAGE_SIZE);
-  const visibleTimelinePage = Math.min(timelinePage, Math.max(0, timelinePageCount - 1));
-  const timelineStart = visibleTimelinePage * TIMELINE_PAGE_SIZE;
-  const timelineEntries = useMemo(
-    () => timeline.slice(timelineStart, timelineStart + TIMELINE_PAGE_SIZE),
-    [timeline, timelineStart],
-  );
+  const timelinePageCount = Math.ceil(timelineTotal / TIMELINE_PAGE_SIZE);
+  const visibleTimelinePage = Math.floor(timelineOffset / TIMELINE_PAGE_SIZE);
 
   return (
     <section className="society-panel" aria-labelledby="society-title">
@@ -196,8 +201,8 @@ export function SocietyPanel({ dashboard, people, cultures, timeline }: SocietyP
           <p>No historical events are available in this projection.</p>
         ) : (
           <>
-            <ol className="timeline-list" start={timelineStart + 1}>
-              {timelineEntries.map((entry) => (
+            <ol className="timeline-list" start={timelineOffset + 1}>
+              {timeline.map((entry) => (
                 <li key={entry.id}>
                   <span>Tick {entry.tick}: </span>
                   {entry.summary}
@@ -207,7 +212,9 @@ export function SocietyPanel({ dashboard, people, cultures, timeline }: SocietyP
             <nav aria-label="Timeline pages" className="timeline-pagination">
               <button
                 disabled={visibleTimelinePage === 0}
-                onClick={() => setTimelinePage((current) => Math.max(0, current - 1))}
+                onClick={() =>
+                  onTimelinePageRequest(Math.max(0, timelineOffset - TIMELINE_PAGE_SIZE))
+                }
                 type="button"
               >
                 Previous
@@ -218,7 +225,12 @@ export function SocietyPanel({ dashboard, people, cultures, timeline }: SocietyP
               <button
                 disabled={visibleTimelinePage >= timelinePageCount - 1}
                 onClick={() =>
-                  setTimelinePage((current) => Math.min(timelinePageCount - 1, current + 1))
+                  onTimelinePageRequest(
+                    Math.min(
+                      Math.max(0, (timelinePageCount - 1) * TIMELINE_PAGE_SIZE),
+                      timelineOffset + TIMELINE_PAGE_SIZE,
+                    ),
+                  )
                 }
                 type="button"
               >
