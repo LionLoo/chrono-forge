@@ -5,22 +5,22 @@ Last updated: 2026-08-23
 ## Release state
 
 - Goal: build, verify, package, and privately release the complete Chrono Forge v1.0.0 contract; do not stop at a prototype or partial roadmap.
-- Current milestone: M3 autonomous survival, agents, and construction is locally acceptance-complete with an independent closure verdict; private PR #4 is at its hosted CI gate.
-- Current branch: `feature/autonomous-settlement`; durable M3 documentation checkpoint `134c47dd4921bf2ab44378e1831801f4914208ec` follows implementation checkpoint `00387bf11b65f37136d73fe6780e585b741a3ced` and is pushed to the private origin.
-- Remote: `https://github.com/LionLoo/chrono-forge` is private. PR #3 replacement run `32409846530` and the durable `main` run `32412473633` passed, including aggregate `Required`.
+- Current milestone: M3 autonomous survival, agents, and construction is merged and acceptance-complete; durable `main` CI and root rotation precede M4.
+- Current branch: clean `main` at M3 squash merge `f6db7452f976b0dffe5c12a6e77a50b98f64d59f` before this handoff-only documentation update.
+- Remote: `https://github.com/LionLoo/chrono-forge` is private. PR #4 merged after replacement run `32684735423` passed web, Windows, installer, and aggregate `Required`; `main` run `32685404763` started from the merge and may be superseded by this handoff update.
 - Included-usage meter: no read-only weekly allowance value is exposed. Work uses only the included ChatGPT/Codex plan path; no API key, purchased/promotional credit, or account credit is used.
-- v1.0 completion: not satisfied. M4-M12 remain release-blocking after M3 merges.
+- v1.0 completion: not satisfied. M4-M12 remain release-blocking.
 
 ## HARNESS EVALUATION
 
-- Requirements verified versus remaining: M0-M2 are merged. M3 evidence covers autonomous needs/decisions, emergent occupations, physical gather/carry/deposit, survival, construction/site selection/material use, lifecycle transitions, paths, factual events/memories, packed Worker projections, accessibility, v2 persistence/migrations, partition equivalence, representative-session feedback, and multi-seed viability. M4-M12 remain mandatory.
-- Build/test/CI: the final permission-correct `npm run ci` passes format, lint, strict type checking, 34 files/158 covered TypeScript tests, 19 Rust tests, production browser E2E, native restart/SQLite E2E, SBOM, optimized executable/NSIS installer, and production test-capability exclusion. PR #4 run `32684312568` exposed only a missing explicit timeout on the second million-tick test; the behavior passes locally and the Windows job remains in progress while the bounded timeout fix is prepared.
+- Requirements verified versus remaining: M0-M3 are merged. M3 evidence covers autonomous needs/decisions, emergent occupations, physical gather/carry/deposit, survival, construction/site selection/material use, lifecycle transitions, paths, factual events/memories, packed Worker projections, accessibility, v2 persistence/migrations, partition equivalence, representative-session feedback, and multi-seed viability. M4-M12 remain mandatory.
+- Build/test/CI: the final permission-correct `npm run ci` passes format, lint, strict type checking, 34 files/158 covered TypeScript tests, 19 Rust tests, production browser E2E, native restart/SQLite E2E, SBOM, optimized executable/NSIS installer, and production test-capability exclusion. PR #4 replacement run `32684735423` passed every job and aggregate `Required`; the durable handoff commit still requires its own green `main` run before rotation.
 - Known defects/debt: no confirmed open M3 P0-P2 after fixes and closure review. Non-blocking debt is the existing >500 kB main bundle warning and misleading upstream embedded-WebDriver cleanup diagnostics. M8 scale budgets, signing credentials, and private-plan branch protection remain future/operational gates.
 - Major failures and autonomous recovery: review caught invented dry-tile water, excess repair material charges, permissive impossible v2 states, stale plans, color-only condition, and missing restore evidence; each received a root-cause fix and regression. Legacy migration originally replayed settlement history to the saved tick; it is now factual constant-time founding. Final property CI minimized a 1×1 seed-zero world that forced a second structure onto the occupied shelter tile; site selection now defers when no physical site exists and the minimized/property suites pass. The first native rerun failed because the sandbox could not write isolated AppData, and the first production bundle retry could not download pinned NSIS; permission-correct reruns passed without product changes. Hosted PR CI then showed the second million-tick parity test still used Vitest's five-second default; it now receives the same 30-second bound as its sibling without weakening assertions.
 - Review/subagent findings: Terra/high acceptance work added 18 focused simulation tests. Independent core and UI reviews found the defects above and no Worker-authority violation. Closure review found one additional P2 factual-memory mismatch, which is fixed with a checksummed regression; its final verdict has no P0-P3 finding.
 - Demonstrated scale/performance: three deterministic seeds retain all six founders and viable settlements through 60,000 and 1,000,000 ticks; 100 arbitrary partition cases and 100 seeded snapshot cases pass. The 15,000-36,000 window yields a few factual founding-scale changes without later societal progression. M8 population/latency/heap targets are not claimed.
 - Buildable/runnable: yes. Production Chromium and the actual app surface show six agents, operational construction, factual events, stores, and accessible structure condition. A manual 5,000-tick save/advance/reload restored the exact visible settlement with no console errors. Native SQLite restart flow and Windows installer pass; production excludes WDIO/test capabilities.
-- Fresh-root recoverability: yes. This repository records the active branch/base, completed M3 behavior/evidence, remaining review/PR gates, known limitations, and exact next action without relying on chat history.
+- Fresh-root recoverability: yes. This repository records the merged M3 behavior/evidence, exact PR/CI state, known limitations, root-rotation gate, and exact M4 entry action without relying on chat history.
 
 ## M3 delivered
 
@@ -52,7 +52,7 @@ Last updated: 2026-08-23
 - Production build: `chrono-forge.exe` and `Chrono Forge_0.1.0_x64-setup.exe` built; exclusion scan passed.
 - Independent review: core and Worker/UI reviews completed; all two P1 and four P2 findings are fixed with regressions. Closure review then found and verified the additional P2 memory/source-event fix; final 3-file/15-test review passed with no P0-P3 finding. Its narrow re-review of the deferred-site property fix passed 3 files/6 tests with no P0-P3 finding.
 - Production visual QA: the built web surface passed polished full-page inspection, 5,000-tick settlement development, exact save/advance/reload, semantic structure condition/progress, and zero console warnings/errors.
-- Hosted status: PR #3 and durable M2 `main` run `32412473633` are green. M3 PR #4 is open at head `134c47dd4921bf2ab44378e1831801f4914208ec`; initial run `32684312568` failed the web job only because the second million-tick test retained a five-second default timeout, while its Windows job is still running.
+- Hosted status: M3 PR #4 merged as `f6db7452f976b0dffe5c12a6e77a50b98f64d59f`. Its initial run `32684312568` exposed the five-second timeout; independently reviewed fix `8248d9e16da2681faddf26c7efd5f23627697f24` preserved assertions, and replacement run `32684735423` passed all jobs plus aggregate `Required`.
 
 ## Active risks and blockers
 
@@ -63,10 +63,10 @@ Last updated: 2026-08-23
 
 ## Root rotation state
 
-- Same-project root continuation is supported. After M3 PR #4 merges and durable `main` CI is green, spawn a same-directory GPT-5.6 Sol/xhigh successor with the unchanged original goal, contract, authority, billing guardrail, workflow, and stop conditions.
+- Same-project root continuation is supported. After this M3 handoff commit has green durable `main` CI, spawn a same-directory GPT-5.6 Sol/xhigh successor with the unchanged original goal, contract, authority, billing guardrail, workflow, and stop conditions.
 - The successor must reconstruct only from durable repository evidence, verify Git/GitHub/CI, state the exact next task, and affirm root ownership before editing; then the prior root stops.
 - When task-title controls are available, the owning root chat is titled `INPROGRESS` and the relinquished root is retitled `RETIRED` after successful transfer. If the UI cannot mutate titles, record that limitation at rotation; the repository handoff remains authoritative.
 
 ## Exact next action
 
-Validate and independently review the bounded hosted long-test timeout, commit and push it to PR #4, then require a fully green replacement run before merging M3.
+Commit and push this M3 handoff on `main`, require its hosted `Required` gate to pass, then rotate to a fresh Sol/xhigh root. The successor's first product action is to create `feature/living-societies`, lock M4 observable acceptance tests from `PLAN.md`, and implement economy, generations, society, culture, and factual history without reducing any v1 criterion.
