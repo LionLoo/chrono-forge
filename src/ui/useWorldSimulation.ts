@@ -3,12 +3,16 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   WORKER_PROTOCOL_VERSION,
   type UiToWorkerMessage,
+  type SocietyTimelineProjection,
   type WorkerEvent,
   type WorkerToUiMessage,
   type WorldFrameProjection,
 } from '../protocol';
 import type { WorldConfig, WorldSeed } from '../simulation/world';
-import { OFFLINE_CATCH_UP_POLICY_VERSION } from '../workers/simulation-runtime';
+import {
+  MAX_RECENT_WORKER_EVENTS,
+  OFFLINE_CATCH_UP_POLICY_VERSION,
+} from '../workers/simulation-runtime';
 
 export const DEMO_WORLD_SEED: WorldSeed = Object.freeze([
   0x4348_524f, 0x4e4f_464f, 0x5247_4531, 0x0000_0001,
@@ -17,6 +21,7 @@ export const DEMO_WORLD_CONFIG: WorldConfig = Object.freeze({
   width: 96,
   height: 64,
   chunkSize: 32,
+  societyYearTicks: 100_000,
 });
 
 export interface SimulationWorkerPort {
@@ -52,7 +57,13 @@ export interface WorldSimulationView {
   readonly loadSnapshot: (snapshot: string) => Promise<void>;
   readonly performOfflineCatchUp: (elapsedMilliseconds: number, rate: number) => Promise<void>;
   readonly requestSave: () => Promise<string>;
+  readonly requestTimelinePage: (offset: number) => void;
   readonly status: 'booting' | 'ready' | 'faulted';
+  readonly timeline: {
+    readonly entries: readonly SocietyTimelineProjection[];
+    readonly offset: number;
+    readonly total: number;
+  };
 }
 
 function assertNonNegativeSafeInteger(value: number, label: string): void {
@@ -66,6 +77,11 @@ export function useWorldSimulation(
 ): WorldSimulationView {
   const [frame, setFrame] = useState<WorldFrameProjection | null>(null);
   const [events, setEvents] = useState<readonly WorkerEvent[]>([]);
+  const [timeline, setTimeline] = useState<WorldSimulationView['timeline']>({
+    entries: [],
+    offset: 0,
+    total: 0,
+  });
   const [error, setError] = useState<string | null>(null);
   const workerRef = useRef<SimulationWorkerPort | null>(null);
   const requestSequenceRef = useRef(0);
@@ -122,6 +138,11 @@ export function useWorldSimulation(
     };
     const applyFrame = (nextFrame: WorldFrameProjection, replaceEvents: boolean) => {
       setFrame(nextFrame);
+      setTimeline({
+        entries: nextFrame.society.timeline,
+        offset: nextFrame.society.timelineOffset,
+        total: nextFrame.society.timelineTotal,
+      });
       if (replaceEvents) setEvents([]);
       setError(null);
     };
@@ -148,9 +169,16 @@ export function useWorldSimulation(
           setEvents((current) => {
             const byId = new Map(current.map((worldEvent) => [worldEvent.id, worldEvent]));
             for (const worldEvent of message.events) byId.set(worldEvent.id, worldEvent);
-            return [...byId.values()].sort(
-              (left, right) => left.tick - right.tick || left.id - right.id,
-            );
+            return [...byId.values()]
+              .sort((left, right) => left.tick - right.tick || left.id - right.id)
+              .slice(-MAX_RECENT_WORKER_EVENTS);
+          });
+          return;
+        case 'timelinePage':
+          setTimeline({
+            entries: message.timeline,
+            offset: message.offset,
+            total: message.total,
           });
           return;
         case 'saveSnapshot': {
@@ -241,6 +269,21 @@ export function useWorldSimulation(
     return promise;
   }, [nextRequestId]);
 
+  const requestTimelinePage = useCallback(
+    (offset: number) => {
+      assertNonNegativeSafeInteger(offset, 'Timeline offset');
+      const worker = workerRef.current;
+      if (worker === null) return;
+      worker.postMessage({
+        type: 'requestTimelinePage',
+        protocolVersion: WORKER_PROTOCOL_VERSION,
+        requestId: nextRequestId('timeline'),
+        offset,
+      });
+    },
+    [nextRequestId],
+  );
+
   const loadSnapshot = useCallback(
     (snapshot: string): Promise<void> => {
       const worker = workerRef.current;
@@ -295,8 +338,20 @@ export function useWorldSimulation(
       loadSnapshot,
       performOfflineCatchUp,
       requestSave,
+      requestTimelinePage,
       status: error === null ? (frame === null ? 'booting' : 'ready') : 'faulted',
+      timeline,
     }),
-    [advanceTicks, error, events, frame, loadSnapshot, performOfflineCatchUp, requestSave],
+    [
+      advanceTicks,
+      error,
+      events,
+      frame,
+      loadSnapshot,
+      performOfflineCatchUp,
+      requestSave,
+      requestTimelinePage,
+      timeline,
+    ],
   );
 }

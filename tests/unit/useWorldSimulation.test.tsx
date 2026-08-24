@@ -1,6 +1,8 @@
 import { act, renderHook, waitFor } from '@testing-library/react';
 
 import type { UiToWorkerMessage, WorkerToUiMessage } from '../../src/protocol';
+import { serializeWorldSnapshot } from '../../src/simulation/persistence';
+import { createInitialWorld, stepWorld } from '../../src/simulation/world';
 import { useWorldSimulation, type SimulationWorkerPort } from '../../src/ui/useWorldSimulation';
 import { createSimulationRuntime } from '../../src/workers/simulation-runtime';
 
@@ -63,6 +65,33 @@ function createLoadFaultWorker(): SimulationWorkerPort {
 }
 
 describe('world simulation UI gateway', () => {
+  it('loads and browses bounded factual history pages through the real Worker gateway', async () => {
+    const { result } = renderHook(() => useWorldSimulation(createRuntimeWorker));
+    await waitFor(() => expect(result.current.status).toBe('ready'));
+    const snapshot = serializeWorldSnapshot(
+      stepWorld(
+        createInitialWorld([101, 202, 303, 404], {
+          width: 12,
+          height: 8,
+          chunkSize: 4,
+          societyYearTicks: 5_000,
+        }),
+        30_000,
+      ),
+    );
+
+    await act(async () => result.current.loadSnapshot(snapshot));
+    expect(result.current.timeline.total).toBeGreaterThan(8);
+    expect(result.current.timeline.offset).toBeGreaterThan(0);
+    act(() => result.current.requestTimelinePage(0));
+    await waitFor(() => expect(result.current.timeline.offset).toBe(0));
+    expect(result.current.timeline.entries[0]).toStrictEqual({
+      id: 1,
+      tick: 0,
+      summary: 'The founding world formed.',
+    });
+  });
+
   it('round-trips worker saves and keeps offline catch-up factual', async () => {
     const { result } = renderHook(() => useWorldSimulation(createRuntimeWorker));
     await waitFor(() => {
@@ -94,7 +123,10 @@ describe('world simulation UI gateway', () => {
         id: 1,
         tick: 0,
         type: 'world-generated',
+        summary: 'The founding world formed.',
+        subjectKind: 'world',
         subjectId: 0,
+        targetKind: 'world',
         targetId: 0,
         tileIndex: -1,
         amount: 0,
@@ -103,7 +135,10 @@ describe('world simulation UI gateway', () => {
         id: 2,
         tick: 0,
         type: 'founders-arrived',
+        summary: '6 named founders established the first settlement.',
+        subjectKind: 'world',
         subjectId: 0,
+        targetKind: 'world',
         targetId: 0,
         tileIndex: 3120,
         amount: 6,
@@ -112,7 +147,10 @@ describe('world simulation UI gateway', () => {
         id: 3,
         tick: 5,
         type: 'offline-catch-up',
+        summary: 'Bounded offline progression reached tick 5.',
+        subjectKind: 'world',
         subjectId: 0,
+        targetKind: 'world',
         targetId: 0,
         tileIndex: -1,
         amount: 0,
@@ -127,7 +165,10 @@ describe('world simulation UI gateway', () => {
         id: 1,
         tick: 0,
         type: 'world-generated',
+        summary: 'The founding world formed.',
+        subjectKind: 'world',
         subjectId: 0,
+        targetKind: 'world',
         targetId: 0,
         tileIndex: -1,
         amount: 0,
@@ -136,7 +177,10 @@ describe('world simulation UI gateway', () => {
         id: 2,
         tick: 0,
         type: 'founders-arrived',
+        summary: '6 named founders established the first settlement.',
+        subjectKind: 'world',
         subjectId: 0,
+        targetKind: 'world',
         targetId: 0,
         tileIndex: 3120,
         amount: 6,

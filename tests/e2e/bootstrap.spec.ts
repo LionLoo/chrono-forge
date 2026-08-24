@@ -25,8 +25,14 @@ test('production frontend renders a Worker-owned autonomous settlement', async (
   ).toBeVisible();
   await expect(page.locator('.simulation-status')).toContainText('Worker projection ready');
   await expect(page.getByRole('img', { name: /Autonomous settlement map/ })).toBeVisible();
-  await expect(page.getByText('Living founders')).toBeVisible();
+  await expect(page.getByText('Living people')).toBeVisible();
   await expect(page.getByLabel('Settlement stores')).toBeVisible();
+  const society = page.locator('.society-panel');
+  await expect(society.getByRole('heading', { name: 'Settlement dashboard' })).toBeVisible();
+  await expect(society.getByRole('combobox', { name: 'Inspect person' })).toBeVisible();
+  await expect(society.getByRole('heading', { name: 'Cultures' })).toBeVisible();
+  await expect(society.getByRole('heading', { name: 'Timeline' })).toBeVisible();
+  await expect(society.getByText('The founding world formed.')).toBeVisible();
 
   await page.getByRole('radio', { name: 'Resources' }).check();
   await expect(page.locator('.world-map-canvas')).toHaveAttribute('data-overlay', 'resources');
@@ -40,7 +46,7 @@ test('production frontend renders a Worker-owned autonomous settlement', async (
   ).toContainText('100');
   await expect(page.getByText('Active construction: 1 structure')).toBeVisible();
   await expect(page.getByRole('progressbar', { name: /Construction progress/ })).toBeVisible();
-  await expect(page.getByText(/was planned at tile .* on tick 100/)).toBeVisible();
+  await expect(page.getByText('Shelter 1 was planned.', { exact: true }).first()).toBeVisible();
 
   const structure = page.getByRole('listitem', { name: /Shelter 1: status planned/ });
   await expect(structure).toContainText('condition 100% (sound); progress 0%');
@@ -59,5 +65,25 @@ test('production frontend renders a Worker-owned autonomous settlement', async (
     page.locator('.world-metrics div').filter({ hasText: 'Logical tick' }),
   ).toContainText('100');
   await expect(structure).toHaveText(savedStructure);
-  await expect(page.getByText(/was planned at tile .* on tick 100/)).toBeVisible();
+  await expect(page.getByText('Shelter 1 was planned.', { exact: true }).first()).toBeVisible();
+});
+
+test('society controls remain readable with reduced motion and 200% text', async ({ page }) => {
+  await page.emulateMedia({ reducedMotion: 'reduce' });
+  await page.goto(origin);
+  await expect(page.locator('.simulation-status')).toContainText('Worker projection ready');
+  await page.evaluate(() => {
+    document.documentElement.style.fontSize = '200%';
+  });
+
+  await expect(page.getByRole('heading', { name: 'Settlement and society' })).toBeVisible();
+  await expect(page.getByRole('combobox', { name: 'Inspect person' })).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Observe 100 fixed ticks' })).toBeVisible();
+  await page.getByRole('button', { name: 'Observe 100 fixed ticks' }).click();
+  await expect(page.getByText(/condition 100% \(sound\)/)).toBeVisible();
+  expect(['0.01ms', '1e-05s']).toContain(
+    await page
+      .getByRole('button', { name: 'Observe 100 fixed ticks' })
+      .evaluate((element) => getComputedStyle(element).transitionDuration),
+  );
 });

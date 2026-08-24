@@ -1,6 +1,6 @@
 import { $, browser, expect } from '@wdio/globals';
 
-/* global describe, it */
+/* global CSSMediaRule, describe, document, it */
 
 async function clearIsolatedNativeArchive() {
   await browser.tauri.execute(async ({ core }) => {
@@ -55,12 +55,35 @@ async function advanceControlledClock(milliseconds) {
 
 describe('native focus persistence', () => {
   it('starts, pauses, saves, relaunches, resumes, and completes through real SQLite IPC', async () => {
-    await $('h2=Focus forge').waitForDisplayed();
+    await $('#focus-title').waitForDisplayed();
     expect(await (await $('span=SQLite archive')).isDisplayed()).toBe(true);
+    expect(await (await $('h2=Settlement and society')).isDisplayed()).toBe(true);
+    expect(await (await $('select[aria-label="Inspect person"]')).isDisplayed()).toBe(true);
+    expect(await (await $('h3=Timeline')).isDisplayed()).toBe(true);
     await settleVisibleSessionBeforeCleanup();
     await clearIsolatedNativeArchive();
     await browser.reloadSession();
     await $('button=Start focus').waitForDisplayed();
+
+    const hasReducedMotionRule = await browser.execute(() =>
+      [...document.styleSheets].some((sheet) =>
+        [...sheet.cssRules].some(
+          (rule) =>
+            rule instanceof CSSMediaRule &&
+            rule.conditionText.includes('prefers-reduced-motion: reduce'),
+        ),
+      ),
+    );
+    expect(hasReducedMotionRule).toBe(true);
+    await browser.execute(() => {
+      document.documentElement.style.fontSize = '200%';
+    });
+    expect(await (await $('h2=Settlement and society')).isDisplayed()).toBe(true);
+    expect(await (await $('select[aria-label="Inspect person"]')).isDisplayed()).toBe(true);
+    await $('button=Observe 100 fixed ticks').click();
+    const firstStructure = await $('.structure-inspector li');
+    await firstStructure.waitForDisplayed();
+    expect(await firstStructure.getText()).toContain('condition 100% (sound)');
 
     const startAtMs = 1_700_000_000_000;
     await setControlledClock(startAtMs);
@@ -95,6 +118,8 @@ describe('native focus persistence', () => {
 
     await browser.reloadSession();
     await $('button=Resume').waitForDisplayed();
+    expect(await (await $('h2=Settlement and society')).isDisplayed()).toBe(true);
+    expect(await (await $('select[aria-label="Inspect person"]')).isDisplayed()).toBe(true);
     expect(await (await $('p=focus paused')).isDisplayed()).toBe(true);
 
     await setControlledClock(startAtMs + 10_000);
@@ -114,7 +139,9 @@ describe('native focus persistence', () => {
     );
     expect(completedSessions).toHaveLength(1);
     expect(completedSessions[0]).toMatchObject({ status: 'completed', focusedMs: 60_000 });
-    expect(completedSessions[0]?.recapEventIds.length).toBeGreaterThan(0);
+    // This short test session crosses no event boundary; the recap must not
+    // borrow founding or pre-session history to manufacture activity.
+    expect(completedSessions[0]?.recapEventIds).toEqual([]);
     const completedCandidates = await browser.tauri.execute(({ core }) =>
       core.invoke('load_save_slot_candidates', { slotId: 'primary' }),
     );

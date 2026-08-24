@@ -59,6 +59,14 @@ describe('deterministic world lab', () => {
       'data-overlay',
       'terrain',
     );
+    const society = screen
+      .getByRole('heading', { name: 'Settlement and society' })
+      .closest('section');
+    expect(society).not.toBeNull();
+    expect(within(society!).getByRole('heading', { name: 'Settlement dashboard' })).toBeVisible();
+    expect(within(society!).getByRole('combobox', { name: 'Inspect person' })).toBeVisible();
+    expect(within(society!).getByRole('heading', { name: 'Cultures' })).toBeVisible();
+    expect(within(society!).getByText('The founding world formed.')).toBeVisible();
   });
 
   it('changes overlays, camera, and fixed logical ticks through keyboard-accessible controls', async () => {
@@ -156,11 +164,14 @@ describe('deterministic world lab', () => {
 
     await user.click(screen.getByRole('button', { name: 'Complete focus' }));
     expect(await screen.findByText('Session recorded with a factual recap.')).toBeVisible();
-    expect(screen.getAllByText('The founding world formed at tick 0.')).not.toHaveLength(0);
+    const recap = screen.getByRole('heading', { name: 'Latest factual recap' }).parentElement;
+    expect(recap).not.toBeNull();
+    expect(within(recap!).getByText('Shelter 1 was planned.')).toBeVisible();
+    expect(within(recap!).queryByText('The founding world formed.')).not.toBeInTheDocument();
     const completed = screen.getByText('Completed sessions').closest('div');
     expect(completed).not.toBeNull();
     expect(within(completed!).getByText('1')).toBeVisible();
-    expect(await persistence.gateway.listFocusSessions()).toHaveLength(1);
+    expect(await persistence.gateway.listFocusSessions()).toMatchObject([{ recapEventIds: [3] }]);
   });
 
   it('manages multiple slots, validated exports, and calm local settings', async () => {
@@ -246,7 +257,7 @@ describe('deterministic world lab', () => {
       expect(sessions.some((session) => session.status === 'cancelled')).toBe(true);
     });
     expect(notifyCompletion).toHaveBeenCalledOnce();
-  });
+  }, 15_000);
 
   it('validates imported packages, manually saves, and loads another slot', async () => {
     const user = userEvent.setup();

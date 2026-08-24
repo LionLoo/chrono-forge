@@ -2,7 +2,7 @@
 
 `PRODUCT_SPEC.md` is the product contract and `PLAN.md` contains the decision-complete acceptance criteria, branches, and validation for each item. Milestones run in this order:
 
-Current checkpoint: M3 autonomous survival and construction is merged through private PR #4 after independent review and fully green hosted CI. A handoff-only `main` checkpoint, durable CI, and root rotation precede M4. M4-M12 remain unchanged and release-blocking.
+Current checkpoint: M4 living societies is implemented on `feature/living-societies`, independently reviewed, and at its full local/hosted merge gate. M0-M3 remain merged and verified. After M4 merges and a durable `main` handoff rotates the root, M5 contextual technology and disasters is next; M5-M12 remain unchanged and release-blocking.
 
 | Order | Milestone                                                    | Outcome                                                                                       |
 | ----- | ------------------------------------------------------------ | --------------------------------------------------------------------------------------------- |

@@ -1,6 +1,5 @@
 import { hashCanonicalJson } from '../canonical';
 import {
-  assertCivilizationInvariants,
   attachFactualMemories,
   createCivilizationAtTick,
   MAX_AGENT_KNOWN_TILES,
@@ -18,7 +17,20 @@ import {
   type StructureStatus,
 } from '../settlement';
 import {
+  ACCELERATED_YEAR_TICKS,
+  NORMAL_YEAR_TICKS,
+  assertSocietyInvariants,
+  createInitialSociety,
+  type EconomicRole,
+  type EntityKind,
+  type GovernmentKind,
+  type OfferKind,
+  type SocietyEntityRef,
+  type SocietyState,
+} from '../society';
+import {
   Biome,
+  assertWorldInvariants,
   canonicalWorldJson,
   type WorldChunk,
   type WorldConfig,
@@ -29,9 +41,9 @@ import {
 } from '../world';
 
 export const WORLD_SNAPSHOT_FORMAT = 'chrono-forge-world';
-export const WORLD_SNAPSHOT_FORMAT_VERSION = 2;
-export const WORLD_ENGINE_VERSION = 2;
-export const WORLD_CONTENT_VERSION = 2;
+export const WORLD_SNAPSHOT_FORMAT_VERSION = 3;
+export const WORLD_ENGINE_VERSION = 3;
+export const WORLD_CONTENT_VERSION = 3;
 
 const MAX_WORLD_TILES = 1_000_000;
 const MAX_WORLD_SNAPSHOT_BYTES = 50 * 1024 * 1024;
@@ -42,7 +54,7 @@ type UnknownRecord = Record<string, unknown>;
 
 interface LegacyWorldState extends WorldTileFields {
   readonly seed: WorldSeed;
-  readonly config: WorldConfig;
+  readonly config: LegacyWorldConfig;
   readonly tick: number;
   readonly nextEventId: number;
   readonly eventLog: readonly {
@@ -52,6 +64,41 @@ interface LegacyWorldState extends WorldTileFields {
   }[];
   readonly chunks: readonly WorldChunk[];
   readonly tiles: WorldTileFields;
+}
+
+interface LegacyWorldConfig {
+  readonly width: number;
+  readonly height: number;
+  readonly chunkSize: number;
+}
+
+interface LegacyM3Event {
+  readonly id: number;
+  readonly tick: number;
+  readonly kind: string;
+  readonly subjectId: number;
+  readonly targetId: number;
+  readonly tileIndex: number;
+  readonly amount: number;
+}
+
+interface LegacyFactualMemory {
+  readonly id: number;
+  readonly eventId: number;
+  readonly tick: number;
+  readonly kind: string;
+  readonly targetId: number;
+}
+
+interface LegacyCivilizationState extends Omit<CivilizationState, 'agents' | 'society'> {
+  readonly agents: readonly (Omit<CivilizationState['agents'][number], 'memories'> & {
+    readonly memories: readonly LegacyFactualMemory[];
+  })[];
+}
+
+interface VersionTwoWorldState extends Omit<LegacyWorldState, 'eventLog'> {
+  readonly eventLog: readonly LegacyM3Event[];
+  readonly civilization: LegacyCivilizationState;
 }
 
 const LEGACY_PAYLOAD_KEYS = [
@@ -93,6 +140,8 @@ const CIVILIZATION_KEYS = [
   'systemRng',
 ] as const;
 
+const VERSION_THREE_CIVILIZATION_KEYS = [...CIVILIZATION_KEYS, 'society'] as const;
+
 const AGENT_ACTIONS = new Set<AgentAction>([
   'idle',
   'forage',
@@ -128,6 +177,18 @@ const STRUCTURE_STATUSES = new Set<StructureStatus>([
   'abandoned',
   'demolished',
 ]);
+const ENTITY_KINDS = new Set<EntityKind>([
+  'person',
+  'structure',
+  'household',
+  'culture',
+  'group',
+  'institution',
+  'world',
+]);
+const ECONOMIC_ROLES = new Set<EconomicRole>(['grower', 'maker', 'trader', 'caretaker']);
+const GOVERNMENTS = new Set<GovernmentKind>(['council', 'stewardship']);
+const OFFER_KINDS = new Set<OfferKind>(['meal', 'tool']);
 
 function isRecord(value: unknown): value is UnknownRecord {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
@@ -170,7 +231,7 @@ function numberArray(
   );
 }
 
-function parseConfig(value: unknown): WorldConfig {
+function parseLegacyConfig(value: unknown): LegacyWorldConfig {
   if (!isRecord(value)) throw new Error('Snapshot config must be an object.');
   assertExactKeys(value, ['chunkSize', 'height', 'width'], 'Snapshot config');
   const config = Object.freeze({
@@ -184,7 +245,7 @@ function parseConfig(value: unknown): WorldConfig {
   return config;
 }
 
-function expectedChunks(config: WorldConfig): readonly WorldChunk[] {
+function expectedChunks(config: LegacyWorldConfig): readonly WorldChunk[] {
   const chunks: WorldChunk[] = [];
   let id = 0;
   for (let y = 0; y < config.height; y += config.chunkSize) {
@@ -204,7 +265,7 @@ function expectedChunks(config: WorldConfig): readonly WorldChunk[] {
   return Object.freeze(chunks);
 }
 
-function parseChunks(value: unknown, config: WorldConfig): readonly WorldChunk[] {
+function parseChunks(value: unknown, config: LegacyWorldConfig): readonly WorldChunk[] {
   const expected = expectedChunks(config);
   if (!isUnknownArray(value) || value.length !== expected.length) {
     throw new Error('Snapshot chunks do not match the configured world.');
@@ -262,7 +323,7 @@ function parseEvents(
   tick: number,
   nextEventId: number,
   tileCount: number,
-): readonly WorldEvent[] {
+): readonly LegacyM3Event[] {
   if (!isUnknownArray(value)) throw new Error('Snapshot eventLog must be an array.');
   const ids = new Set<number>();
   const events = value.map((candidate, index) => {
@@ -387,11 +448,11 @@ function parsePlan(
 
 function parseCivilization(
   value: unknown,
-  config: WorldConfig,
+  config: LegacyWorldConfig,
   tiles: WorldTileFields,
-  eventsById: ReadonlyMap<number, WorldEvent>,
+  eventsById: ReadonlyMap<number, LegacyM3Event>,
   tick: number,
-): CivilizationState {
+): LegacyCivilizationState {
   if (!isRecord(value)) throw new Error('Snapshot civilization must be an object.');
   assertExactKeys(value, CIVILIZATION_KEYS, 'Snapshot civilization');
   const tileCount = config.width * config.height;
@@ -863,7 +924,7 @@ function parseCivilization(
     0,
     0xffff,
   );
-  const civilization = Object.freeze({
+  const civilization: LegacyCivilizationState = Object.freeze({
     nextAgentId: safeInteger(value.nextAgentId, 'Civilization nextAgentId', 1),
     nextRelationshipId: safeInteger(value.nextRelationshipId, 'Civilization nextRelationshipId', 1),
     nextStructureId: safeInteger(value.nextStructureId, 'Civilization nextStructureId', 1),
@@ -892,25 +953,13 @@ function parseCivilization(
   ) {
     throw new Error('Civilization next IDs must exceed all current IDs.');
   }
-  const terrain = {
-    width: config.width,
-    height: config.height,
-    food: tiles.food,
-    freshWater: tiles.freshWater,
-    timber: tiles.timber,
-    stone: tiles.stone,
-    habitability: tiles.habitability,
-    hazard: tiles.hazard,
-    isWalkable,
-  };
-  assertCivilizationInvariants(civilization, terrain);
   return civilization;
 }
 
 function parseLegacyWorldPayload(value: unknown): LegacyWorldState {
   if (!isRecord(value)) throw new Error('Snapshot payload must be an object.');
   assertExactKeys(value, LEGACY_PAYLOAD_KEYS, 'Snapshot payload');
-  const config = parseConfig(value.config);
+  const config = parseLegacyConfig(value.config);
   const tileCount = config.width * config.height;
   const tick = safeInteger(value.tick, 'Snapshot tick');
   const nextEventId = safeInteger(value.nextEventId, 'Snapshot nextEventId', 1);
@@ -993,50 +1042,7 @@ function canonicalLegacyWorldJson(state: LegacyWorldState): string {
   });
 }
 
-/** Applies the one-time M3 founding migration to a validated v0/v1 terrain snapshot. */
-function upgradeLegacyWorld(state: LegacyWorldState): WorldState {
-  const tileCount = state.config.width * state.config.height;
-  const terrain = {
-    width: state.config.width,
-    height: state.config.height,
-    food: state.food,
-    freshWater: state.freshWater,
-    timber: state.timber,
-    stone: state.stone,
-    habitability: state.habitability,
-    hazard: state.hazard,
-    isWalkable: (tileIndex: number) =>
-      tileIndex >= 0 &&
-      tileIndex < tileCount &&
-      (state.water[tileIndex] ?? 1) === 0 &&
-      (state.habitability[tileIndex] ?? 0) >= 80 &&
-      (state.hazard[tileIndex] ?? 255) < 180,
-  };
-  const foundingCivilization = createCivilizationAtTick(state.seed, terrain, state.tick);
-  const foundersEvent: WorldEvent = Object.freeze({
-    id: state.nextEventId,
-    tick: state.tick,
-    kind: 'founders-arrived',
-    subjectId: 0,
-    targetId: 0,
-    tileIndex: foundingCivilization.centerTileIndex,
-    amount: SETTLEMENT_FOUNDER_COUNT,
-  });
-  const civilization = attachFactualMemories(foundingCivilization, [foundersEvent]);
-  return Object.freeze({
-    ...state,
-    nextEventId: state.nextEventId + 1,
-    eventLog: Object.freeze([
-      ...state.eventLog.map((event) =>
-        Object.freeze({ ...event, subjectId: 0, targetId: 0, tileIndex: -1, amount: 0 }),
-      ),
-      foundersEvent,
-    ]),
-    civilization,
-  });
-}
-
-function parseVersionTwoWorldPayload(value: unknown): WorldState {
+function parseVersionTwoWorldPayload(value: unknown): VersionTwoWorldState {
   if (!isRecord(value)) throw new Error('Snapshot payload must be an object.');
   assertExactKeys(value, [...LEGACY_PAYLOAD_KEYS, 'civilization'], 'Snapshot payload');
   if (!isUnknownArray(value.eventLog)) throw new Error('Snapshot eventLog must be an array.');
@@ -1073,6 +1079,756 @@ function parseVersionTwoWorldPayload(value: unknown): WorldState {
     }
   }
   return Object.freeze({ ...legacy, eventLog, civilization });
+}
+
+function parseVersionThreeConfig(value: unknown): WorldConfig {
+  if (!isRecord(value)) throw new Error('Snapshot config must be an object.');
+  assertExactKeys(value, ['chunkSize', 'height', 'societyYearTicks', 'width'], 'Snapshot config');
+  const config = Object.freeze({
+    chunkSize: safeInteger(value.chunkSize, 'Snapshot chunk size', 1),
+    height: safeInteger(value.height, 'Snapshot height', 1),
+    societyYearTicks: safeInteger(value.societyYearTicks, 'Snapshot society calendar', 1),
+    width: safeInteger(value.width, 'Snapshot width', 1),
+  });
+  if (
+    config.width > Math.floor(MAX_WORLD_TILES / config.height) ||
+    (config.societyYearTicks !== NORMAL_YEAR_TICKS &&
+      config.societyYearTicks !== ACCELERATED_YEAR_TICKS)
+  ) {
+    throw new Error('Snapshot dimensions or society calendar are invalid.');
+  }
+  return config;
+}
+
+function parseEntityRef(value: unknown, name: string): SocietyEntityRef {
+  if (!isRecord(value)) throw new Error(`${name} must be an object.`);
+  assertExactKeys(value, ['id', 'kind'], name);
+  const kind = enumValue(value.kind, ENTITY_KINDS, `${name} kind`);
+  const id = safeInteger(value.id, `${name} id`, kind === 'world' ? 0 : 1);
+  if ((kind === 'world') !== (id === 0)) throw new Error(`${name} is invalid.`);
+  return Object.freeze({ kind, id });
+}
+
+function parseSociety(value: unknown, tick: number, tileCount: number): SocietyState {
+  if (!isRecord(value)) throw new Error('Civilization society must be an object.');
+  assertExactKeys(
+    value,
+    [
+      'bonds',
+      'centerTileIndex',
+      'collapsed',
+      'cultures',
+      'groups',
+      'households',
+      'inequality',
+      'institution',
+      'lastTick',
+      'nextHouseholdId',
+      'nextOfferId',
+      'nextPersonId',
+      'offers',
+      'operationCount',
+      'pendingBiographyFacts',
+      'people',
+      'rng',
+      'scarcity',
+      'stability',
+      'yearTicks',
+    ],
+    'Civilization society',
+  );
+  const yearTicks = safeInteger(value.yearTicks, 'Society calendar', 1);
+  if (yearTicks !== NORMAL_YEAR_TICKS && yearTicks !== ACCELERATED_YEAR_TICKS)
+    throw new Error('Society calendar is invalid.');
+  const lastTick = safeInteger(value.lastTick, 'Society last tick', 0, tick);
+  const centerTileIndex = tileIndexValue(value.centerTileIndex, tileCount, 'Society center tile');
+  if (!isUnknownArray(value.people)) throw new Error('Society people must be an array.');
+  const people = value.people.map((candidate, index) => {
+    if (!isRecord(candidate)) throw new Error(`Society person ${index} must be an object.`);
+    assertExactKeys(
+      candidate,
+      [
+        'alive',
+        'biographyEventIds',
+        'birthTick',
+        'cultureId',
+        'deathTick',
+        'generation',
+        'health',
+        'householdId',
+        'id',
+        'name',
+        'origin',
+        'parentIds',
+        'role',
+        'tileIndex',
+      ],
+      `Society person ${index}`,
+    );
+    if (!isUnknownArray(candidate.biographyEventIds) || candidate.biographyEventIds.length > 16)
+      throw new Error(`Society person ${index} biography is invalid.`);
+    const parentIds = numberArray(
+      candidate.parentIds,
+      2,
+      `Society person ${index} parents`,
+      0,
+      Number.MAX_SAFE_INTEGER,
+    );
+    const shared = {
+      id: safeInteger(candidate.id, `Society person ${index} id`, 1),
+      name: finiteString(candidate.name, `Society person ${index} name`),
+      birthTick: safeInteger(
+        candidate.birthTick,
+        `Society person ${index} birth tick`,
+        Number.MIN_SAFE_INTEGER,
+        tick,
+      ),
+      generation: safeInteger(candidate.generation, `Society person ${index} generation`),
+      parentIds: Object.freeze([parentIds[0]!, parentIds[1]!] as [number, number]),
+      householdId: safeInteger(candidate.householdId, `Society person ${index} household`, 1),
+      cultureId: safeInteger(candidate.cultureId, `Society person ${index} culture`, 1),
+      role: enumValue(candidate.role, ECONOMIC_ROLES, `Society person ${index} role`),
+      tileIndex: tileIndexValue(candidate.tileIndex, tileCount, `Society person ${index} tile`),
+    };
+    const alive =
+      typeof candidate.alive === 'boolean'
+        ? candidate.alive
+        : (() => {
+            throw new Error(`Society person ${index} alive is invalid.`);
+          })();
+    const deathTick = safeInteger(
+      candidate.deathTick,
+      `Society person ${index} death tick`,
+      0,
+      tick,
+    );
+    const health = safeInteger(candidate.health, `Society person ${index} health`, 0, 100);
+    const biographyEventIds = Object.freeze(
+      candidate.biographyEventIds.map((id, biographyIndex) =>
+        safeInteger(id, `Society person ${index} biography ${biographyIndex}`, 1),
+      ),
+    );
+    if (
+      candidate.origin !== 'founder' &&
+      candidate.origin !== 'birth' &&
+      candidate.origin !== 'migration'
+    ) {
+      throw new Error(`Society person ${index} origin is invalid.`);
+    }
+    if (candidate.origin !== 'founder') {
+      return Object.freeze({
+        ...shared,
+        origin: candidate.origin,
+        alive,
+        deathTick,
+        health,
+        biographyEventIds,
+      });
+    }
+    return Object.freeze({
+      id: shared.id,
+      name: shared.name,
+      origin: 'founder' as const,
+      alive,
+      birthTick: shared.birthTick,
+      deathTick,
+      generation: shared.generation,
+      parentIds: shared.parentIds,
+      householdId: shared.householdId,
+      cultureId: shared.cultureId,
+      role: shared.role,
+      tileIndex: shared.tileIndex,
+      health,
+      biographyEventIds,
+    });
+  });
+  const parseIdCollection = <T extends { readonly id: number }>(
+    raw: unknown,
+    label: string,
+    parser: (candidate: UnknownRecord, index: number) => T,
+  ): readonly T[] => {
+    if (!isUnknownArray(raw)) throw new Error(`${label} must be an array.`);
+    return Object.freeze(
+      raw.map((candidate, index) => {
+        if (!isRecord(candidate)) throw new Error(`${label} ${index} must be an object.`);
+        return parser(candidate, index);
+      }),
+    );
+  };
+  const households = parseIdCollection(
+    value.households,
+    'Society household',
+    (candidate, index) => {
+      assertExactKeys(
+        candidate,
+        ['adultIds', 'credits', 'cultureId', 'id', 'meals', 'tools'],
+        `Society household ${index}`,
+      );
+      if (!isUnknownArray(candidate.adultIds))
+        throw new Error(`Society household ${index} adults are invalid.`);
+      return Object.freeze({
+        id: safeInteger(candidate.id, `Society household ${index} id`, 1),
+        cultureId: safeInteger(candidate.cultureId, `Society household ${index} culture`, 1),
+        adultIds: Object.freeze(
+          candidate.adultIds.map((id, adultIndex) =>
+            safeInteger(id, `Society household ${index} adult ${adultIndex}`, 1),
+          ),
+        ),
+        credits: safeInteger(candidate.credits, `Society household ${index} credits`),
+        meals: safeInteger(candidate.meals, `Society household ${index} meals`),
+        tools: safeInteger(candidate.tools, `Society household ${index} tools`),
+      });
+    },
+  );
+  const cultures = parseIdCollection(value.cultures, 'Society culture', (candidate, index) => {
+    assertExactKeys(
+      candidate,
+      ['architectureStyle', 'belief', 'id', 'name', 'preference', 'tradition'],
+      `Society culture ${index}`,
+    );
+    return Object.freeze({
+      id: safeInteger(candidate.id, `Society culture ${index} id`, 1),
+      name: finiteString(candidate.name, `Society culture ${index} name`),
+      preference: enumValue(
+        candidate.preference,
+        ECONOMIC_ROLES,
+        `Society culture ${index} preference`,
+      ),
+      belief: finiteString(candidate.belief, `Society culture ${index} belief`),
+      tradition: finiteString(candidate.tradition, `Society culture ${index} tradition`),
+      architectureStyle: finiteString(
+        candidate.architectureStyle,
+        `Society culture ${index} architecture`,
+      ),
+    });
+  });
+  const groups = parseIdCollection(value.groups, 'Society group', (candidate, index) => {
+    assertExactKeys(candidate, ['cultureId', 'id', 'memberIds', 'name'], `Society group ${index}`);
+    if (!isUnknownArray(candidate.memberIds))
+      throw new Error(`Society group ${index} members are invalid.`);
+    return Object.freeze({
+      id: safeInteger(candidate.id, `Society group ${index} id`, 1),
+      cultureId: safeInteger(candidate.cultureId, `Society group ${index} culture`, 1),
+      name: finiteString(candidate.name, `Society group ${index} name`),
+      memberIds: Object.freeze(
+        candidate.memberIds.map((id, memberIndex) =>
+          safeInteger(id, `Society group ${index} member ${memberIndex}`, 1),
+        ),
+      ),
+    });
+  });
+  if (!isRecord(value.institution)) throw new Error('Society institution must be an object.');
+  assertExactKeys(
+    value.institution,
+    ['changedTick', 'government', 'id', 'kind', 'leaderId'],
+    'Society institution',
+  );
+  if (value.institution.kind !== 'council') throw new Error('Society institution kind is invalid.');
+  const institution = Object.freeze({
+    id: safeInteger(value.institution.id, 'Society institution id', 1),
+    kind: 'council' as const,
+    leaderId: safeInteger(value.institution.leaderId, 'Society institution leader'),
+    government: enumValue(value.institution.government, GOVERNMENTS, 'Society government'),
+    changedTick: safeInteger(
+      value.institution.changedTick,
+      'Society institution changed tick',
+      0,
+      lastTick,
+    ),
+  });
+  const offers = parseIdCollection(value.offers, 'Society offer', (candidate, index) => {
+    assertExactKeys(
+      candidate,
+      [
+        'amount',
+        'buyerHouseholdId',
+        'fulfilledAmount',
+        'id',
+        'kind',
+        'price',
+        'sellerHouseholdId',
+        'transportDemand',
+      ],
+      `Society offer ${index}`,
+    );
+    const amount = safeInteger(candidate.amount, `Society offer ${index} amount`);
+    return Object.freeze({
+      id: safeInteger(candidate.id, `Society offer ${index} id`, 1),
+      kind: enumValue(candidate.kind, OFFER_KINDS, `Society offer ${index} kind`),
+      sellerHouseholdId: safeInteger(
+        candidate.sellerHouseholdId,
+        `Society offer ${index} seller`,
+        1,
+      ),
+      buyerHouseholdId: safeInteger(candidate.buyerHouseholdId, `Society offer ${index} buyer`, 1),
+      amount,
+      price: safeInteger(candidate.price, `Society offer ${index} price`, 1),
+      fulfilledAmount: safeInteger(
+        candidate.fulfilledAmount,
+        `Society offer ${index} fulfilled`,
+        0,
+        amount,
+      ),
+      transportDemand: safeInteger(candidate.transportDemand, `Society offer ${index} transport`),
+    });
+  });
+  if (!isUnknownArray(value.bonds)) throw new Error('Society bonds must be an array.');
+  const bonds = Object.freeze(
+    value.bonds.map((candidate, index) => {
+      if (!isRecord(candidate)) throw new Error(`Society bond ${index} must be an object.`);
+      assertExactKeys(
+        candidate,
+        ['conflict', 'cooperation', 'disagreement', 'firstPersonId', 'secondPersonId'],
+        `Society bond ${index}`,
+      );
+      return Object.freeze({
+        firstPersonId: safeInteger(candidate.firstPersonId, `Society bond ${index} first`, 1),
+        secondPersonId: safeInteger(candidate.secondPersonId, `Society bond ${index} second`, 1),
+        cooperation: safeInteger(
+          candidate.cooperation,
+          `Society bond ${index} cooperation`,
+          0,
+          100,
+        ),
+        disagreement: safeInteger(
+          candidate.disagreement,
+          `Society bond ${index} disagreement`,
+          0,
+          100,
+        ),
+        conflict: safeInteger(candidate.conflict, `Society bond ${index} conflict`, 0, 100),
+      });
+    }),
+  );
+  if (!isUnknownArray(value.pendingBiographyFacts))
+    throw new Error('Society biography facts must be an array.');
+  const pendingBiographyFacts = Object.freeze(
+    value.pendingBiographyFacts.map((candidate, index) => {
+      if (!isRecord(candidate))
+        throw new Error(`Society biography fact ${index} must be an object.`);
+      assertExactKeys(
+        candidate,
+        ['kind', 'personId', 'source', 'summary', 'target'],
+        `Society biography fact ${index}`,
+      );
+      return Object.freeze({
+        personId: safeInteger(candidate.personId, `Society biography fact ${index} person`, 1),
+        kind: finiteString(candidate.kind, `Society biography fact ${index} kind`),
+        source: parseEntityRef(candidate.source, `Society biography fact ${index} source`),
+        target: parseEntityRef(candidate.target, `Society biography fact ${index} target`),
+        summary: finiteString(candidate.summary, `Society biography fact ${index} summary`, 160),
+      });
+    }),
+  );
+  const society: SocietyState = Object.freeze({
+    yearTicks,
+    lastTick,
+    centerTileIndex,
+    nextPersonId: safeInteger(value.nextPersonId, 'Society next person id', 1),
+    nextHouseholdId: safeInteger(value.nextHouseholdId, 'Society next household id', 1),
+    nextOfferId: safeInteger(value.nextOfferId, 'Society next offer id', 1),
+    people,
+    households,
+    cultures,
+    groups,
+    institution,
+    offers,
+    bonds,
+    scarcity: safeInteger(value.scarcity, 'Society scarcity', 0, 100),
+    inequality: safeInteger(value.inequality, 'Society inequality'),
+    stability: safeInteger(value.stability, 'Society stability', 0, 100),
+    collapsed:
+      typeof value.collapsed === 'boolean'
+        ? value.collapsed
+        : (() => {
+            throw new Error('Society collapsed is invalid.');
+          })(),
+    pendingBiographyFacts,
+    rng: parseRng(value.rng, 'Society rng'),
+    operationCount: safeInteger(value.operationCount, 'Society operation count'),
+  });
+  assertSocietyInvariants(society);
+  return society;
+}
+
+function parseTypedEvents(
+  value: unknown,
+  tick: number,
+  nextEventId: number,
+  tileCount: number,
+): readonly WorldEvent[] {
+  if (!isUnknownArray(value)) throw new Error('Snapshot eventLog must be an array.');
+  const events = value.map((candidate, index) => {
+    if (!isRecord(candidate)) throw new Error(`Snapshot event ${index} must be an object.`);
+    assertExactKeys(
+      candidate,
+      [
+        'amount',
+        'id',
+        'kind',
+        'subjectId',
+        'subjectKind',
+        'summary',
+        'targetId',
+        'targetKind',
+        'tick',
+        'tileIndex',
+      ],
+      `Snapshot event ${index}`,
+    );
+    const subjectKind = enumValue(
+      candidate.subjectKind,
+      ENTITY_KINDS,
+      `Snapshot event ${index} subject kind`,
+    );
+    const targetKind = enumValue(
+      candidate.targetKind,
+      ENTITY_KINDS,
+      `Snapshot event ${index} target kind`,
+    );
+    const subjectId = safeInteger(
+      candidate.subjectId,
+      `Snapshot event ${index} subject id`,
+      subjectKind === 'world' ? 0 : 1,
+    );
+    const targetId = safeInteger(
+      candidate.targetId,
+      `Snapshot event ${index} target id`,
+      targetKind === 'world' ? 0 : 1,
+    );
+    if (
+      (subjectKind === 'world') !== (subjectId === 0) ||
+      (targetKind === 'world') !== (targetId === 0)
+    )
+      throw new Error(`Snapshot event ${index} entity references are invalid.`);
+    return Object.freeze({
+      id: safeInteger(candidate.id, `Snapshot event ${index} id`, 1),
+      tick: safeInteger(candidate.tick, `Snapshot event ${index} tick`, 0, tick),
+      kind: finiteString(candidate.kind, `Snapshot event ${index} kind`),
+      summary: finiteString(candidate.summary, `Snapshot event ${index} summary`, 160),
+      subjectKind,
+      subjectId,
+      targetKind,
+      targetId,
+      tileIndex: safeInteger(
+        candidate.tileIndex,
+        `Snapshot event ${index} tile`,
+        -1,
+        tileCount - 1,
+      ),
+      amount: safeInteger(candidate.amount, `Snapshot event ${index} amount`),
+    });
+  });
+  sortedUniqueIds(events, 'Snapshot event');
+  if (nextEventId <= (events.at(-1)?.id ?? 0))
+    throw new Error('Snapshot nextEventId must exceed every event id.');
+  return Object.freeze(events);
+}
+
+function assertSocietyCrossWorldReferences(
+  society: SocietyState,
+  civilization: Pick<CivilizationState, 'structures'>,
+): void {
+  const structureIds = new Set(civilization.structures.map((structure) => structure.id));
+  for (const fact of society.pendingBiographyFacts) {
+    for (const reference of [fact.source, fact.target]) {
+      if (reference.kind === 'structure' && !structureIds.has(reference.id)) {
+        throw new Error('Society biography fact references an unknown structure.');
+      }
+    }
+  }
+}
+
+function convertLegacyConfig(config: LegacyWorldConfig): WorldConfig {
+  return Object.freeze({ ...config, societyYearTicks: NORMAL_YEAR_TICKS });
+}
+
+function legacyEntityKind(
+  id: number,
+  primary: 'agent' | 'structure',
+  civilization: LegacyCivilizationState,
+): EntityKind {
+  if (id === 0) return 'world';
+  const hasAgent = civilization.agents.some((agent) => agent.id === id);
+  const hasStructure = civilization.structures.some((structure) => structure.id === id);
+  if (primary === 'agent' && hasAgent) return 'person';
+  if (primary === 'structure' && hasStructure) return 'structure';
+  if (hasAgent) return 'person';
+  if (hasStructure) return 'structure';
+  throw new Error('Legacy event references an unknown entity.');
+}
+
+function legacyEventSummary(event: LegacyM3Event, civilization: LegacyCivilizationState): string {
+  if (event.kind === 'world-generated') return 'The founding world formed.';
+  if (event.kind === 'founders-arrived')
+    return `${event.amount} named founders established the first settlement.`;
+  const target = civilization.structures.find((structure) => structure.id === event.targetId);
+  if (target !== undefined)
+    return `${target.kind === 'shelter' ? 'Shelter' : 'Storehouse'} ${target.id}: ${event.kind} at tick ${event.tick}.`;
+  return `Recorded ${event.kind} at tick ${event.tick}.`;
+}
+
+function typedLegacyEvents(state: VersionTwoWorldState): readonly WorldEvent[] {
+  return Object.freeze(
+    state.eventLog.map((event) =>
+      Object.freeze({
+        ...event,
+        summary: legacyEventSummary(event, state.civilization),
+        subjectKind: legacyEntityKind(event.subjectId, 'agent', state.civilization),
+        targetKind: legacyEntityKind(event.targetId, 'structure', state.civilization),
+      }),
+    ),
+  );
+}
+
+function societyForLegacy(state: VersionTwoWorldState): SocietyState {
+  const initial = createInitialSociety({
+    seed: state.seed,
+    tick: state.tick,
+    centerTileIndex: state.civilization.centerTileIndex,
+    yearTicks: NORMAL_YEAR_TICKS,
+    people: state.civilization.agents.map((agent) =>
+      Object.freeze({
+        id: agent.id,
+        alive: agent.alive,
+        health: agent.health,
+        tileIndex: agent.tileIndex,
+        skills: agent.skills,
+        occupation: agent.occupation,
+      }),
+    ),
+  });
+  const names = new Map(state.civilization.agents.map((agent) => [agent.id, agent.name]));
+  const society: SocietyState = Object.freeze({
+    ...initial,
+    nextPersonId: state.civilization.nextAgentId,
+    people: Object.freeze(
+      initial.people.map((person) =>
+        Object.freeze({ ...person, name: names.get(person.id) ?? person.name }),
+      ),
+    ),
+  });
+  assertSocietyInvariants(society);
+  return society;
+}
+
+function upgradeVersionTwo(state: VersionTwoWorldState): WorldState {
+  const eventLog = typedLegacyEvents(state);
+  const eventsById = new Map(eventLog.map((event) => [event.id, event]));
+  const civilization: CivilizationState = Object.freeze({
+    ...state.civilization,
+    agents: Object.freeze(
+      state.civilization.agents.map((agent) =>
+        Object.freeze({
+          ...agent,
+          memories: Object.freeze(
+            agent.memories.map((memory) => {
+              const source = eventsById.get(memory.eventId);
+              if (source === undefined)
+                throw new Error('Legacy memory references an unknown event.');
+              return Object.freeze({
+                id: memory.id,
+                eventId: memory.eventId,
+                tick: memory.tick,
+                kind: memory.kind,
+                summary: source.summary,
+                targetKind: source.targetKind,
+                targetId: memory.targetId,
+              });
+            }),
+          ),
+        }),
+      ),
+    ),
+    society: societyForLegacy(state),
+  });
+  const world: WorldState = Object.freeze({
+    ...state,
+    config: convertLegacyConfig(state.config),
+    eventLog,
+    civilization,
+  });
+  assertWorldInvariants(world);
+  return world;
+}
+
+/** Applies the M3 founding migration, then the pure v2-to-v3 society migration. */
+function upgradeLegacyWorld(state: LegacyWorldState): WorldState {
+  const tileCount = state.config.width * state.config.height;
+  const terrain = {
+    width: state.config.width,
+    height: state.config.height,
+    food: state.food,
+    freshWater: state.freshWater,
+    timber: state.timber,
+    stone: state.stone,
+    habitability: state.habitability,
+    hazard: state.hazard,
+    isWalkable: (tileIndex: number) =>
+      tileIndex >= 0 &&
+      tileIndex < tileCount &&
+      (state.water[tileIndex] ?? 1) === 0 &&
+      (state.habitability[tileIndex] ?? 0) >= 80 &&
+      (state.hazard[tileIndex] ?? 255) < 180,
+  };
+  const foundingCivilization = createCivilizationAtTick(state.seed, terrain, state.tick);
+  const foundersTyped: WorldEvent = Object.freeze({
+    id: state.nextEventId,
+    tick: state.tick,
+    kind: 'founders-arrived',
+    summary: `${SETTLEMENT_FOUNDER_COUNT} named founders established the first settlement.`,
+    subjectKind: 'world',
+    subjectId: 0,
+    targetKind: 'world',
+    targetId: 0,
+    tileIndex: foundingCivilization.centerTileIndex,
+    amount: SETTLEMENT_FOUNDER_COUNT,
+  });
+  const civilization = attachFactualMemories(foundingCivilization, [foundersTyped]);
+  const legacyEvents: readonly LegacyM3Event[] = Object.freeze([
+    ...state.eventLog.map((event) =>
+      Object.freeze({ ...event, subjectId: 0, targetId: 0, tileIndex: -1, amount: 0 }),
+    ),
+    Object.freeze({
+      id: foundersTyped.id,
+      tick: foundersTyped.tick,
+      kind: foundersTyped.kind,
+      subjectId: 0,
+      targetId: 0,
+      tileIndex: foundersTyped.tileIndex,
+      amount: foundersTyped.amount,
+    }),
+  ]);
+  const legacyCivilization = {
+    ...civilization,
+    agents: civilization.agents.map((agent) =>
+      Object.freeze({
+        ...agent,
+        memories: agent.memories.map((memory) =>
+          Object.freeze({
+            id: memory.id,
+            eventId: memory.eventId,
+            tick: memory.tick,
+            kind: memory.kind,
+            targetId: memory.targetId,
+          }),
+        ),
+      }),
+    ),
+  } as unknown as LegacyCivilizationState;
+  const versionTwo: VersionTwoWorldState = Object.freeze({
+    ...state,
+    nextEventId: state.nextEventId + 1,
+    eventLog: legacyEvents,
+    civilization: legacyCivilization,
+  });
+  return upgradeVersionTwo(versionTwo);
+}
+
+function parseVersionThreeWorldPayload(value: unknown): WorldState {
+  if (!isRecord(value)) throw new Error('Snapshot payload must be an object.');
+  assertExactKeys(value, [...LEGACY_PAYLOAD_KEYS, 'civilization'], 'Snapshot payload');
+  if (!isRecord(value.civilization)) throw new Error('Snapshot civilization must be an object.');
+  assertExactKeys(value.civilization, VERSION_THREE_CIVILIZATION_KEYS, 'Snapshot civilization');
+  const config = parseVersionThreeConfig(value.config);
+  const legacyPayload: UnknownRecord = {
+    ...value,
+    config: { chunkSize: config.chunkSize, height: config.height, width: config.width },
+  };
+  legacyPayload.eventLog = isUnknownArray(value.eventLog)
+    ? value.eventLog.map((event, index) => {
+        if (!isRecord(event)) throw new Error(`Snapshot event ${index} must be an object.`);
+        return { id: event.id, kind: event.kind, tick: event.tick };
+      })
+    : value.eventLog;
+  delete legacyPayload.civilization;
+  const legacy = parseLegacyWorldPayload(legacyPayload);
+  const legacyCivilization: UnknownRecord = { ...value.civilization };
+  legacyCivilization.agents = isUnknownArray(legacyCivilization.agents)
+    ? legacyCivilization.agents.map((agent, index) => {
+        if (!isRecord(agent)) throw new Error(`Civilization agent ${index} must be an object.`);
+        const copied = { ...agent };
+        copied.memories = isUnknownArray(agent.memories)
+          ? agent.memories.map((memory, memoryIndex) => {
+              if (!isRecord(memory))
+                throw new Error(`Agent ${index} memory ${memoryIndex} must be an object.`);
+              const legacyMemory = { ...memory };
+              delete legacyMemory.summary;
+              delete legacyMemory.targetKind;
+              return legacyMemory;
+            })
+          : agent.memories;
+        return copied;
+      })
+    : legacyCivilization.agents;
+  delete legacyCivilization.society;
+  const eventLog = parseTypedEvents(
+    value.eventLog,
+    legacy.tick,
+    legacy.nextEventId,
+    config.width * config.height,
+  );
+  const oldEvents = new Map(
+    eventLog.map((event) => [
+      event.id,
+      {
+        id: event.id,
+        tick: event.tick,
+        kind: event.kind,
+        subjectId: event.subjectId,
+        targetId: event.targetId,
+        tileIndex: event.tileIndex,
+        amount: event.amount,
+      },
+    ]),
+  );
+  const legacyCiv = parseCivilization(
+    legacyCivilization,
+    legacy.config,
+    legacy.tiles,
+    oldEvents,
+    legacy.tick,
+  );
+  const eventsById = new Map(eventLog.map((event) => [event.id, event]));
+  const society = parseSociety(
+    value.civilization.society,
+    legacy.tick,
+    config.width * config.height,
+  );
+  if (society.yearTicks !== config.societyYearTicks) {
+    throw new Error('Society calendar does not match the world calendar.');
+  }
+  const civilization: CivilizationState = Object.freeze({
+    ...legacyCiv,
+    agents: Object.freeze(
+      legacyCiv.agents.map((agent) =>
+        Object.freeze({
+          ...agent,
+          memories: Object.freeze(
+            agent.memories.map((memory) => {
+              const source = eventsById.get(memory.eventId);
+              if (source === undefined)
+                throw new Error('Agent memory references an unknown event.');
+              return Object.freeze({
+                id: memory.id,
+                eventId: memory.eventId,
+                tick: memory.tick,
+                kind: memory.kind,
+                summary: source.summary,
+                targetKind: source.targetKind,
+                targetId: memory.targetId,
+              });
+            }),
+          ),
+        }),
+      ),
+    ),
+    society,
+  });
+  assertSocietyCrossWorldReferences(society, civilization);
+  const world: WorldState = Object.freeze({ ...legacy, config, eventLog, civilization });
+  assertWorldInvariants(world);
+  return world;
 }
 
 function parseEnvelope(snapshot: string): UnknownRecord {
@@ -1120,7 +1876,32 @@ function deserializeVersionOne(envelope: UnknownRecord): LegacyWorldState {
   return world;
 }
 
-function deserializeVersionTwo(envelope: UnknownRecord): WorldState {
+function deserializeVersionTwo(envelope: UnknownRecord): VersionTwoWorldState {
+  assertExactKeys(
+    envelope,
+    ['checksum', 'contentVersion', 'engineVersion', 'format', 'formatVersion', 'payload'],
+    'World snapshot envelope',
+  );
+  if (
+    envelope.formatVersion !== 2 ||
+    envelope.engineVersion !== 2 ||
+    envelope.contentVersion !== 2 ||
+    typeof envelope.checksum !== 'string'
+  ) {
+    throw new Error('World snapshot version metadata is invalid.');
+  }
+  const payloadJson = JSON.stringify(envelope.payload);
+  if (hashCanonicalJson(payloadJson) !== envelope.checksum) {
+    throw new Error('World snapshot checksum does not match its payload.');
+  }
+  const world = parseVersionTwoWorldPayload(envelope.payload);
+  if (canonicalVersionTwoWorldJson(world) !== payloadJson) {
+    throw new Error('World snapshot payload is not canonical.');
+  }
+  return world;
+}
+
+function deserializeVersionThree(envelope: UnknownRecord): WorldState {
   assertExactKeys(
     envelope,
     ['checksum', 'contentVersion', 'engineVersion', 'format', 'formatVersion', 'payload'],
@@ -1138,11 +1919,104 @@ function deserializeVersionTwo(envelope: UnknownRecord): WorldState {
   if (hashCanonicalJson(payloadJson) !== envelope.checksum) {
     throw new Error('World snapshot checksum does not match its payload.');
   }
-  const world = parseVersionTwoWorldPayload(envelope.payload);
+  const world = parseVersionThreeWorldPayload(envelope.payload);
   if (canonicalWorldJson(world) !== payloadJson) {
-    throw new Error('World snapshot payload is not canonical.');
+    const canonical = canonicalWorldJson(world);
+    let difference = 0;
+    while (difference < canonical.length && canonical[difference] === payloadJson[difference])
+      difference += 1;
+    throw new Error(
+      `World snapshot payload is not canonical at byte ${difference}: ${payloadJson.slice(difference, difference + 80)} != ${canonical.slice(difference, difference + 80)}.`,
+    );
   }
   return world;
+}
+
+function canonicalVersionTwoWorldJson(state: VersionTwoWorldState): string {
+  return JSON.stringify({
+    animals: Array.from(state.animals),
+    biome: Array.from(state.biome),
+    chunks: state.chunks.map((chunk) => ({
+      height: chunk.height,
+      id: chunk.id,
+      width: chunk.width,
+      x: chunk.x,
+      y: chunk.y,
+    })),
+    civilization: {
+      agents: state.civilization.agents.map((agent) => ({
+        action: agent.action,
+        activity: { ...agent.activity },
+        ageTicks: agent.ageTicks,
+        alive: agent.alive,
+        carryingAmount: agent.carryingAmount,
+        carryingKind: agent.carryingKind,
+        communalGoal: agent.communalGoal,
+        fatigue: agent.fatigue,
+        health: agent.health,
+        homeStructureId: agent.homeStructureId,
+        hunger: agent.hunger,
+        id: agent.id,
+        knownTiles: [...agent.knownTiles],
+        memories: agent.memories.map((memory) => ({ ...memory })),
+        name: agent.name,
+        occupation: agent.occupation,
+        personalGoal: agent.personalGoal,
+        plan: agent.plan.map((step) => ({ ...step })),
+        planIndex: agent.planIndex,
+        rng: [...agent.rng],
+        route: [...agent.route],
+        routeCursor: agent.routeCursor,
+        safety: agent.safety,
+        skills: [...agent.skills],
+        targetTileIndex: agent.targetTileIndex,
+        thirst: agent.thirst,
+        tileIndex: agent.tileIndex,
+        traits: [...agent.traits],
+      })),
+      centerTileIndex: state.civilization.centerTileIndex,
+      nextAgentId: state.civilization.nextAgentId,
+      nextMemoryId: state.civilization.nextMemoryId,
+      nextRelationshipId: state.civilization.nextRelationshipId,
+      nextStructureId: state.civilization.nextStructureId,
+      operationCount: state.civilization.operationCount,
+      pathDemand: Array.from(state.civilization.pathDemand),
+      relationships: state.civilization.relationships.map((relationship) => ({ ...relationship })),
+      resourceDepletion: state.civilization.resourceDepletion.map((entry) => ({ ...entry })),
+      stockpile: { ...state.civilization.stockpile },
+      structures: state.civilization.structures.map((structure) => ({ ...structure })),
+      systemRng: [...state.civilization.systemRng],
+    },
+    config: {
+      chunkSize: state.config.chunkSize,
+      height: state.config.height,
+      width: state.config.width,
+    },
+    elevation: Array.from(state.elevation),
+    eventLog: state.eventLog.map((event) => ({
+      amount: event.amount,
+      id: event.id,
+      kind: event.kind,
+      subjectId: event.subjectId,
+      targetId: event.targetId,
+      tick: event.tick,
+      tileIndex: event.tileIndex,
+    })),
+    food: Array.from(state.food),
+    freshWater: Array.from(state.freshWater),
+    habitability: Array.from(state.habitability),
+    hazard: Array.from(state.hazard),
+    metal: Array.from(state.metal),
+    moisture: Array.from(state.moisture),
+    nextEventId: state.nextEventId,
+    plants: Array.from(state.plants),
+    seed: [...state.seed],
+    stone: Array.from(state.stone),
+    temperature: Array.from(state.temperature),
+    tick: state.tick,
+    timber: Array.from(state.timber),
+    water: Array.from(state.water),
+  });
 }
 
 /** Serializes a canonical, versioned, internally checksummed simulation snapshot. */
@@ -1160,7 +2034,10 @@ export function migrateWorldSnapshot(snapshot: string): string {
     throw new Error(`World snapshot version ${formatVersion} is newer than this application.`);
   }
   if (formatVersion === WORLD_SNAPSHOT_FORMAT_VERSION) {
-    return serializeWorldSnapshot(deserializeVersionTwo(envelope));
+    return serializeWorldSnapshot(deserializeVersionThree(envelope));
+  }
+  if (formatVersion === 2) {
+    return serializeWorldSnapshot(upgradeVersionTwo(deserializeVersionTwo(envelope)));
   }
   if (formatVersion === 1) {
     return serializeWorldSnapshot(upgradeLegacyWorld(deserializeVersionOne(envelope)));
@@ -1197,5 +2074,5 @@ export function migrateWorldSnapshot(snapshot: string): string {
 /** Loads and validates a supported snapshot without mutating its input. */
 export function deserializeWorldSnapshot(snapshot: string): WorldState {
   const migrated = migrateWorldSnapshot(snapshot);
-  return deserializeVersionTwo(parseEnvelope(migrated));
+  return deserializeVersionThree(parseEnvelope(migrated));
 }

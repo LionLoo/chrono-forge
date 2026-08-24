@@ -1,0 +1,309 @@
+import {
+  ACCELERATED_YEAR_TICKS,
+  advanceSociety,
+  assertSocietyInvariants,
+  attachSocietyBiographyEventIds,
+  createInitialSociety,
+  societyDto,
+  type SocietyPersonObservation,
+  type SocietyPulseInput,
+  type SocietyState,
+} from '../../src/simulation/society';
+
+function observations(state?: SocietyState): readonly SocietyPersonObservation[] {
+  if (state !== undefined) {
+    return state.people.map((person) => ({
+      id: person.id,
+      alive: person.alive,
+      health: person.health,
+      tileIndex: person.tileIndex,
+      skills:
+        person.role === 'grower'
+          ? ([90, 10, 10, 10] as const)
+          : person.role === 'maker'
+            ? ([10, 90, 10, 10] as const)
+            : person.role === 'trader'
+              ? ([10, 10, 90, 10] as const)
+              : ([10, 10, 10, 90] as const),
+      occupation: person.role,
+    }));
+  }
+  return [1, 2, 3, 4].map((id) => ({
+    id,
+    alive: true,
+    health: 100,
+    tileIndex: 10 + id,
+    skills:
+      id === 1
+        ? ([90, 10, 10, 10] as const)
+        : id === 2
+          ? ([10, 90, 10, 10] as const)
+          : id === 3
+            ? ([10, 10, 90, 10] as const)
+            : ([10, 10, 10, 90] as const),
+    occupation: 'generalist',
+  }));
+}
+
+function initial(yearTicks = ACCELERATED_YEAR_TICKS): SocietyState {
+  return createInitialSociety({
+    seed: [1, 2, 3, 4],
+    tick: 0,
+    centerTileIndex: 10,
+    yearTicks,
+    people: observations(),
+  });
+}
+
+function pulseInput(
+  state: SocietyState,
+  tick: number,
+  food = 12,
+  shelterCapacity = 64,
+): SocietyPulseInput {
+  return {
+    tick,
+    centerTileIndex: 10,
+    worldWidth: 8,
+    people: observations(state),
+    communalStockpile: { food, timber: 2, stone: 2, water: 12 },
+    shelterCapacity,
+  };
+}
+
+function pulse(state: SocietyState, tick: number, food = 12, shelterCapacity = 64) {
+  return advanceSociety(state, pulseInput(state, tick, food, shelterCapacity));
+}
+
+function advanceThrough(state: SocietyState, targetTick: number, food = 12, shelterCapacity = 64) {
+  let current = state;
+  let result = pulse(current, current.lastTick + 1_000, food, shelterCapacity);
+  current = result.society;
+  while (current.lastTick < targetTick) {
+    result = pulse(current, current.lastTick + 1_000, food, shelterCapacity);
+    current = result.society;
+  }
+  return result;
+}
+
+describe('deterministic living societies core', () => {
+  it('initializes deterministic named people and seed-distinct cultures', () => {
+    const first = initial();
+    const repeat = initial();
+    const distinct = createInitialSociety({
+      seed: [9, 8, 7, 6],
+      tick: 0,
+      centerTileIndex: 10,
+      yearTicks: ACCELERATED_YEAR_TICKS,
+      people: observations(),
+    });
+
+    expect(societyDto(first)).toStrictEqual(societyDto(repeat));
+    expect(first.people.every((person) => person.name.length > 0)).toBe(true);
+    expect(first.cultures).toHaveLength(2);
+    expect(first.cultures).not.toStrictEqual(distinct.cultures);
+    for (const cultureSeed of [
+      [0, 0, 0, 0],
+      [1, 2, 3, 4],
+      [0xffff_ffff, 0, 0x8000_0000, 17],
+      [9, 8, 7, 6],
+    ] as const) {
+      const cultures = createInitialSociety({
+        seed: cultureSeed,
+        tick: 0,
+        centerTileIndex: 10,
+        yearTicks: ACCELERATED_YEAR_TICKS,
+        people: observations(),
+      }).cultures;
+      expect(
+        new Set(
+          cultures.map((culture) =>
+            [culture.preference, culture.belief, culture.tradition, culture.architectureStyle].join(
+              '|',
+            ),
+          ),
+        ).size,
+      ).toBe(2);
+      expect(new Set(cultures.map((culture) => culture.name)).size).toBe(2);
+      expect(new Set(cultures.map((culture) => culture.name)).size).toBe(2);
+    }
+    expect(() =>
+      assertSocietyInvariants({
+        ...first,
+        cultures: [first.cultures[0]!, { ...first.cultures[0]!, id: 2 }],
+      }),
+    ).toThrow(/distinct identities/i);
+    expect(() =>
+      assertSocietyInvariants({
+        ...first,
+        cultures: [first.cultures[0]!, { ...first.cultures[1]!, name: first.cultures[0]!.name }],
+      }),
+    ).toThrow(/names must be unique/i);
+    expect(() => assertSocietyInvariants(first)).not.toThrow();
+  });
+
+  it('conserves declared recipes and settled local exchange', () => {
+    const state = initial();
+    const credits = state.households.reduce((total, household) => total + household.credits, 0);
+    const meals = state.households.reduce((total, household) => total + household.meals, 0);
+    const tools = state.households.reduce((total, household) => total + household.tools, 0);
+    const result = pulse(state, 1_000, 4);
+
+    expect(result.communalStockpile).toStrictEqual({ food: 0, timber: 0, stone: 0, water: 12 });
+    expect(
+      result.society.households.reduce((total, household) => total + household.credits, 0),
+    ).toBe(credits);
+    expect(result.society.households.reduce((total, household) => total + household.meals, 0)).toBe(
+      meals + 4,
+    );
+    expect(result.society.households.reduce((total, household) => total + household.tools, 0)).toBe(
+      tools + 2,
+    );
+    expect(result.society.offers.map((offer) => offer.kind)).toStrictEqual(['meal', 'tool']);
+    expect(result.society.offers.every((offer) => offer.fulfilledAmount >= 0)).toBe(true);
+    expect(() => assertSocietyInvariants(result.society)).not.toThrow();
+  });
+
+  it('requests an off-map adult migrant when a society falls below viable population', () => {
+    const state = createInitialSociety({
+      seed: [1, 2, 3, 4],
+      tick: 0,
+      centerTileIndex: 10,
+      yearTicks: ACCELERATED_YEAR_TICKS,
+      people: observations().slice(0, 1),
+    });
+    const result = advanceThrough(state, ACCELERATED_YEAR_TICKS, 20);
+
+    expect(result.personMigrationDrafts).toHaveLength(1);
+    expect(result.personMigrationDrafts[0]).toMatchObject({ origin: 'migration', generation: 0 });
+  });
+
+  it('produces valid accelerated generations and observed deaths', () => {
+    let state = initial();
+    let sawBirth = false;
+    let sawGrandchild = false;
+    for (let tick = 1_000; tick <= 110_000; tick += 1_000) {
+      const before = state;
+      const result = pulse(state, tick, 200);
+      state = result.society;
+      sawBirth ||= result.personBirthDrafts.length > 0;
+      sawGrandchild ||= result.personBirthDrafts.some((draft) => draft.generation >= 2);
+      for (const draft of result.personBirthDrafts) {
+        expect(draft.householdId).toBe(
+          before.people.find((person) => person.id === draft.parentIds[0])?.householdId,
+        );
+      }
+    }
+    const deceased = state.people.find((person) => person.id === 1)!;
+    const death = advanceSociety(state, {
+      tick: 111_000,
+      centerTileIndex: 10,
+      worldWidth: 8,
+      people: observations(state).map((person) =>
+        person.id === deceased.id ? { ...person, alive: false, health: 0 } : person,
+      ),
+      communalStockpile: { food: 20, timber: 2, stone: 2, water: 12 },
+      shelterCapacity: 64,
+    });
+
+    expect(sawBirth).toBe(true);
+    expect(sawGrandchild).toBe(true);
+    expect(death.deathPersonIds).toContain(deceased.id);
+    expect(death.society.people.find((person) => person.id === deceased.id)).toMatchObject({
+      alive: false,
+      deathTick: 111_000,
+    });
+  });
+
+  it('propagates scarcity into conflict, collapse, and later recovery', () => {
+    const state = initial();
+    let current = state;
+    for (let tick = 1_000; tick <= 6_000; tick += 1_000)
+      current = pulse(current, tick, 0, 0).society;
+    expect(current.scarcity).toBeGreaterThanOrEqual(80);
+    expect(current.bonds[0]?.conflict).toBeGreaterThan(0);
+    expect(current.stability).toBeLessThan(state.stability);
+    expect(current.collapsed).toBe(true);
+
+    for (let tick = 7_000; tick <= 30_000; tick += 1_000)
+      current = pulse(current, tick, 60).society;
+    expect(current.collapsed).toBe(false);
+    expect(current.stability).toBeGreaterThan(15);
+    expect(current.institution.government).toBe('council');
+  });
+
+  it('attaches biography ids only to an exact authoritative source event', () => {
+    let state = initial();
+    for (let tick = 1_000; tick <= ACCELERATED_YEAR_TICKS; tick += 1_000)
+      state = pulse(state, tick, 20).society;
+    expect(state.pendingBiographyFacts.length).toBeGreaterThanOrEqual(3);
+    expect(state.pendingBiographyFacts.some((fact) => fact.kind === 'cooperation')).toBe(true);
+    const sources = state.pendingBiographyFacts.map((fact, index) => ({
+      id: 91 + index,
+      kind: fact.kind,
+      subject: fact.source,
+      target: fact.target,
+      summary: fact.summary,
+    }));
+    const fact = state.pendingBiographyFacts.find((candidate) => candidate.kind === 'person-born')!;
+    const attached = attachSocietyBiographyEventIds(state, sources);
+
+    expect(
+      attached.people.find((person) => person.id === fact.personId)?.biographyEventIds,
+    ).toContain(91 + state.pendingBiographyFacts.indexOf(fact));
+    expect(() =>
+      attachSocietyBiographyEventIds(state, [{ ...sources[0]!, summary: 'invented history' }]),
+    ).toThrow(/exact authoritative/i);
+  });
+
+  it('rejects malformed family and household references', () => {
+    const state = initial();
+    const malformed: SocietyState = {
+      ...state,
+      people: [{ ...state.people[0]!, householdId: 999 }, ...state.people.slice(1)],
+    };
+
+    expect(() => assertSocietyInvariants(malformed)).toThrow(/household/i);
+  });
+
+  it('runs normal society changes only on its civil quarter and preserves the event budget', () => {
+    const state = initial(100_000);
+    let current = state;
+    const meaningfulEvents: string[] = [];
+    while (current.lastTick < 36_000) {
+      const result = pulse(current, current.lastTick + 1_000, 20);
+      current = result.society;
+      if (current.lastTick > 15_000)
+        meaningfulEvents.push(...result.events.map((event) => event.kind));
+    }
+
+    expect(meaningfulEvents.length).toBeGreaterThanOrEqual(1);
+    expect(meaningfulEvents.length).toBeLessThanOrEqual(4);
+    expect(current.people.every((person) => person.generation === 0)).toBe(true);
+  });
+
+  it('rejects invalid leaders, adult membership, parents, ids, and nonconsecutive pulses', () => {
+    const state = initial();
+    expect(() => advanceSociety(state, pulseInput(state, 2_000))).toThrow(/next consecutive/i);
+    expect(() =>
+      assertSocietyInvariants({ ...state, institution: { ...state.institution, leaderId: 999 } }),
+    ).toThrow(/institution/i);
+    expect(() =>
+      assertSocietyInvariants({
+        ...state,
+        households: [{ ...state.households[0]!, adultIds: [3] }, ...state.households.slice(1)],
+      }),
+    ).toThrow(/adult/i);
+    expect(() =>
+      assertSocietyInvariants({
+        ...state,
+        people: [{ ...state.people[0]!, parentIds: [4, 0] }, ...state.people.slice(1)],
+      }),
+    ).toThrow(/parent/i);
+    expect(() => assertSocietyInvariants({ ...state, nextPersonId: 1 })).toThrow(/next person/i);
+    expect(() => assertSocietyInvariants({ ...state, nextHouseholdId: 1 })).toThrow(
+      /next household/i,
+    );
+    expect(() => assertSocietyInvariants({ ...state, nextOfferId: 0 })).toThrow(/next offer/i);
+  });
+});

@@ -8,6 +8,7 @@ import { WorldMapCanvas } from './rendering/WorldMapCanvas';
 import { WORLD_OVERLAYS, type WorldOverlay } from './rendering/world-palette';
 import { PROJECT_META } from './project-meta';
 import { FocusPersistencePanel } from './ui/FocusPersistencePanel';
+import { SocietyPanel } from './ui/SocietyPanel';
 import type { FocusClock } from './ui/useFocusController';
 import {
   DEMO_WORLD_SEED,
@@ -40,31 +41,8 @@ function seedLabel(): string {
   return DEMO_WORLD_SEED.map((word) => word.toString(16).padStart(8, '0')).join('-');
 }
 
-function factualEventCopy(event: {
-  readonly amount: number;
-  readonly subjectId: number;
-  readonly targetId: number;
-  readonly tick: number;
-  readonly tileIndex: number;
-  readonly type: string;
-}): string {
-  const structure = event.targetId > 0 ? `Structure ${event.targetId}` : 'The settlement';
-  switch (event.type) {
-    case 'world-generated':
-      return `The founding world formed at tick ${event.tick}.`;
-    case 'offline-catch-up':
-      return `Bounded offline progression reached tick ${event.tick}.`;
-    case 'shelter-planned':
-    case 'storehouse-planned':
-      return `${structure} was planned at tile ${event.tileIndex} on tick ${event.tick}.`;
-    case 'shelter-operational':
-    case 'storehouse-operational':
-      return `${structure} became operational at tick ${event.tick}.`;
-    default:
-      return `Recorded ${event.type} at tick ${event.tick}${
-        event.subjectId > 0 ? ` for founder ${event.subjectId}` : ''
-      }${event.amount !== 0 ? ` (${event.amount})` : ''}.`;
-  }
+function factualEventCopy(event: { readonly summary: string }): string {
+  return event.summary;
 }
 
 function conditionTier(condition: number): 'sound' | 'worn' | 'critical' {
@@ -162,12 +140,13 @@ export function App({ focusAlerts, focusClock, persistence, workerFactory }: App
       <main id="main" className="world-lab" tabIndex={-1}>
         <section className="lab-intro" aria-labelledby="hero-title">
           <div>
-            <p className="eyebrow">Milestone 3 · A settlement survives and builds</p>
+            <p className="eyebrow">Milestone 4 · A living society takes shape</p>
             <h1 id="hero-title">{PROJECT_META.promise}</h1>
           </div>
           <p>
-            Begin a calm session and accepted focus time advances a Worker-owned settlement.
-            Founders choose their own work; the surface only reports their factual progress.
+            Begin a calm session and accepted focus time advances a Worker-owned settlement. Named
+            people choose their own work and build culture across many sessions; every displayed
+            history claim comes from an authoritative event.
           </p>
         </section>
 
@@ -313,7 +292,7 @@ export function App({ focusAlerts, focusClock, persistence, workerFactory }: App
                 <dd>{simulation.frame?.tick ?? '—'}</dd>
               </div>
               <div>
-                <dt>Living founders</dt>
+                <dt>Living people</dt>
                 <dd>{simulation.frame?.settlementSummary.population ?? '—'}</dd>
               </div>
               <div>
@@ -440,6 +419,18 @@ export function App({ focusAlerts, focusClock, persistence, workerFactory }: App
             </p>
           </aside>
         </div>
+
+        {simulation.frame === null ? null : (
+          <SocietyPanel
+            cultures={simulation.frame.society.cultures}
+            dashboard={simulation.frame.society.dashboard}
+            onTimelinePageRequest={simulation.requestTimelinePage}
+            people={simulation.frame.society.people}
+            timeline={simulation.timeline.entries}
+            timelineOffset={simulation.timeline.offset}
+            timelineTotal={simulation.timeline.total}
+          />
+        )}
 
         <FocusPersistencePanel
           alerts={completionAlerts}

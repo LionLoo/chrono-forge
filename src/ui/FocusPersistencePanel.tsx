@@ -16,6 +16,7 @@ import type { WorldSimulationView } from './useWorldSimulation';
 const PRIMARY_SLOT_ID = 'primary';
 const PRIMARY_SLOT_NAME = 'Founding world';
 const AUTOSAVE_INTERVAL_MS = 30_000;
+const MAX_FACTUAL_RECAP_EVENTS = 12;
 const MAX_OFFLINE_CATCH_UP_RATE = 1_000;
 
 interface FocusPersistencePanelProps {
@@ -159,21 +160,7 @@ function formatDuration(milliseconds: number): string {
 }
 
 function eventCopy(event: WorkerEvent): string {
-  switch (event.type) {
-    case 'world-generated':
-      return `The founding world formed at tick ${event.tick}.`;
-    case 'offline-catch-up':
-      return `Bounded offline progression reached tick ${event.tick}.`;
-    case 'shelter-planned':
-    case 'storehouse-planned':
-      return `Structure ${event.targetId} was planned at tile ${event.tileIndex} on tick ${event.tick}.`;
-    case 'shelter-operational':
-    case 'storehouse-operational':
-      return `Structure ${event.targetId} became operational at tick ${event.tick}.`;
-  }
-  return `Recorded ${event.type} at tick ${event.tick}${
-    event.subjectId > 0 ? ` for founder ${event.subjectId}` : ''
-  }${event.amount !== 0 ? ` (${event.amount})` : ''}.`;
+  return event.summary;
 }
 
 function isTerminalSession(session: FocusSession): boolean {
@@ -293,6 +280,9 @@ function FocusWorkspace({
   const operationQueueRef = useRef<Promise<void>>(Promise.resolve());
   const activeSaveRef = useRef(activeSave);
   const latestSessionRef = useRef<FocusSession | null>(initial.initialSession);
+  const recapSessionIdRef = useRef(initial.initialSession?.sessionId ?? null);
+  const recapBaselineEventIdRef = useRef<number | null>(null);
+  const recapEventIdsRef = useRef<readonly number[]>(initial.initialSession?.recapEventIds ?? []);
   const autosaveTimerRef = useRef<number | null>(null);
   const alertedSessionIdsRef = useRef(
     new Set(
@@ -331,10 +321,25 @@ function FocusWorkspace({
     (session: FocusSession, reason: string): Promise<void> =>
       enqueue(async () => {
         try {
-          const sourceEventIds = simulation.events.map((event) => event.id);
-          const persistedSession = isTerminalSession(session)
-            ? { ...session, recapEventIds: sourceEventIds }
-            : { ...session, recapEventIds: [] };
+          const visibleEventIds = simulation.events.map((event) => event.id);
+          const latestEventId = visibleEventIds.at(-1) ?? 0;
+          if (recapSessionIdRef.current !== session.sessionId) {
+            recapSessionIdRef.current = session.sessionId;
+            recapBaselineEventIdRef.current = latestEventId;
+            recapEventIdsRef.current = [];
+          }
+          recapBaselineEventIdRef.current ??= latestEventId;
+          const newEventIds = visibleEventIds.filter(
+            (eventId) => eventId > (recapBaselineEventIdRef.current ?? latestEventId),
+          );
+          recapBaselineEventIdRef.current = latestEventId;
+          recapEventIdsRef.current = [...new Set([...recapEventIdsRef.current, ...newEventIds])]
+            .sort((left, right) => left - right)
+            .slice(-MAX_FACTUAL_RECAP_EVENTS);
+          const persistedSession = { ...session, recapEventIds: recapEventIdsRef.current };
+          const sourceEventIds = [
+            ...new Set([...visibleEventIds, ...recapEventIdsRef.current]),
+          ].sort((left, right) => left - right);
           const snapshot = await simulation.requestSave();
           const slot = activeSaveRef.current;
           const committed = await runtime.gateway.commitFocusCheckpoint(

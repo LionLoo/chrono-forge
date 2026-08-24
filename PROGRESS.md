@@ -4,69 +4,46 @@ Last updated: 2026-08-23
 
 ## Release state
 
-- Goal: build, verify, package, and privately release the complete Chrono Forge v1.0.0 contract; do not stop at a prototype or partial roadmap.
-- Current milestone: M3 autonomous survival, agents, and construction is merged and acceptance-complete; durable `main` CI and root rotation precede M4.
-- Current branch: clean `main` at M3 squash merge `f6db7452f976b0dffe5c12a6e77a50b98f64d59f` before this handoff-only documentation update.
-- Remote: `https://github.com/LionLoo/chrono-forge` is private. PR #4 merged after replacement run `32684735423` passed web, Windows, installer, and aggregate `Required`; `main` run `32685404763` started from the merge and may be superseded by this handoff update.
-- Included-usage meter: no read-only weekly allowance value is exposed. Work uses only the included ChatGPT/Codex plan path; no API key, purchased/promotional credit, or account credit is used.
-- v1.0 completion: not satisfied. M4-M12 remain release-blocking.
+- Goal: build, verify, package, and privately release the complete Chrono Forge v1.0.0 contract; never stop at a prototype or partial roadmap.
+- Current milestone: M4 economy, generations, society, culture, and factual history is implemented, independently reviewed, and fully locally gated on `feature/living-societies`. Private PR #5 is open; hosted CI, merge, and durable `main` handoff remain before M5.
+- Git checkpoint: verified M4 implementation/acceptance commit is `c974fd1`, followed by durable docs at pushed branch head `b2a0558`. The branch began from synchronized `main` at `6b5b37aa5b485ca51cd9d3b69df00705b0b0c9cb`; private origin is `https://github.com/LionLoo/chrono-forge`.
+- Included usage: no read-only weekly allowance meter is exposed. Only the included ChatGPT/Codex plan path is used; no API key, purchased/promotional credit, or account credit is used.
+- v1.0 completion: not satisfied. M5-M12 and release remain fully blocking.
 
 ## HARNESS EVALUATION
 
-- Requirements verified versus remaining: M0-M3 are merged. M3 evidence covers autonomous needs/decisions, emergent occupations, physical gather/carry/deposit, survival, construction/site selection/material use, lifecycle transitions, paths, factual events/memories, packed Worker projections, accessibility, v2 persistence/migrations, partition equivalence, representative-session feedback, and multi-seed viability. M4-M12 remain mandatory.
-- Build/test/CI: the final permission-correct `npm run ci` passes format, lint, strict type checking, 34 files/158 covered TypeScript tests, 19 Rust tests, production browser E2E, native restart/SQLite E2E, SBOM, optimized executable/NSIS installer, and production test-capability exclusion. PR #4 replacement run `32684735423` passed every job and aggregate `Required`; the durable handoff commit still requires its own green `main` run before rotation.
-- Known defects/debt: no confirmed open M3 P0-P2 after fixes and closure review. Non-blocking debt is the existing >500 kB main bundle warning and misleading upstream embedded-WebDriver cleanup diagnostics. M8 scale budgets, signing credentials, and private-plan branch protection remain future/operational gates.
-- Major failures and autonomous recovery: review caught invented dry-tile water, excess repair material charges, permissive impossible v2 states, stale plans, color-only condition, and missing restore evidence; each received a root-cause fix and regression. Legacy migration originally replayed settlement history to the saved tick; it is now factual constant-time founding. Final property CI minimized a 1×1 seed-zero world that forced a second structure onto the occupied shelter tile; site selection now defers when no physical site exists and the minimized/property suites pass. The first native rerun failed because the sandbox could not write isolated AppData, and the first production bundle retry could not download pinned NSIS; permission-correct reruns passed without product changes. Hosted PR CI then showed the second million-tick parity test still used Vitest's five-second default; it now receives the same 30-second bound as its sibling without weakening assertions.
-- Review/subagent findings: Terra/high acceptance work added 18 focused simulation tests. Independent core and UI reviews found the defects above and no Worker-authority violation. Closure review found one additional P2 factual-memory mismatch, which is fixed with a checksummed regression; its final verdict has no P0-P3 finding.
-- Demonstrated scale/performance: three deterministic seeds retain all six founders and viable settlements through 60,000 and 1,000,000 ticks; 100 arbitrary partition cases and 100 seeded snapshot cases pass. The 15,000-36,000 window yields a few factual founding-scale changes without later societal progression. M8 population/latency/heap targets are not claimed.
-- Buildable/runnable: yes. Production Chromium and the actual app surface show six agents, operational construction, factual events, stores, and accessible structure condition. A manual 5,000-tick save/advance/reload restored the exact visible settlement with no console errors. Native SQLite restart flow and Windows installer pass; production excludes WDIO/test capabilities.
-- Fresh-root recoverability: yes. This repository records the merged M3 behavior/evidence, exact PR/CI state, known limitations, root-rotation gate, and exact M4 entry action without relying on chat history.
+- Requirements completed versus remaining: M0-M3 are merged. M4 now has deterministic household economy, production/exchange/transport, multi-generation parentage/inheritance, death and explicit migration, cultures/groups/institutions/government, cooperation/conflict/theft/reconciliation, scarcity/collapse/recovery, typed factual biographies/history/recaps, v3 persistence with v2 migration, bounded Worker reads/queues, and accessible UI/native flows. Its hosted PR/merge gate remains; then M5-M12.
+- Build/test/CI: the complete permission-correct `npm run ci` passes on this closure/docs diff: formatting, ESLint/Clippy, TypeScript, 41 files/204 Vitest tests, 19 Rust tests, browser production E2E 2/2, native SQLite/WebView E2E 1/1, SBOM generation, production desktop/NSIS build, and test-capability exclusion. Coverage is 89.54% statements, 82.02% branches, 95.55% functions, and 91.52% lines. Hosted branch CI is the active gate; durable `main` M3 CI run `32685610288` is green.
+- Known defects/debt: no confirmed open M4 P0-P2 after closure review. Non-blocking debt is the >500 kB web bundle warning and misleading upstream WDIO diagnostics about absent external `tauri-driver`/cleanup even though the configured embedded driver passes. M8 scale budgets, signing credentials, and private-plan branch protection remain future/operational gates.
+- Major failures and recovery: independent review found unbounded advance event batches and unrestricted Worker tick requests; one central 256-event emission cap and a 1,000,000-tick protocol quota close both with regressions. Native launch initially failed with code 101 inside the filesystem sandbox; permission-correct GUI execution exposed and verified the real app. A stale v2 save between society boundaries then exposed an alignment fault; settlement catch-up now selects the next absolute 1,000-tick boundary and a migration regression passes. A coverage-only App test timeout was raised to 15 seconds without changing behavior.
+- Review/subagent findings: final Terra/high remediation review passed diff checks, 4 files/38 focused tests, and native 1/1, and declared the code delta clean. Earlier reference validation, culture distinctness, full-history paging, session-scoped recap, queue bounds, and scarcity causality findings are all closed. Only this durable update and normal full gates remained from the reviewer verdict.
+- Demonstrated scale/performance: five locked accelerated worlds cover 240,000-600,000 ticks. Viable hashes/operation counts are `86af5e5c`/436,530, `d71be8fc`/433,105, and `f61d4ca4`/451,502; scarcity is `78a68790`/109,522; collapse/recovery is `ebbc5fa1`/339,060. The long scenario file passes 3/3 in 30-39 seconds on this machine, with residents capped at 64 and exact source-event histories. This is M4 intermediate evidence, not the M8 release-scale claim.
+- Buildable/runnable: yes. Web production and the actual Tauri/WebView2 app build and run; native E2E exercises SQLite save/reload/resume/complete, 200% text, the reduced-motion stylesheet, non-color condition text, and a non-invented short-session recap.
+- Fresh-root recoverability: yes once this diff is committed. The repository identifies the branch checkpoint, evidence, remaining hosted gate, known debt, and exact next action without prior conversation context.
 
-## M3 delivered
+## M4 delivered
 
-- Six stable founders with explicit bounded needs, health/age, traits/skills, relationships, knowledge, goals, plans/routes, factual memories, RNG streams, activity, and emergent occupation.
-- Autonomous utility/goal decisions vary by geography, traits, social context, needs, stores, skills, and deterministic randomness; no routine build/job controls exist.
-- Physical food/water/timber/stone gathering, carrying/deposit, renewable/depleting resources, storage, survival consumption, construction materials, and conservation regressions.
-- Deterministic site selection and shelter/storehouse planning, construction, condition decay, repair, expansion, repurpose, abandonment, and demolition with travel-demand paths.
-- Canonical v2 civilization saves, strict semantic rehydration, constant-time factual v0/v1 founding migration, continuation parity, and real-Worker/browser restore projection evidence.
-- Packed transferable agent/structure projections, separate Pixi layers, factual event batches, settlement totals, accessible per-structure status/progress/condition, and non-color condition markers.
-
-## M2 delivered
-
-- Versioned injected-clock focus state machine with presets/custom durations, optional breaks, pause/resume/complete/cancel, backward-clock safety, sleep recovery, exact integer tick remainder, and collision-resistant session IDs.
-- Accessible local-first focus/archive UI with calm mode, completion notifications/sound, per-world history/statistics/recaps, explicit local-data copy, numeric validation, and OS reduced-motion support.
-- Canonical world envelopes/migrations, strict semantic rehydration, UTF-8 size limits, worker save/load/offline operations, confirmed-versus-projected rollback, and authoritative event replacement.
-- SQLite WAL/FULL persistence with typed commands, multiple slots, immutable SHA-256 generations, schema v3 migration, last-active-slot recovery, import/export, retained fallback material, and bounded logged offline catch-up.
-- Each generation carries its exact optional focus checkpoint. World, focus state/history, and head update atomically; corrupt fallback and retention operate on complete recoverable pairs, so focus ticks cannot be replayed or lost through mismatched recovery.
-- Separate feature-gated native E2E build exercises start, pause, manual save, process reload, resume, completion, factual recap, and exact-generation checkpoint assertions through real IPC. Automated scans prove the test bridge/plugins are excluded from production.
-
-## Validation evidence
-
-- Final permission-correct `npm run ci`: passed after all review and property fixes. Its earlier native attempt correctly failed under read-only sandbox AppData; no product change was required for the permission-correct path.
-- Vitest coverage: 34 files / 158 tests; 89.10% statements, 81.92% branches, 94.91% functions, 90.73% lines.
-- Rust: 19 passed, 0 failed; formatting and Clippy `-D warnings` passed.
-- M3 focused acceptance: 18 simulation tests passed; 3 seeds × 60,000/1,000,000 ticks, 100 partition cases, and 100 v2 snapshot cases pass.
-- Production Chromium E2E: 1 passed with the real module Worker, Pixi renderer, structure semantics, and save/advance/reload continuity.
-- Native desktop E2E: 1 passed; real SQLite start/pause/save/reload/resume/complete and paired checkpoint assertions.
-- SBOM: generated with 770 npm and 281 Cargo components; full and production npm audits report zero vulnerabilities.
-- Production build: `chrono-forge.exe` and `Chrono Forge_0.1.0_x64-setup.exe` built; exclusion scan passed.
-- Independent review: core and Worker/UI reviews completed; all two P1 and four P2 findings are fixed with regressions. Closure review then found and verified the additional P2 memory/source-event fix; final 3-file/15-test review passed with no P0-P3 finding. Its narrow re-review of the deferred-site property fix passed 3 files/6 tests with no P0-P3 finding.
-- Production visual QA: the built web surface passed polished full-page inspection, 5,000-tick settlement development, exact save/advance/reload, semantic structure condition/progress, and zero console warnings/errors.
-- Hosted status: M3 PR #4 merged as `f6db7452f976b0dffe5c12a6e77a50b98f64d59f`. Its initial run `32684312568` exposed the five-second timeout; independently reviewed fix `8248d9e16da2681faddf26c7efd5f23627697f24` preserved assertions, and replacement run `32684735423` passed all jobs plus aggregate `Required`.
+- One authoritative settlement/society graph with stable IDs, strict cross-reference invariants, deterministic 100-tick settlement pulses and 1,000-tick society pulses, 100,000-tick normal years, and explicit 5,000-tick accelerated acceptance worlds.
+- Conserved communal/household resources, role-gated production, inventories, credits, offers, prices, exchange, carried transport, inequality, scarcity, and stability.
+- Named founders and descendants with parent links, traits/skills, households, births, aging, inheritance/knowledge continuity, deaths, explicit off-map migration, and synchronized settlement/society life state.
+- Two inspectably distinct cultures plus groups, institutions, leadership/government change, cooperation, disagreement, crime/conflict, reconciliation, collapse hysteresis, and autonomous recovery.
+- Immutable typed factual events and summaries, bounded biography source IDs, session-scoped recaps, eight-row pageable full history, and 256-record recent Worker batches.
+- Canonical snapshot/Worker protocol v3, strict semantic recovery, v2 migration without retroactive events, partition/save/Worker equivalence, and non-boundary continuation recovery.
+- Read-only accessible society dashboard, person biographies, cultures, timeline paging, 200% text and reduced-motion coverage, and textual structure condition independent of color.
 
 ## Active risks and blockers
 
 - No genuine external blocker. Remaining included weekly usage is not readable through available tools.
-- Private-plan branch protection returned HTTP 403; operational policy remains independent review plus green `Required` CI before merge.
+- GitHub private-plan branch protection returns HTTP 403; policy is enforced operationally with independent review and green aggregate `Required` CI before merge.
 - Windows signing credentials are not established; the documented private unsigned-installer fallback remains unless existing credentials become available.
-- Core product enjoyment is demonstrated only at founding-settlement scale: a representative 15,000-36,000-tick focus window yields a few factual changes while major societal progression remains for M4+. Return-over-many-hours evaluation remains release-blocking.
+- M4 proves gradual normal-session feedback and long-horizon accelerated deterministic generations; it does not yet prove literal repeated-session retention. The return-over-many-hours enjoyment question remains release-blocking and must be reevaluated at later visual/content/scale milestones.
 
 ## Root rotation state
 
-- Same-project root continuation is supported. After this M3 handoff commit has green durable `main` CI, spawn a same-directory GPT-5.6 Sol/xhigh successor with the unchanged original goal, contract, authority, billing guardrail, workflow, and stop conditions.
-- The successor must reconstruct only from durable repository evidence, verify Git/GitHub/CI, state the exact next task, and affirm root ownership before editing; then the prior root stops.
-- When task-title controls are available, the owning root chat is titled `INPROGRESS` and the relinquished root is retitled `RETIRED` after successful transfer. If the UI cannot mutate titles, record that limitation at rotation; the repository handoff remains authoritative.
+- This root owns the checkout and its task title is `INPROGRESS`; the prior root is `RETIRED`.
+- After M4 is merged and durable `main` CI is green, finish the handoff commit and rotate to a same-directory GPT-5.6 Sol/xhigh successor carrying the unchanged original goal, authority, billing guardrail, harness, stop conditions, and M5-M12 release contract.
+- The successor must reconstruct from repository/Git/GitHub/CI only, state the exact next task, and accept root ownership before editing. Then retitle this root `RETIRED` and stop project work.
 
 ## Exact next action
 
-Commit and push this M3 handoff on `main`, require its hosted `Required` gate to pass, then rotate to a fresh Sol/xhigh root. The successor's first product action is to create `feature/living-societies`, lock M4 observable acceptance tests from `PLAN.md`, and implement economy, generations, society, culture, and factual history without reducing any v1 criterion.
+Wait for private PR #5 aggregate hosted CI. If every required job is green, merge it, verify durable `main` CI, update the `main` handoff, and rotate the root before beginning M5.
