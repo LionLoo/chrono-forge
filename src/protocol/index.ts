@@ -2,6 +2,7 @@ import type { WorldConfig, WorldSeed } from '../simulation/world';
 import { ACCELERATED_YEAR_TICKS, NORMAL_YEAR_TICKS } from '../simulation/society';
 
 export const WORKER_PROTOCOL_VERSION = 3;
+export const MAX_ADVANCE_TICKS_PER_REQUEST = 1_000_000;
 
 export type WorkerProtocolVersion = typeof WORKER_PROTOCOL_VERSION;
 export type RunMode = 'paused' | 'running';
@@ -372,7 +373,7 @@ export function validateUiToWorkerMessage(input: unknown): WorkerRequestValidati
           }
         : invalid(requestId, 'setRunMode.runMode must be paused or running.');
     case 'advanceTicks':
-      return isNonNegativeSafeInteger(input.ticks)
+      return isNonNegativeSafeInteger(input.ticks) && input.ticks <= MAX_ADVANCE_TICKS_PER_REQUEST
         ? {
             kind: 'valid',
             message: {
@@ -382,7 +383,10 @@ export function validateUiToWorkerMessage(input: unknown): WorkerRequestValidati
               ticks: input.ticks,
             },
           }
-        : invalid(requestId, 'advanceTicks.ticks must be a non-negative safe integer.');
+        : invalid(
+            requestId,
+            `advanceTicks.ticks must be an integer from 0 through ${MAX_ADVANCE_TICKS_PER_REQUEST}.`,
+          );
     case 'requestSave':
       return {
         kind: 'valid',

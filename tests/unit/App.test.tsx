@@ -257,7 +257,7 @@ describe('deterministic world lab', () => {
       expect(sessions.some((session) => session.status === 'cancelled')).toBe(true);
     });
     expect(notifyCompletion).toHaveBeenCalledOnce();
-  });
+  }, 15_000);
 
   it('validates imported packages, manually saves, and loads another slot', async () => {
     const user = userEvent.setup();

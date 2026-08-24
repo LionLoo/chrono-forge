@@ -125,6 +125,31 @@ describe('M4 society world integration', () => {
     expect(() => assertWorldInvariants(world)).not.toThrow();
   }, 30_000);
 
+  it('carries parent traits and learned-skill foundations into the next generation', () => {
+    let world = createInitialWorld(seed, { societyYearTicks: ACCELERATED_YEAR_TICKS });
+    let childId = 0;
+    while (world.tick < 120_000 && childId === 0) {
+      world = stepWorld(world, 1_000);
+      childId = world.eventLog.findLast((event) => event.kind === 'person-born')?.subjectId ?? 0;
+    }
+    const childPerson = world.civilization.society.people.find((person) => person.id === childId);
+    const childAgent = world.civilization.agents.find((agent) => agent.id === childId);
+    expect(childPerson).toBeDefined();
+    expect(childAgent).toBeDefined();
+    const parents = childPerson!.parentIds.map((parentId) =>
+      world.civilization.agents.find((agent) => agent.id === parentId),
+    );
+    expect(parents.every((parent) => parent !== undefined)).toBe(true);
+    for (let index = 0; index < 4; index += 1) {
+      expect(childAgent!.traits[index]).toBe(
+        Math.trunc((parents[0]!.traits[index]! + parents[1]!.traits[index]!) / 2),
+      );
+      expect(childAgent!.skills[index]).toBe(
+        Math.max(0, Math.trunc((parents[0]!.skills[index]! + parents[1]!.skills[index]!) / 2) - 15),
+      );
+    }
+  }, 30_000);
+
   it('keeps biographies and all typed event references factual and resolvable', () => {
     const world = stepWorld(
       createInitialWorld(seed, { societyYearTicks: ACCELERATED_YEAR_TICKS }),

@@ -1469,14 +1469,13 @@ export function advanceCivilization(
     systemRng: systemRng.save(),
     operationCount: civilization.operationCount + civilization.agents.length + pathExpansions,
   });
-  while (next.society.lastTick + SOCIETY_PULSE_TICKS <= tick) {
-    const societyPulse = applySocietyPulse(
-      next,
-      terrain,
-      next.society.lastTick + SOCIETY_PULSE_TICKS,
-    );
+  let nextSocietyTick =
+    (Math.floor(next.society.lastTick / SOCIETY_PULSE_TICKS) + 1) * SOCIETY_PULSE_TICKS;
+  while (nextSocietyTick <= tick) {
+    const societyPulse = applySocietyPulse(next, terrain, nextSocietyTick);
     next = societyPulse.civilization;
     events.push(...societyPulse.events);
+    nextSocietyTick += SOCIETY_PULSE_TICKS;
   }
   assertCivilizationInvariants(next, terrain);
   return Object.freeze({ civilization: next, events: Object.freeze(events) });

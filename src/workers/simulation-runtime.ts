@@ -1,5 +1,6 @@
 import {
   AGENT_ACTION_CODES,
+  MAX_ADVANCE_TICKS_PER_REQUEST,
   STRUCTURE_KIND_CODES,
   STRUCTURE_STATE_CODES,
   WORKER_PROTOCOL_VERSION,
@@ -48,8 +49,10 @@ export interface SimulationRuntime {
 }
 
 function assertValidTicks(ticks: number): void {
-  if (!Number.isSafeInteger(ticks) || ticks < 0) {
-    throw new RangeError('Advance ticks must be a non-negative safe integer.');
+  if (!Number.isSafeInteger(ticks) || ticks < 0 || ticks > MAX_ADVANCE_TICKS_PER_REQUEST) {
+    throw new RangeError(
+      `Advance ticks must be an integer from 0 through ${MAX_ADVANCE_TICKS_PER_REQUEST}.`,
+    );
   }
 }
 
@@ -425,11 +428,12 @@ export function createSimulationRuntime(post: RuntimePost): SimulationRuntime {
 
   function emitEvents(requestId: string, events: readonly WorldState['eventLog'][number][]): void {
     if (events.length === 0) return;
+    const recentEvents = events.slice(-MAX_RECENT_WORKER_EVENTS);
     emit({
       type: 'eventBatch',
       protocolVersion: WORKER_PROTOCOL_VERSION,
       requestId,
-      events: Object.freeze(events.map(projectedEvent)),
+      events: Object.freeze(recentEvents.map(projectedEvent)),
     });
   }
 
@@ -442,7 +446,7 @@ export function createSimulationRuntime(post: RuntimePost): SimulationRuntime {
       requestId: request.requestId,
       frame: projectWorldFrame(world),
     });
-    emitEvents(request.requestId, world.eventLog.slice(-MAX_RECENT_WORKER_EVENTS));
+    emitEvents(request.requestId, world.eventLog);
     metrics(request.requestId);
   }
 
@@ -474,7 +478,7 @@ export function createSimulationRuntime(post: RuntimePost): SimulationRuntime {
       requestId: request.requestId,
       frame: projectWorldFrame(world),
     });
-    emitEvents(request.requestId, world.eventLog.slice(-MAX_RECENT_WORKER_EVENTS));
+    emitEvents(request.requestId, world.eventLog);
     metrics(request.requestId);
   }
 

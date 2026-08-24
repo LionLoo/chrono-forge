@@ -35,11 +35,11 @@ function versionOneSnapshot(worldJson: string): string {
   });
 }
 
-function versionTwoSnapshot(): {
+function versionTwoSnapshot(ticks = 15_000): {
   readonly snapshot: string;
   readonly source: ReturnType<typeof stepWorld>;
 } {
-  const source = stepWorld(createInitialWorld([31, 37, 41, 43]), 15_000);
+  const source = stepWorld(createInitialWorld([31, 37, 41, 43]), ticks);
   const envelope = JSON.parse(serializeWorldSnapshot(source)) as {
     payload: Record<string, unknown>;
   };
@@ -191,6 +191,15 @@ describe('versioned world snapshots', () => {
     expect(loaded.civilization.society.people.map((person) => person.name)).toStrictEqual(
       source.civilization.agents.map((agent) => agent.name),
     );
+  });
+
+  it('continues a v2 save created between society boundaries', () => {
+    const { snapshot } = versionTwoSnapshot(15_050);
+    const loaded = deserializeWorldSnapshot(migrateWorldSnapshot(snapshot));
+
+    expect(loaded.civilization.society.lastTick).toBe(15_050);
+    expect(() => stepWorld(loaded, 950)).not.toThrow();
+    expect(stepWorld(loaded, 950).civilization.society.lastTick).toBe(16_000);
   });
 
   it.each([

@@ -1,4 +1,5 @@
 import {
+  MAX_ADVANCE_TICKS_PER_REQUEST,
   STRUCTURE_STATE_CODES,
   WORKER_PROTOCOL_VERSION,
   type UiToWorkerMessage,
@@ -288,6 +289,9 @@ describe('simulation worker runtime', () => {
     expect(lastMessageOfType(responses, 'frameDelta').frame.tick).toBe(
       10 + MAX_OFFLINE_CATCH_UP_TICKS,
     );
+    const clampedEvents = lastMessageOfType(responses, 'eventBatch').events;
+    expect(clampedEvents.length).toBeLessThanOrEqual(MAX_RECENT_WORKER_EVENTS);
+    expect(clampedEvents.at(-1)).toMatchObject({ type: 'offline-catch-up' });
   }, 30_000);
 
   it('rejects invalid offline input and unsupported policy versions', () => {
@@ -335,6 +339,12 @@ describe('simulation worker runtime', () => {
         ticks: 'seven',
       },
       {
+        requestId: 'excessive-ticks',
+        type: 'advanceTicks',
+        protocolVersion: WORKER_PROTOCOL_VERSION,
+        ticks: MAX_ADVANCE_TICKS_PER_REQUEST + 1,
+      },
+      {
         requestId: 'bad-seed',
         type: 'initialize',
         protocolVersion: WORKER_PROTOCOL_VERSION,
@@ -356,6 +366,7 @@ describe('simulation worker runtime', () => {
       { type: 'fault', code: 'invalid-request', requestId: 'invalid-request' },
       { type: 'fault', code: 'invalid-request', requestId: 'missing-type' },
       { type: 'fault', code: 'invalid-request', requestId: 'bad-ticks' },
+      { type: 'fault', code: 'invalid-request', requestId: 'excessive-ticks' },
       { type: 'fault', code: 'invalid-request', requestId: 'bad-seed' },
       { type: 'fault', code: 'invalid-request', requestId: 'unknown-type' },
     ]);
