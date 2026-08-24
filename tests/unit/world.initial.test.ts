@@ -90,8 +90,27 @@ describe('initial world generation', () => {
     }
     expect(world.tiles.biome).toBe(world.biome);
     expect(world.tick).toBe(0);
-    expect(world.nextEventId).toBe(2);
-    expect(world.eventLog).toStrictEqual([{ id: 1, tick: 0, kind: 'world-generated' }]);
+    expect(world.nextEventId).toBe(3);
+    expect(world.eventLog).toStrictEqual([
+      {
+        id: 1,
+        tick: 0,
+        kind: 'world-generated',
+        subjectId: 0,
+        targetId: 0,
+        tileIndex: -1,
+        amount: 0,
+      },
+      {
+        id: 2,
+        tick: 0,
+        kind: 'founders-arrived',
+        subjectId: 0,
+        targetId: 0,
+        tileIndex: world.civilization.centerTileIndex,
+        amount: 6,
+      },
+    ]);
   });
 
   it('accepts the valid all-zero world seed while deriving a non-zero RNG stream', () => {

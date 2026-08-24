@@ -63,7 +63,7 @@ function createLoadFaultWorker(): SimulationWorkerPort {
 }
 
 describe('world simulation UI gateway', () => {
-  it('round-trips saves and keeps offline catch-up mirrored and factual', async () => {
+  it('round-trips worker saves and keeps offline catch-up factual', async () => {
     const { result } = renderHook(() => useWorldSimulation(createRuntimeWorker));
     await waitFor(() => {
       expect(result.current.status).toBe('ready');
@@ -84,27 +84,67 @@ describe('world simulation UI gateway', () => {
       await result.current.loadSnapshot(initialSnapshot);
     });
     expect(result.current.frame?.tick).toBe(0);
-    expect(result.current.frame?.stateHash).toBe(result.current.mainThreadHash);
 
     await act(async () => {
       await result.current.performOfflineCatchUp(1_000, 5);
     });
     expect(result.current.frame?.tick).toBe(5);
-    expect(result.current.frame?.stateHash).toBe(result.current.mainThreadHash);
     expect(result.current.events).toStrictEqual([
-      { id: 1, tick: 0, type: 'world-generated', subjectId: 0 },
-      { id: 2, tick: 5, type: 'offline-catch-up', subjectId: 0 },
+      {
+        id: 1,
+        tick: 0,
+        type: 'world-generated',
+        subjectId: 0,
+        targetId: 0,
+        tileIndex: -1,
+        amount: 0,
+      },
+      {
+        id: 2,
+        tick: 0,
+        type: 'founders-arrived',
+        subjectId: 0,
+        targetId: 0,
+        tileIndex: 3120,
+        amount: 6,
+      },
+      {
+        id: 3,
+        tick: 5,
+        type: 'offline-catch-up',
+        subjectId: 0,
+        targetId: 0,
+        tileIndex: -1,
+        amount: 0,
+      },
     ]);
 
     await act(async () => {
       await result.current.loadSnapshot(initialSnapshot);
     });
     expect(result.current.events).toStrictEqual([
-      { id: 1, tick: 0, type: 'world-generated', subjectId: 0 },
+      {
+        id: 1,
+        tick: 0,
+        type: 'world-generated',
+        subjectId: 0,
+        targetId: 0,
+        tileIndex: -1,
+        amount: 0,
+      },
+      {
+        id: 2,
+        tick: 0,
+        type: 'founders-arrived',
+        subjectId: 0,
+        targetId: 0,
+        tileIndex: 3120,
+        amount: 6,
+      },
     ]);
   });
 
-  it('rejects invalid snapshots before crossing the worker boundary', async () => {
+  it('rejects invalid snapshots from the worker boundary', async () => {
     const { result } = renderHook(() => useWorldSimulation(createRuntimeWorker));
     await waitFor(() => {
       expect(result.current.status).toBe('ready');
@@ -114,7 +154,7 @@ describe('world simulation UI gateway', () => {
     expect(result.current.frame?.tick).toBe(0);
   });
 
-  it('rolls speculative mirror state back when the worker rejects a load', async () => {
+  it('keeps the last frame when the worker rejects a load', async () => {
     const { result } = renderHook(() => useWorldSimulation(createLoadFaultWorker));
     await waitFor(() => {
       expect(result.current.status).toBe('ready');
@@ -135,7 +175,6 @@ describe('world simulation UI gateway', () => {
     });
     await waitFor(() => {
       expect(result.current.frame?.tick).toBe(15);
-      expect(result.current.frame?.stateHash).toBe(result.current.mainThreadHash);
     });
   });
 });

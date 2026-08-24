@@ -51,7 +51,9 @@ describe('deterministic world lab', () => {
     render(<App persistence={createPreviewPersistence()} workerFactory={createRuntimeWorker} />);
 
     expect(screen.getByRole('heading', { name: PROJECT_META.promise })).toBeVisible();
-    expect(await screen.findByText('Worker synchronized · deterministic match')).toBeVisible();
+    expect(
+      await screen.findByText('Worker projection ready · autonomous settlement active'),
+    ).toBeVisible();
     expect(screen.getByText('4348524f-4e4f464f-52474531-00000001')).toBeVisible();
     expect(screen.getByRole('img', { name: 'Generated Chrono Forge world' })).toHaveAttribute(
       'data-overlay',
@@ -62,7 +64,7 @@ describe('deterministic world lab', () => {
   it('changes overlays, camera, and fixed logical ticks through keyboard-accessible controls', async () => {
     const user = userEvent.setup();
     render(<App persistence={createPreviewPersistence()} workerFactory={createRuntimeWorker} />);
-    await screen.findByText('Worker synchronized · deterministic match');
+    await screen.findByText('Worker projection ready · autonomous settlement active');
 
     await user.click(screen.getByRole('radio', { name: 'Resources' }));
     expect(screen.getByRole('img', { name: 'Generated Chrono Forge world' })).toHaveAttribute(
@@ -80,11 +82,18 @@ describe('deterministic world lab', () => {
     await user.click(screen.getByRole('button', { name: 'Reset' }));
     expect(screen.getByLabelText('Camera position')).toHaveTextContent('X 24 · Y 24 · 1.00×');
 
-    await user.click(screen.getByRole('button', { name: 'Advance 100 fixed ticks' }));
+    await user.click(screen.getByRole('button', { name: 'Observe 100 fixed ticks' }));
     await waitFor(() => {
       expect(screen.getByText('100')).toBeVisible();
-      expect(screen.getByText('Worker synchronized · deterministic match')).toBeVisible();
+      expect(
+        screen.getByText('Worker projection ready · autonomous settlement active'),
+      ).toBeVisible();
     });
+    expect(
+      screen.getByRole('listitem', {
+        name: /Shelter 1: status planned; condition 100% \(sound\); progress 0%; tile \d+\./,
+      }),
+    ).toBeVisible();
   });
 
   it('reports a worker bootstrap fault without hiding the map controls', async () => {
@@ -147,7 +156,7 @@ describe('deterministic world lab', () => {
 
     await user.click(screen.getByRole('button', { name: 'Complete focus' }));
     expect(await screen.findByText('Session recorded with a factual recap.')).toBeVisible();
-    expect(screen.getByText('The founding world formed at tick 0.')).toBeVisible();
+    expect(screen.getAllByText('The founding world formed at tick 0.')).not.toHaveLength(0);
     const completed = screen.getByText('Completed sessions').closest('div');
     expect(completed).not.toBeNull();
     expect(within(completed!).getByText('1')).toBeVisible();

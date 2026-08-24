@@ -331,7 +331,7 @@ describe('persistence adapter', () => {
         'alpha',
         'Alpha',
         snapshot('one'),
-        { ...completedSession, recapEventIds: [2] },
+        { ...completedSession, recapEventIds: [999] },
         [2],
       ),
     ).rejects.toThrow('authoritative world');

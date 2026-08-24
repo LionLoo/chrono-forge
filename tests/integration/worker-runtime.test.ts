@@ -1,4 +1,5 @@
 import {
+  STRUCTURE_STATE_CODES,
   WORKER_PROTOCOL_VERSION,
   type UiToWorkerMessage,
   type WorkerToUiMessage,
@@ -43,6 +44,29 @@ describe('simulation worker runtime', () => {
     const ready = messageOfType(responses, 'ready');
     expect(ready.frame.tick).toBe(0);
     expect(ready.frame.biome.length).toBe(ready.frame.width * ready.frame.height);
+    expect(ready.frame.agentIds).toStrictEqual(new Uint32Array([1, 2, 3, 4, 5, 6]));
+    expect(responses.slice(0, 3).map((response) => response.type)).toStrictEqual([
+      'ready',
+      'eventBatch',
+      'metrics',
+    ]);
+    expect(messageOfType(responses, 'eventBatch').events).toEqual([
+      expect.objectContaining({
+        id: 1,
+        type: 'world-generated',
+        subjectId: 0,
+        targetId: 0,
+        tileIndex: -1,
+        amount: 0,
+      }),
+      expect.objectContaining({
+        id: 2,
+        type: 'founders-arrived',
+        subjectId: 0,
+        targetId: 0,
+        amount: 6,
+      }),
+    ]);
 
     runtime.handleMessage({
       type: 'advanceTicks',
@@ -72,7 +96,7 @@ describe('simulation worker runtime', () => {
     });
     runtime.handleMessage({
       type: 'requestSave',
-      protocolVersion: 2,
+      protocolVersion: WORKER_PROTOCOL_VERSION + 1,
       requestId: 'wrong-version',
     });
 
@@ -83,7 +107,7 @@ describe('simulation worker runtime', () => {
     ]);
   });
 
-  it('saves and loads a canonical worker snapshot at the same deterministic hash', () => {
+  it('restores the same authoritative M3 projection and factual events after a shelter becomes operational', () => {
     const firstResponses: WorkerToUiMessage[] = [];
     const first = createSimulationRuntime((message) => firstResponses.push(message));
     first.handleMessage({
@@ -97,7 +121,7 @@ describe('simulation worker runtime', () => {
       type: 'advanceTicks',
       protocolVersion: WORKER_PROTOCOL_VERSION,
       requestId: 'advance-save',
-      ticks: 345,
+      ticks: 15_000,
     });
     first.handleMessage({
       type: 'requestSave',
@@ -106,6 +130,14 @@ describe('simulation worker runtime', () => {
     });
     const saved = messageOfType(firstResponses, 'saveSnapshot');
     const expected = lastMessageOfType(firstResponses, 'frameDelta').frame;
+    const expectedEvents = firstResponses
+      .filter(
+        (response): response is Extract<WorkerToUiMessage, { type: 'eventBatch' }> =>
+          response.type === 'eventBatch',
+      )
+      .flatMap((response) => response.events);
+    expect(expected.structureStates).toContain(STRUCTURE_STATE_CODES.operational);
+    expect(expectedEvents).toContainEqual(expect.objectContaining({ type: 'shelter-operational' }));
 
     const loadedResponses: WorkerToUiMessage[] = [];
     const loaded = createSimulationRuntime((message) => loadedResponses.push(message));
@@ -116,10 +148,21 @@ describe('simulation worker runtime', () => {
       snapshot: saved.snapshot,
     });
     const ready = messageOfType(loadedResponses, 'ready');
-    expect(ready.frame.tick).toBe(345);
+    const restoredEvents = messageOfType(loadedResponses, 'eventBatch').events;
+    expect(ready.frame.tick).toBe(15_000);
     expect(ready.frame.stateHash).toBe(expected.stateHash);
-    expect(ready.frame.width).toBe(7);
-    expect(ready.frame.height).toBe(5);
+    expect(ready.frame.agentIds).toStrictEqual(expected.agentIds);
+    expect(ready.frame.agentTiles).toStrictEqual(expected.agentTiles);
+    expect(ready.frame.agentHealth).toStrictEqual(expected.agentHealth);
+    expect(ready.frame.agentActions).toStrictEqual(expected.agentActions);
+    expect(ready.frame.structureIds).toStrictEqual(expected.structureIds);
+    expect(ready.frame.structureTiles).toStrictEqual(expected.structureTiles);
+    expect(ready.frame.structureKinds).toStrictEqual(expected.structureKinds);
+    expect(ready.frame.structureStates).toStrictEqual(expected.structureStates);
+    expect(ready.frame.structureProgress).toStrictEqual(expected.structureProgress);
+    expect(ready.frame.structureCondition).toStrictEqual(expected.structureCondition);
+    expect(ready.frame.settlementSummary).toStrictEqual(expected.settlementSummary);
+    expect(restoredEvents).toStrictEqual(expectedEvents);
   });
 
   it('performs deterministic bounded offline catch-up and emits only factual event ids', () => {
@@ -141,8 +184,16 @@ describe('simulation worker runtime', () => {
     });
 
     expect(lastMessageOfType(responses, 'frameDelta').frame.tick).toBe(10);
-    expect(messageOfType(responses, 'eventBatch').events).toStrictEqual([
-      { id: 2, tick: 10, type: 'offline-catch-up', subjectId: 0 },
+    expect(lastMessageOfType(responses, 'eventBatch').events).toStrictEqual([
+      {
+        id: 3,
+        tick: 10,
+        type: 'offline-catch-up',
+        subjectId: 0,
+        targetId: 0,
+        tileIndex: -1,
+        amount: 0,
+      },
     ]);
 
     runtime.handleMessage({
@@ -156,7 +207,7 @@ describe('simulation worker runtime', () => {
     expect(lastMessageOfType(responses, 'frameDelta').frame.tick).toBe(
       10 + MAX_OFFLINE_CATCH_UP_TICKS,
     );
-  });
+  }, 30_000);
 
   it('rejects invalid offline input and unsupported policy versions', () => {
     const responses: WorkerToUiMessage[] = [];

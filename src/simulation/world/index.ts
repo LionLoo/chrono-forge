@@ -1,5 +1,16 @@
 import { hashCanonicalJson } from '../canonical';
 import { deriveXoshiro128State, Xoshiro128StarStar } from '../random';
+import {
+  advanceCivilization,
+  assertCivilizationInvariants,
+  attachFactualMemories,
+  civilizationDto,
+  createInitialCivilization,
+  SETTLEMENT_ACTION_PULSE_TICKS,
+  SETTLEMENT_FOUNDER_COUNT,
+  type CivilizationState,
+  type SettlementTerrain,
+} from '../settlement';
 
 export type WorldSeed = readonly [number, number, number, number];
 
@@ -31,6 +42,17 @@ export interface WorldEvent {
   readonly id: number;
   readonly tick: number;
   readonly kind: string;
+  readonly subjectId: number;
+  readonly targetId: number;
+  readonly tileIndex: number;
+  readonly amount: number;
+}
+
+export interface WorldEventDetails {
+  readonly subjectId?: number;
+  readonly targetId?: number;
+  readonly tileIndex?: number;
+  readonly amount?: number;
 }
 
 export interface WorldTileFields {
@@ -57,6 +79,7 @@ export interface WorldState extends WorldTileFields {
   readonly nextEventId: number;
   readonly eventLog: readonly WorldEvent[];
   readonly chunks: readonly WorldChunk[];
+  readonly civilization: CivilizationState;
   /** Compatibility projection; it aliases the root-level authoritative fields. */
   readonly tiles: WorldTileFields;
 }
@@ -232,7 +255,11 @@ function compareEvents(left: WorldEvent, right: WorldEvent): number {
   if (left.tick !== right.tick) {
     return left.tick - right.tick;
   }
-  return left.kind < right.kind ? -1 : left.kind > right.kind ? 1 : 0;
+  if (left.kind !== right.kind) return left.kind < right.kind ? -1 : 1;
+  if (left.subjectId !== right.subjectId) return left.subjectId - right.subjectId;
+  if (left.targetId !== right.targetId) return left.targetId - right.targetId;
+  if (left.tileIndex !== right.tileIndex) return left.tileIndex - right.tileIndex;
+  return left.amount - right.amount;
 }
 
 function arrayDto(values: ArrayLike<number>): number[] {
@@ -357,20 +384,73 @@ export function createInitialWorld(
     plants,
     animals,
   });
+  const settlementTerrain: SettlementTerrain = Object.freeze({
+    width: config.width,
+    height: config.height,
+    food,
+    freshWater,
+    timber,
+    stone,
+    habitability,
+    hazard,
+    isWalkable: (index: number) =>
+      index >= 0 &&
+      index < tileCount &&
+      water[index] === 0 &&
+      (habitability[index] ?? 0) >= 80 &&
+      (hazard[index] ?? 255) < 180,
+  });
+  const civilization = createInitialCivilization(normalizedSeed, settlementTerrain);
+  const initialEvents: readonly WorldEvent[] = Object.freeze([
+    Object.freeze({
+      id: 1,
+      tick: 0,
+      kind: 'world-generated',
+      subjectId: 0,
+      targetId: 0,
+      tileIndex: -1,
+      amount: 0,
+    }),
+    Object.freeze({
+      id: 2,
+      tick: 0,
+      kind: 'founders-arrived',
+      subjectId: 0,
+      targetId: 0,
+      tileIndex: civilization.centerTileIndex,
+      amount: SETTLEMENT_FOUNDER_COUNT,
+    }),
+  ]);
+  const foundedCivilization = attachFactualMemories(civilization, [initialEvents[1]!]);
 
   return Object.freeze({
     seed: Object.freeze(normalizedSeed),
     config,
     tick: 0,
-    nextEventId: 2,
-    eventLog: Object.freeze([{ id: 1, tick: 0, kind: 'world-generated' }]),
+    nextEventId: 3,
+    eventLog: initialEvents,
     chunks: makeChunks(config),
+    civilization: foundedCivilization,
     ...tiles,
     tiles,
   });
 }
 
-/** Advances only logical ticks. Environmental systems are intentionally added in later M1 slices. */
+function settlementTerrain(state: WorldState): SettlementTerrain {
+  return Object.freeze({
+    width: state.config.width,
+    height: state.config.height,
+    food: state.food,
+    freshWater: state.freshWater,
+    timber: state.timber,
+    stone: state.stone,
+    habitability: state.habitability,
+    hazard: state.hazard,
+    isWalkable: (index: number) => isWalkableTile(state, index),
+  });
+}
+
+/** Advances integer ticks and runs M3 systems only at deterministic action-pulse boundaries. */
 export function stepWorld(state: WorldState, ticks = 1): WorldState {
   if (!Number.isSafeInteger(ticks) || ticks < 0 || state.tick + ticks > Number.MAX_SAFE_INTEGER) {
     throw new RangeError('World tick advancement must remain a non-negative safe integer.');
@@ -379,7 +459,27 @@ export function stepWorld(state: WorldState, ticks = 1): WorldState {
     return state;
   }
 
-  return Object.freeze({ ...state, tick: state.tick + ticks });
+  const endingTick = state.tick + ticks;
+  let next = state;
+  let pulseTick =
+    (Math.floor(state.tick / SETTLEMENT_ACTION_PULSE_TICKS) + 1) * SETTLEMENT_ACTION_PULSE_TICKS;
+  while (pulseTick <= endingTick) {
+    const terrain = settlementTerrain(next);
+    const pulse = advanceCivilization(next.civilization, terrain, pulseTick);
+    next = Object.freeze({ ...next, tick: pulseTick, civilization: pulse.civilization });
+    const createdEvents: WorldEvent[] = [];
+    for (const draft of pulse.events) {
+      next = appendWorldEvent(next, draft.kind, pulseTick, draft);
+      createdEvents.push(next.eventLog.at(-1)!);
+    }
+    next = Object.freeze({
+      ...next,
+      civilization: attachFactualMemories(next.civilization, createdEvents),
+    });
+    assertWorldInvariants(next);
+    pulseTick += SETTLEMENT_ACTION_PULSE_TICKS;
+  }
+  return next.tick === endingTick ? next : Object.freeze({ ...next, tick: endingTick });
 }
 
 /** Appends one factual event with the next stable id to an immutable world snapshot. */
@@ -387,6 +487,7 @@ export function appendWorldEvent(
   state: WorldState,
   kind: string,
   eventTick = state.tick,
+  details: WorldEventDetails = {},
 ): WorldState {
   if (kind.length === 0 || kind.length > 64) {
     throw new RangeError('World event kind must contain 1 through 64 characters.');
@@ -401,7 +502,32 @@ export function appendWorldEvent(
   ) {
     throw new RangeError('World event id and tick must remain valid safe integers.');
   }
-  const event = Object.freeze({ id: state.nextEventId, tick: eventTick, kind });
+  const subjectId = details.subjectId ?? 0;
+  const targetId = details.targetId ?? 0;
+  const tileIndex = details.tileIndex ?? -1;
+  const amount = details.amount ?? 0;
+  if (
+    !Number.isSafeInteger(subjectId) ||
+    subjectId < 0 ||
+    !Number.isSafeInteger(targetId) ||
+    targetId < 0 ||
+    !Number.isSafeInteger(tileIndex) ||
+    tileIndex < -1 ||
+    tileIndex >= state.config.width * state.config.height ||
+    !Number.isSafeInteger(amount) ||
+    amount < 0
+  ) {
+    throw new RangeError('World event references must be canonical non-negative IDs and amounts.');
+  }
+  const event = Object.freeze({
+    id: state.nextEventId,
+    tick: eventTick,
+    kind,
+    subjectId,
+    targetId,
+    tileIndex,
+    amount,
+  });
   return Object.freeze({
     ...state,
     nextEventId: state.nextEventId + 1,
@@ -446,11 +572,67 @@ export function isWalkableTile(state: WorldState, index: number): boolean {
   );
 }
 
+export function assertWorldInvariants(state: WorldState): void {
+  assertCivilizationInvariants(state.civilization, settlementTerrain(state));
+  const agentIds = new Set(state.civilization.agents.map((agent) => agent.id));
+  const structureIds = new Set(state.civilization.structures.map((structure) => structure.id));
+  const eventsById = new Map<number, WorldEvent>();
+  let previousEventId = 0;
+  for (const event of state.eventLog) {
+    if (
+      !Number.isSafeInteger(event.id) ||
+      event.id <= previousEventId ||
+      !Number.isSafeInteger(event.tick) ||
+      event.tick < 0 ||
+      event.tick > state.tick ||
+      typeof event.kind !== 'string' ||
+      event.kind.length < 1 ||
+      event.kind.length > 64 ||
+      !Number.isSafeInteger(event.subjectId) ||
+      event.subjectId < 0 ||
+      !Number.isSafeInteger(event.targetId) ||
+      event.targetId < 0 ||
+      !Number.isSafeInteger(event.tileIndex) ||
+      event.tileIndex < -1 ||
+      event.tileIndex >= state.config.width * state.config.height ||
+      !Number.isSafeInteger(event.amount) ||
+      event.amount < 0
+    )
+      throw new Error('World event invariant failed.');
+    if (event.subjectId !== 0 && !agentIds.has(event.subjectId))
+      throw new Error('World event subject is invalid.');
+    if (event.targetId !== 0 && !agentIds.has(event.targetId) && !structureIds.has(event.targetId))
+      throw new Error('World event target is invalid.');
+    eventsById.set(event.id, event);
+    previousEventId = event.id;
+  }
+  for (const agent of state.civilization.agents) {
+    for (const memory of agent.memories) {
+      const sourceEvent = eventsById.get(memory.eventId);
+      if (
+        memory.tick !== sourceEvent?.tick ||
+        memory.kind !== sourceEvent?.kind ||
+        memory.targetId !== sourceEvent?.targetId
+      ) {
+        throw new Error('Agent memory must match its factual source event.');
+      }
+    }
+  }
+  if (!Number.isSafeInteger(state.nextEventId) || state.nextEventId <= previousEventId)
+    throw new Error('World nextEventId is invalid.');
+}
+
 /** Canonical DTO JSON with fixed key and array order, suitable for durable snapshots and hashes. */
 export function canonicalWorldJson(state: WorldState): string {
-  const eventLog = [...state.eventLog]
-    .sort(compareEvents)
-    .map((event) => ({ id: event.id, kind: event.kind, tick: event.tick }));
+  const eventLog = [...state.eventLog].sort(compareEvents).map((event) => ({
+    amount: event.amount,
+    id: event.id,
+    kind: event.kind,
+    subjectId: event.subjectId,
+    targetId: event.targetId,
+    tick: event.tick,
+    tileIndex: event.tileIndex,
+  }));
   return JSON.stringify({
     animals: arrayDto(state.animals),
     biome: arrayDto(state.biome),
@@ -461,6 +643,7 @@ export function canonicalWorldJson(state: WorldState): string {
       x: chunk.x,
       y: chunk.y,
     })),
+    civilization: civilizationDto(state.civilization),
     config: {
       chunkSize: state.config.chunkSize,
       height: state.config.height,
