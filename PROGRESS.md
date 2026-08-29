@@ -6,7 +6,7 @@ Last updated: 2026-08-29
 
 - Goal: build, verify, package, and privately release the complete Chrono Forge v1.0.0 contract; never stop at a prototype or partial roadmap.
 - Current milestone: M4.5 deep interpersonal relationships and family life is implemented, independently reviewed, and locally acceptance-complete on `feature/deep-relationships-family-life`. The checkpoint commit, PR, hosted CI, and merge remain before M5.
-- Git checkpoint: branch base and `main` are `205031d30e0e20caccffab281b74655d1750afa9`. The M4.5 implementation worktree is intentionally dirty until the verified checkpoint commit. Live `gh auth status -h github.com` currently reports the saved `LionLoo` token invalid, so reauthentication is required before push.
+- Git checkpoint: verified M4.5 implementation commit `cbc5451483c8ec9809936c62a57fd6f14039da98` is on `feature/deep-relationships-family-life`, based on `main` at `205031d30e0e20caccffab281b74655d1750afa9`; the worktree was clean after that commit. Live `gh auth status -h github.com` reports the saved `LionLoo` token invalid, so user-approved device authorization is required before push.
 - Included usage: no read-only weekly allowance meter is exposed. Only the included ChatGPT/Codex plan path is used; no API key, purchased/promotional credit, or account credit is used.
 - v1.0 completion: not satisfied. M5-M12 and the private release remain fully blocking.
 
@@ -32,7 +32,7 @@ Last updated: 2026-08-29
 
 ## Active risks and blockers
 
-- GitHub CLI authentication is currently invalid and must be repaired before push/PR/CI. Browser cookies are unrelated.
+- GitHub CLI authentication is currently invalid. The official device page is signed in as `LionLoo`, but entering its one-time code and granting persistent CLI access requires action-time user approval before push/PR/CI. Browser cookies alone do not repair the CLI credential.
 - No read-only included-usage meter exists; do not use credits or an API key.
 - GitHub private-plan branch protection returns HTTP 403; enforce policy operationally with independent review and green aggregate `Required` CI before merge.
 - Windows signing credentials are not established; the documented private unsigned-installer fallback remains unless existing credentials become available.
@@ -46,4 +46,4 @@ Last updated: 2026-08-29
 
 ## Exact next action
 
-Commit the explicit M4.5 paths, repair GitHub CLI authentication, push `feature/deep-relationships-family-life`, open the private PR, verify hosted aggregate `Required` CI, merge after the existing independent clean review, then update durable `main` evidence and begin M5 only after the next allowance check.
+After the user approves the pending GitHub device authorization, complete it and re-run `gh auth status -h github.com`; then push commit `cbc5451` on `feature/deep-relationships-family-life`, open the private PR, verify hosted aggregate `Required` CI, merge after the existing independent clean review, update durable `main` evidence, and begin M5 only after the next allowance check.
