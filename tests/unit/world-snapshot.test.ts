@@ -12,6 +12,8 @@ import {
   hashWorldState,
   stepWorld,
 } from '../../src/simulation/world';
+import { ACCELERATED_YEAR_TICKS } from '../../src/simulation/society';
+import { interpersonalDto } from '../../src/simulation/relationships';
 import legacyWorldV0 from '../fixtures/saves/world-v0.json';
 
 function legacySnapshot(worldJson: string): string {
@@ -46,9 +48,18 @@ function versionTwoSnapshot(ticks = 15_000): {
   const payload = { ...envelope.payload };
   const config = payload.config as Record<string, unknown>;
   payload.config = { chunkSize: config.chunkSize, height: config.height, width: config.width };
-  const civilization = { ...(payload.civilization as Record<string, unknown>) };
-  delete civilization.society;
-  civilization.agents = (civilization.agents as Record<string, unknown>[]).map((agent) => ({
+  const currentCivilization = payload.civilization as Record<string, unknown>;
+  const agents = currentCivilization.agents as Record<string, unknown>[];
+  const relationships = agents.flatMap((first, firstIndex) =>
+    agents.slice(firstIndex + 1).map((second, secondOffset) => ({
+      id: (firstIndex * (2 * agents.length - firstIndex - 1)) / 2 + secondOffset + 1,
+      firstAgentId: first.id,
+      secondAgentId: second.id,
+      affinity: 50,
+      trust: 50,
+    })),
+  );
+  const legacyAgents = agents.map((agent) => ({
     ...agent,
     memories: (agent.memories as Record<string, unknown>[]).map((memory) => ({
       id: memory.id,
@@ -58,7 +69,21 @@ function versionTwoSnapshot(ticks = 15_000): {
       targetId: memory.targetId,
     })),
   }));
-  payload.civilization = civilization;
+  payload.civilization = {
+    agents: legacyAgents,
+    centerTileIndex: currentCivilization.centerTileIndex,
+    nextAgentId: currentCivilization.nextAgentId,
+    nextMemoryId: currentCivilization.nextMemoryId,
+    nextRelationshipId: relationships.length + 1,
+    nextStructureId: currentCivilization.nextStructureId,
+    operationCount: currentCivilization.operationCount,
+    pathDemand: currentCivilization.pathDemand,
+    relationships,
+    resourceDepletion: currentCivilization.resourceDepletion,
+    stockpile: currentCivilization.stockpile,
+    structures: currentCivilization.structures,
+    systemRng: currentCivilization.systemRng,
+  };
   payload.eventLog = (payload.eventLog as Record<string, unknown>[]).map((event) => ({
     amount: event.amount,
     id: event.id,
@@ -82,6 +107,63 @@ function versionTwoSnapshot(ticks = 15_000): {
   };
 }
 
+function versionThreeSnapshot(): string {
+  const source = stepWorld(
+    createInitialWorld([7, 11, 13, 17], { societyYearTicks: ACCELERATED_YEAR_TICKS }),
+    120_000,
+  );
+  const envelope = JSON.parse(serializeWorldSnapshot(source)) as {
+    payload: Record<string, unknown>;
+  };
+  const payload = { ...envelope.payload };
+  const civilization = payload.civilization as Record<string, unknown>;
+  const society = civilization.society as Record<string, unknown>;
+  const { interpersonal: _interpersonal, ...legacySocietyBase } = society;
+  void _interpersonal;
+  const legacySociety = {
+    ...legacySocietyBase,
+    bonds: [
+      {
+        firstPersonId: 1,
+        secondPersonId: 2,
+        cooperation: 72,
+        disagreement: 9,
+        conflict: 4,
+      },
+    ],
+    cultures: (society.cultures as Record<string, unknown>[]).map((culture) => {
+      const {
+        familyPolicy: _familyPolicy,
+        partnershipLimit: _partnershipLimit,
+        ...legacyCulture
+      } = culture;
+      void _familyPolicy;
+      void _partnershipLimit;
+      return legacyCulture;
+    }),
+    households: (society.households as Record<string, unknown>[]).map((household) => {
+      const { lastChildArrivalTick: _lastChildArrivalTick, ...legacyHousehold } = household;
+      void _lastChildArrivalTick;
+      return legacyHousehold;
+    }),
+  };
+  payload.civilization = {
+    ...civilization,
+    nextRelationshipId: 2,
+    relationships: [{ id: 1, firstAgentId: 1, secondAgentId: 2, affinity: 71, trust: 63 }],
+    society: legacySociety,
+  };
+  const payloadJson = JSON.stringify(payload);
+  return JSON.stringify({
+    checksum: hashCanonicalJson(payloadJson),
+    contentVersion: 3,
+    engineVersion: 3,
+    format: WORLD_SNAPSHOT_FORMAT,
+    formatVersion: 3,
+    payload,
+  });
+}
+
 describe('versioned world snapshots', () => {
   it('round-trips canonical authority without sharing mutable arrays', () => {
     const original = stepWorld(createInitialWorld([7, 11, 13, 17], { width: 8, height: 6 }), 4321);
@@ -98,11 +180,168 @@ describe('versioned world snapshots', () => {
     expect(loaded.tiles.elevation).toBe(loaded.elevation);
   });
 
+  it('round-trips a lived v4 relationship graph and every source reference canonically', () => {
+    const original = stepWorld(
+      createInitialWorld([19, 23, 29, 31], { societyYearTicks: ACCELERATED_YEAR_TICKS }),
+      120_000,
+    );
+    expect(original.civilization.society.interpersonal.active.length).toBeGreaterThan(0);
+    const snapshot = serializeWorldSnapshot(original);
+    const loaded = deserializeWorldSnapshot(snapshot);
+
+    expect(canonicalWorldJson(loaded)).toBe(canonicalWorldJson(original));
+    expect(interpersonalDto(loaded.civilization.society.interpersonal)).toStrictEqual(
+      interpersonalDto(original.civilization.society.interpersonal),
+    );
+    expect(serializeWorldSnapshot(loaded)).toBe(snapshot);
+  });
+
+  it('rejects checksummed v4 relationship authority with false arrival or event identity', () => {
+    const original = stepWorld(
+      createInitialWorld([19, 23, 29, 31], { societyYearTicks: ACCELERATED_YEAR_TICKS }),
+      120_000,
+    );
+    const sourceEnvelope = JSON.parse(serializeWorldSnapshot(original)) as {
+      checksum: string;
+      payload: Record<string, unknown>;
+    };
+    const rejectMutation = (
+      mutate: (payload: Record<string, unknown>) => void,
+      expected: RegExp,
+    ): void => {
+      const envelope = structuredClone(sourceEnvelope);
+      mutate(envelope.payload);
+      envelope.checksum = hashCanonicalJson(JSON.stringify(envelope.payload));
+      expect(() => deserializeWorldSnapshot(JSON.stringify(envelope))).toThrow(expected);
+    };
+    const interpersonalFor = (payload: Record<string, unknown>): Record<string, unknown> =>
+      ((payload.civilization as Record<string, unknown>).society as Record<string, unknown>)
+        .interpersonal as Record<string, unknown>;
+
+    expect(original.civilization.society.interpersonal.childArrivals.length).toBeGreaterThan(0);
+    rejectMutation((payload) => {
+      const arrivals = interpersonalFor(payload).childArrivals as Record<string, unknown>[];
+      const pairBond = arrivals.find((arrival) => arrival.policy === 'pair-bond');
+      expect(pairBond).toBeDefined();
+      const prior = Number(pairBond!.minimumPartnerTrustAtArrival);
+      pairBond!.minimumPartnerTrustAtArrival = prior === 100 ? 99 : prior + 1;
+    }, /child arrival eligibility (?:source event|event identity)/i);
+
+    rejectMutation((payload) => {
+      const arrivals = interpersonalFor(payload).childArrivals as Record<string, unknown>[];
+      const pairBond = arrivals.find((arrival) => arrival.policy === 'pair-bond');
+      expect(pairBond).toBeDefined();
+      pairBond!.partnerKindAtArrival =
+        pairBond!.partnerKindAtArrival === 'partner' ? 'long-term-partner' : 'partner';
+    }, /child arrival eligibility (?:source event|event identity)/i);
+
+    rejectMutation((payload) => {
+      const arrivals = interpersonalFor(payload).childArrivals as Record<string, unknown>[];
+      const pairBond = arrivals.find((arrival) => arrival.policy === 'pair-bond');
+      expect(pairBond).toBeDefined();
+      pairBond!.eligibilityEventId = pairBond!.eventId;
+    }, /child arrival eligibility (?:source event|event identity)/i);
+
+    rejectMutation((payload) => {
+      const arrivals = interpersonalFor(payload).childArrivals as Record<string, unknown>[];
+      const arrival = arrivals[0]!;
+      const events = payload.eventLog as Record<string, unknown>[];
+      const eligibility = events.find((event) => event.id === arrival.eligibilityEventId)!;
+      eligibility.amount = Number(arrival.householdId) + 1;
+    }, /child arrival eligibility (?:source event|event identity)/i);
+
+    rejectMutation((payload) => {
+      const arrivals = interpersonalFor(payload).childArrivals as Record<string, unknown>[];
+      const pairBond = arrivals.find((arrival) => arrival.policy === 'pair-bond')!;
+      const events = payload.eventLog as Record<string, unknown>[];
+      const eligibility = events.find((event) => event.id === pairBond.eligibilityEventId)!;
+      const evidence = eligibility.childArrivalEligibility as Record<string, unknown>;
+      evidence.partnerRelationshipId = Number(evidence.partnerRelationshipId) + 1;
+    }, /child arrival eligibility (?:source event|event identity)/i);
+
+    rejectMutation((payload) => {
+      const interpersonal = interpersonalFor(payload);
+      const relationships = [
+        ...(interpersonal.active as Record<string, unknown>[]),
+        ...(interpersonal.archived as Record<string, unknown>[]),
+      ];
+      const relationship = relationships.find(
+        (candidate) => (candidate.sharedEvents as unknown[]).length > 0,
+      );
+      expect(relationship).toBeDefined();
+      const reference = (relationship!.sharedEvents as Record<string, unknown>[])[0]!;
+      const events = payload.eventLog as Record<string, unknown>[];
+      const unrelated = events.find(
+        (event) =>
+          event.tick === reference.tick &&
+          event.id !== reference.eventId &&
+          (event.subjectKind !== 'person' ||
+            event.targetKind !== 'person' ||
+            ![relationship!.firstPersonId, relationship!.secondPersonId].includes(
+              event.subjectId,
+            ) ||
+            ![relationship!.firstPersonId, relationship!.secondPersonId].includes(event.targetId)),
+      );
+      expect(unrelated).toBeDefined();
+      reference.eventId = unrelated!.id;
+    }, /relationship event identity/i);
+
+    rejectMutation((payload) => {
+      const arrivals = interpersonalFor(payload).childArrivals as Record<string, unknown>[];
+      const arrival = arrivals[0]!;
+      const events = payload.eventLog as Record<string, unknown>[];
+      const unrelated = events.find(
+        (event) => event.tick === arrival.tick && event.id !== arrival.eventId,
+      );
+      expect(unrelated).toBeDefined();
+      arrival.eventId = unrelated!.id;
+    }, /(family bond|child arrival) event identity/i);
+  });
+
+  it('migrates real v3 social authority conservatively without inventing relationship history', () => {
+    const migratedSnapshot = migrateWorldSnapshot(versionThreeSnapshot());
+    const loaded = deserializeWorldSnapshot(migratedSnapshot);
+    const interpersonal = loaded.civilization.society.interpersonal;
+
+    expect(JSON.parse(migratedSnapshot)).toMatchObject({ formatVersion: 4 });
+    expect(interpersonal.active).toHaveLength(1);
+    expect(interpersonal.active[0]).toMatchObject({
+      firstPersonId: 1,
+      secondPersonId: 2,
+      kind: 'legacy-contact',
+      observedSinceTick: loaded.tick,
+      firstToSecond: { affinity: 71, trust: 63, closeness: 72, grievance: 4 },
+      legacySocietyCounters: { cooperation: 72, disagreement: 9, conflict: 4 },
+    });
+    expect(interpersonal.active[0]?.sharedEvents).toStrictEqual([]);
+    expect(interpersonal.archived).toStrictEqual([]);
+    expect(interpersonal.lifetime).toStrictEqual([]);
+    expect(interpersonal.childArrivals).toStrictEqual([]);
+    expect(
+      interpersonal.familyBonds.every(
+        (bond) =>
+          bond.provenance === 'migrated-parentage' &&
+          bond.stateProvenance === 'migrated-unknown' &&
+          bond.formedTick === null &&
+          bond.formedEventId === 0,
+      ),
+    ).toBe(true);
+    expect(
+      interpersonal.householdHistories.every(
+        (history) =>
+          history.intervals.length === 1 &&
+          history.intervals[0]?.startTick === null &&
+          history.intervals[0]?.provenance === 'migrated-current-household',
+      ),
+    ).toBe(true);
+    expect(serializeWorldSnapshot(loaded)).toBe(migratedSnapshot);
+  });
+
   it.each([
     ['v0', JSON.stringify(legacyWorldV0)],
     ['v1', versionOneSnapshot(legacyWorldV0.worldJson)],
   ])(
-    'migrates the committed legacy %s envelope to a founded v3 civilization',
+    'migrates the committed legacy %s envelope to a founded v4 civilization',
     (_version, legacy) => {
       const migrated = migrateWorldSnapshot(legacy);
       const loaded = deserializeWorldSnapshot(migrated);
@@ -180,7 +419,7 @@ describe('versioned world snapshots', () => {
     const { snapshot, source } = versionTwoSnapshot();
     const loaded = deserializeWorldSnapshot(migrateWorldSnapshot(snapshot));
 
-    expect(JSON.parse(migrateWorldSnapshot(snapshot))).toMatchObject({ formatVersion: 3 });
+    expect(JSON.parse(migrateWorldSnapshot(snapshot))).toMatchObject({ formatVersion: 4 });
     expect(loaded.eventLog.map((event) => [event.id, event.kind])).toStrictEqual(
       source.eventLog.map((event) => [event.id, event.kind]),
     );
@@ -400,7 +639,7 @@ describe('versioned world snapshots', () => {
   });
 
   it('rejects checksummed v2 snapshots with impossible life, social, or construction state', () => {
-    const snapshot = serializeWorldSnapshot(stepWorld(createInitialWorld([1, 2, 3, 4]), 15_000));
+    const { snapshot } = versionTwoSnapshot();
 
     const invalidLife = JSON.parse(snapshot) as {
       checksum: string;
@@ -437,19 +676,28 @@ describe('versioned world snapshots', () => {
             plan: { action: string; targetStructureId: number; targetTileIndex: number }[];
             planIndex: number;
           }[];
-          structures: { id: number; status: string; tileIndex: number }[];
+          structures: ({
+            id: number;
+            status: string;
+            tileIndex: number;
+            progress: number;
+            plannedTick: number;
+            completedTick: number;
+            changedTick: number;
+          } & Record<string, unknown>)[];
         };
       };
     };
-    const operational = completedConstruction.payload.civilization.structures.find(
-      (structure) => structure.status === 'operational',
-    );
-    expect(operational).toBeDefined();
+    const operational = completedConstruction.payload.civilization.structures[0]!;
+    operational.status = 'operational';
+    operational.progress = 1_000;
+    operational.completedTick = Math.max(1, operational.plannedTick);
+    operational.changedTick = operational.completedTick;
     completedConstruction.payload.civilization.agents[0]!.plan = [
       {
         action: 'construct',
-        targetStructureId: operational!.id,
-        targetTileIndex: operational!.tileIndex,
+        targetStructureId: operational.id,
+        targetTileIndex: operational.tileIndex,
       },
     ];
     completedConstruction.payload.civilization.agents[0]!.planIndex = 0;

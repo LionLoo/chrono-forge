@@ -9,6 +9,7 @@ import {
   type SettlementTerrain,
   type SettlementStructure,
 } from '../../src/simulation/settlement';
+import { migrateLegacyInterpersonalState } from '../../src/simulation/relationships';
 import { createInitialWorld, hashWorldState, stepWorld } from '../../src/simulation/world';
 
 function terrainFrom(world: ReturnType<typeof createInitialWorld>) {
@@ -199,6 +200,16 @@ describe('autonomous settlement core', () => {
         kind === 'food' ? [100, 0, 0, 0] : [0, 100, 0, 0];
       const skills: readonly [number, number, number, number] =
         kind === 'food' ? [100, 0, 0, 0] : [0, 100, 0, 0];
+      const relationshipContacts = civilization.agents.flatMap((first) =>
+        civilization.agents
+          .filter((second) => first.id < second.id)
+          .map((second) => ({
+            firstPersonId: first.id,
+            secondPersonId: second.id,
+            affinity: social,
+            trust: social,
+          })),
+      );
       const state: CivilizationState = {
         ...civilization,
         stockpile: { food: 100, water: 100, timber: 0, stone: 0 },
@@ -211,11 +222,21 @@ describe('autonomous settlement core', () => {
           traits,
           skills,
         })),
-        relationships: civilization.relationships.map((relationship) => ({
-          ...relationship,
-          affinity: social,
-          trust: social,
-        })),
+        society: {
+          ...civilization.society,
+          interpersonal: migrateLegacyInterpersonalState(
+            [31, 32, 33, 34],
+            civilization.society.lastTick,
+            civilization.society.people.map((person) => ({
+              id: person.id,
+              alive: person.alive,
+              birthTick: person.birthTick,
+              parentIds: person.parentIds,
+              householdId: person.householdId,
+            })),
+            relationshipContacts,
+          ),
+        },
       };
       return { state, terrain, target };
     };

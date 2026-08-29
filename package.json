@@ -32,7 +32,7 @@
     "lint:web": "eslint . --max-warnings 0",
     "lint:rust": "cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets --all-features -- -D warnings",
     "typecheck": "tsc --noEmit",
-    "test": "vitest run --coverage",
+    "test": "vitest run --coverage --maxWorkers=1",
     "test:unit": "vitest run tests/unit",
     "test:integration": "vitest run tests/integration",
     "test:property": "vitest run tests/property",

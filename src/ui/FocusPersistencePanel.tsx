@@ -56,7 +56,10 @@ function restoresRunningFocus(session: FocusSession | null): boolean {
 async function loadWorkspace(
   clock: FocusClock,
   runtime: RuntimePersistence,
-  simulation: WorldSimulationView,
+  simulation: Pick<
+    WorldSimulationView,
+    'events' | 'loadSnapshot' | 'performOfflineCatchUp' | 'requestSave'
+  >,
 ): Promise<WorkspaceData> {
   const [loadedSettings, listedSlots, history] = await Promise.all([
     runtime.gateway.loadSettings(),
@@ -185,10 +188,15 @@ export function FocusPersistencePanel({
   useEffect(() => {
     if (simulation.status !== 'ready') return;
     let subscribed = true;
-    bootstrapPromiseRef.current ??= loadWorkspace(clock, runtime, simulation);
+    bootstrapPromiseRef.current ??= loadWorkspace(clock, runtime, {
+      events: simulation.events,
+      loadSnapshot: simulation.loadSnapshot,
+      performOfflineCatchUp: simulation.performOfflineCatchUp,
+      requestSave: simulation.requestSave,
+    });
     void bootstrapPromiseRef.current.then(
       (loaded) => {
-        if (subscribed) setWorkspace(loaded);
+        if (subscribed) setWorkspace((current) => current ?? loaded);
       },
       (error: unknown) => {
         if (subscribed) {
@@ -201,7 +209,15 @@ export function FocusPersistencePanel({
     return () => {
       subscribed = false;
     };
-  }, [clock, runtime, simulation]);
+  }, [
+    clock,
+    runtime,
+    simulation.events,
+    simulation.loadSnapshot,
+    simulation.performOfflineCatchUp,
+    simulation.requestSave,
+    simulation.status,
+  ]);
 
   const replaceWorkspace = useCallback((next: WorkspaceData) => {
     setWorkspace(next);
@@ -751,7 +767,6 @@ function FocusWorkspace({
               onClick={() =>
                 void runOperation(async () => {
                   const imported = await runtime.gateway.importSaveSlot(importPackage);
-                  await simulation.loadSnapshot(imported.snapshot);
                   await replaceWithSlot(imported.slotId);
                 })
               }

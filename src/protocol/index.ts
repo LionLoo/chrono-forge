@@ -1,7 +1,7 @@
 import type { WorldConfig, WorldSeed } from '../simulation/world';
 import { ACCELERATED_YEAR_TICKS, NORMAL_YEAR_TICKS } from '../simulation/society';
 
-export const WORKER_PROTOCOL_VERSION = 3;
+export const WORKER_PROTOCOL_VERSION = 4;
 export const MAX_ADVANCE_TICKS_PER_REQUEST = 1_000_000;
 
 export type WorkerProtocolVersion = typeof WORKER_PROTOCOL_VERSION;
@@ -53,6 +53,21 @@ export interface SocietyBiographyProjection {
   readonly summary: string;
 }
 
+/** Exact immutable policy and eligibility evidence for a simulated child arrival. */
+export interface SocietyChildArrivalProjection {
+  readonly tick: number;
+  readonly eventId: number;
+  readonly eligibilityEventId: number;
+  readonly policy: 'pair-bond' | 'communal-guardianship';
+  readonly householdId: number;
+  readonly guardianIds: readonly number[];
+  readonly partnerRelationshipId: number | null;
+  readonly partnerKindAtArrival: 'partner' | 'long-term-partner' | null;
+  readonly minimumPartnerTrustAtArrival: number | null;
+  readonly minimumPartnerCommitmentAtArrival: number | null;
+  readonly selectionScoreAtArrival: number;
+}
+
 export interface SocietyPersonProjection {
   readonly id: number;
   readonly name: string;
@@ -62,7 +77,55 @@ export interface SocietyPersonProjection {
   readonly role: string;
   readonly cultureName: string;
   readonly householdName: string;
+  /** Stable-ID-sorted derived family indexes; no elective social edges are carried in a frame. */
+  readonly parentIds: readonly number[];
+  readonly guardianIds: readonly number[];
+  readonly childIds: readonly number[];
+  readonly siblingIds: readonly number[];
+  readonly extendedKinIds: readonly number[];
+  readonly childArrival: SocietyChildArrivalProjection | null;
   readonly biography: readonly SocietyBiographyProjection[];
+}
+
+/** A bounded, immutable source event attached to a relationship by the simulation. */
+export interface SocietyRelationshipEventProjection {
+  readonly eventId: number;
+  readonly tick: number;
+  readonly summary: string;
+  readonly importance: number;
+}
+
+/** Directional social or family state; the UI must display rather than derive it. */
+export interface SocietyRelationshipDirectionProjection {
+  readonly affinity: number;
+  readonly trust: number;
+  readonly closeness: number;
+  readonly commitment: number;
+  readonly grievance: number;
+}
+
+/**
+ * A sparse read-only relationship record. `social` records are the elective
+ * graph; `family` records are canonical parent/guardian-to-child bonds.
+ */
+export interface SocietyRelationshipProjection {
+  readonly id: string;
+  readonly category: 'social' | 'family';
+  readonly status: 'active' | 'archived' | 'family';
+  readonly kind: string;
+  readonly firstPersonId: number;
+  readonly secondPersonId: number;
+  readonly firstRole: string;
+  readonly secondRole: string;
+  readonly trend: 'improving' | 'stable' | 'deteriorating';
+  readonly formedTick: number | null;
+  readonly changedTick: number;
+  readonly endedTick: number | null;
+  readonly firstToSecond: SocietyRelationshipDirectionProjection;
+  readonly secondToFirst: SocietyRelationshipDirectionProjection;
+  /** At most one bounded relationship-inspection page of source events. */
+  readonly sharedEvents: readonly SocietyRelationshipEventProjection[];
+  readonly sharedEventTotal: number;
 }
 
 export interface SocietyCultureProjection {
@@ -72,6 +135,7 @@ export interface SocietyCultureProjection {
   readonly belief: string;
   readonly tradition: string;
   readonly architectureStyle: string;
+  readonly familyPolicy: 'pair-bond' | 'communal-guardianship';
 }
 
 export interface SocietyTimelineProjection {
@@ -177,6 +241,21 @@ export interface RequestTimelinePageRequest extends RequestBase {
   readonly offset: number;
 }
 
+/** Request one bounded, deliberate relationship-inspector page for a person. */
+export interface RequestRelationshipPageRequest extends RequestBase {
+  readonly type: 'requestRelationshipPage';
+  readonly personId: number;
+  readonly offset: number;
+}
+
+/** Request one bounded page from a specific relationship's retained factual history. */
+export interface RequestRelationshipEventPageRequest extends RequestBase {
+  readonly type: 'requestRelationshipEventPage';
+  readonly personId: number;
+  readonly relationshipId: string;
+  readonly offset: number;
+}
+
 export interface PerformOfflineCatchUpRequest extends RequestBase {
   readonly type: 'performOfflineCatchUp';
   readonly elapsedMilliseconds: number;
@@ -192,6 +271,8 @@ export type UiToWorkerMessage =
   | AdvanceTicksRequest
   | RequestSaveRequest
   | RequestTimelinePageRequest
+  | RequestRelationshipPageRequest
+  | RequestRelationshipEventPageRequest
   | PerformOfflineCatchUpRequest;
 
 export const INVALID_REQUEST_ID = 'invalid-request';
@@ -404,6 +485,46 @@ export function validateUiToWorkerMessage(input: unknown): WorkerRequestValidati
             },
           }
         : invalid(requestId, 'requestTimelinePage.offset must be a non-negative safe integer.');
+    case 'requestRelationshipPage':
+      return isNonNegativeSafeInteger(input.personId) &&
+        input.personId > 0 &&
+        isNonNegativeSafeInteger(input.offset)
+        ? {
+            kind: 'valid',
+            message: {
+              type: 'requestRelationshipPage',
+              protocolVersion: WORKER_PROTOCOL_VERSION,
+              requestId,
+              personId: input.personId,
+              offset: input.offset,
+            },
+          }
+        : invalid(
+            requestId,
+            'requestRelationshipPage.personId must be a positive safe integer and offset must be a non-negative safe integer.',
+          );
+    case 'requestRelationshipEventPage':
+      return isNonNegativeSafeInteger(input.personId) &&
+        input.personId > 0 &&
+        typeof input.relationshipId === 'string' &&
+        input.relationshipId.length > 0 &&
+        input.relationshipId.length <= 128 &&
+        isNonNegativeSafeInteger(input.offset)
+        ? {
+            kind: 'valid',
+            message: {
+              type: 'requestRelationshipEventPage',
+              protocolVersion: WORKER_PROTOCOL_VERSION,
+              requestId,
+              personId: input.personId,
+              relationshipId: input.relationshipId,
+              offset: input.offset,
+            },
+          }
+        : invalid(
+            requestId,
+            'requestRelationshipEventPage requires a positive personId, bounded relationshipId, and non-negative offset.',
+          );
     case 'performOfflineCatchUp':
       return isNonNegativeSafeInteger(input.elapsedMilliseconds) &&
         isNonNegativeSafeInteger(input.rate) &&
@@ -468,6 +589,25 @@ export interface TimelinePageResponse extends ResponseBase {
   readonly timeline: readonly SocietyTimelineProjection[];
 }
 
+/** A single, stable-sorted relationship inspector page. */
+export interface RelationshipPageResponse extends ResponseBase {
+  readonly type: 'relationshipPage';
+  readonly personId: number;
+  readonly offset: number;
+  readonly total: number;
+  readonly relationships: readonly SocietyRelationshipProjection[];
+}
+
+/** A bounded page from one relationship's retained factual event history. */
+export interface RelationshipEventPageResponse extends ResponseBase {
+  readonly type: 'relationshipEventPage';
+  readonly personId: number;
+  readonly relationshipId: string;
+  readonly offset: number;
+  readonly total: number;
+  readonly events: readonly SocietyRelationshipEventProjection[];
+}
+
 export interface SimulationMetrics {
   readonly tick: number;
   readonly runMode: RunMode;
@@ -512,6 +652,8 @@ export type WorkerToUiMessage =
   | EventBatchResponse
   | SaveSnapshotResponse
   | TimelinePageResponse
+  | RelationshipPageResponse
+  | RelationshipEventPageResponse
   | MetricsResponse
   | FaultResponse;
 

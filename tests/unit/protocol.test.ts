@@ -4,9 +4,20 @@ import {
   STRUCTURE_STATE_CODES,
   WORKER_PROTOCOL_VERSION,
   projectionTransferables,
+  validateUiToWorkerMessage,
 } from '../../src/protocol';
-import { createInitialWorld, stepWorld } from '../../src/simulation/world';
-import { projectWorldFrame } from '../../src/workers/simulation-runtime';
+import { deriveXoshiro128State } from '../../src/simulation/random';
+import {
+  admitActiveRelationship,
+  createInitialInterpersonalState,
+  type ActiveRelationship,
+} from '../../src/simulation/relationships';
+import { appendWorldEvent, createInitialWorld, stepWorld } from '../../src/simulation/world';
+import {
+  projectRelationshipEventPage,
+  projectRelationshipPage,
+  projectWorldFrame,
+} from '../../src/workers/simulation-runtime';
 
 describe('versioned worker protocol', () => {
   it('creates a detached, transfer-ready projection from dense world tiles', () => {
@@ -64,7 +75,12 @@ describe('versioned worker protocol', () => {
       government: 'council',
     });
     expect(frame.society.people.map((person) => person.id)).toStrictEqual([1, 2, 3, 4, 5, 6]);
+    expect('relationships' in frame.society).toBe(false);
     expect(frame.society.cultures).toHaveLength(2);
+    expect(frame.society.cultures.map((culture) => culture.familyPolicy)).toStrictEqual([
+      'pair-bond',
+      'communal-guardianship',
+    ]);
     expect(frame.society.timeline).toStrictEqual([
       { id: 1, tick: 0, summary: 'The founding world formed.' },
       { id: 2, tick: 0, summary: '6 named founders established the first settlement.' },
@@ -112,5 +128,325 @@ describe('versioned worker protocol', () => {
       },
     };
     expect(() => projectWorldFrame(invalid)).toThrow('Agent health must be an integer');
+  });
+
+  it('projects sparse relationships with only event-log-resolved factual history', () => {
+    const initial = createInitialWorld([1, 2, 3, 4], { width: 4, height: 3, chunkSize: 2 });
+    const first = initial.civilization.society.people[0]!;
+    const second = initial.civilization.society.people[1]!;
+    const withSource = appendWorldEvent(initial, 'friendship-formed', 0, {
+      subjectKind: 'person',
+      subjectId: first.id,
+      targetKind: 'person',
+      targetId: second.id,
+      summary: `${first.name} and ${second.name} formed a friendship.`,
+    });
+    const inputs = withSource.civilization.society.people.map((person) => ({
+      id: person.id,
+      alive: person.alive,
+      birthTick: person.birthTick,
+      parentIds: person.parentIds,
+      householdId: person.householdId,
+    }));
+    const relationship: ActiveRelationship = {
+      id: 1,
+      firstPersonId: first.id,
+      secondPersonId: second.id,
+      firstRole: 'peer',
+      secondRole: 'peer',
+      kind: 'friend',
+      formedTick: 0,
+      changedTick: 0,
+      lastInteractionTick: 0,
+      observedSinceTick: 0,
+      trend: 'improving',
+      firstToSecond: { affinity: 82, trust: 77, closeness: 63, commitment: 0, grievance: 3 },
+      secondToFirst: { affinity: 78, trust: 74, closeness: 59, commitment: 0, grievance: 4 },
+      sharedEvents: [{ eventId: withSource.nextEventId - 1, importance: 2, tick: 0 }],
+      rng: deriveXoshiro128State(withSource.seed, 'projection-relationship'),
+      legacySocietyCounters: null,
+    };
+    const interpersonal = admitActiveRelationship(
+      createInitialInterpersonalState(withSource.seed, 0, inputs),
+      inputs,
+      relationship,
+    );
+    const state = {
+      ...withSource,
+      civilization: {
+        ...withSource.civilization,
+        society: { ...withSource.civilization.society, interpersonal },
+      },
+    };
+
+    expect('relationships' in projectWorldFrame(state).society).toBe(false);
+    expect(projectRelationshipPage(state, first.id, 0).relationships).toStrictEqual([
+      {
+        id: 'social:1',
+        category: 'social',
+        status: 'active',
+        kind: 'friend',
+        firstPersonId: first.id,
+        secondPersonId: second.id,
+        firstRole: 'peer',
+        secondRole: 'peer',
+        trend: 'improving',
+        formedTick: 0,
+        changedTick: 0,
+        endedTick: null,
+        firstToSecond: { affinity: 82, trust: 77, closeness: 63, commitment: 0, grievance: 3 },
+        secondToFirst: { affinity: 78, trust: 74, closeness: 59, commitment: 0, grievance: 4 },
+        sharedEventTotal: 1,
+        sharedEvents: [
+          {
+            eventId: withSource.nextEventId - 1,
+            importance: 2,
+            tick: 0,
+            summary: `${first.name} and ${second.name} formed a friendship.`,
+          },
+        ],
+      },
+    ]);
+  });
+
+  it('pages every retained shared relationship event instead of hiding events after the first eight', () => {
+    const initial = createInitialWorld([41, 43, 47, 53], { width: 4, height: 3, chunkSize: 2 });
+    const first = initial.civilization.society.people[0]!;
+    const second = initial.civilization.society.people[1]!;
+    let withSources = initial;
+    const sharedEvents: ActiveRelationship['sharedEvents'][number][] = [];
+    for (let index = 0; index < 16; index += 1) {
+      withSources = appendWorldEvent(withSources, 'resource-shared', 0, {
+        subjectKind: 'person',
+        subjectId: first.id,
+        targetKind: 'person',
+        targetId: second.id,
+        summary: `${first.name} shared factual resource event ${index + 1} with ${second.name}.`,
+      });
+      sharedEvents.push({ eventId: withSources.nextEventId - 1, importance: 2, tick: 0 });
+    }
+    const inputs = withSources.civilization.society.people.map((person) => ({
+      id: person.id,
+      alive: person.alive,
+      birthTick: person.birthTick,
+      parentIds: person.parentIds,
+      householdId: person.householdId,
+    }));
+    const relationship: ActiveRelationship = {
+      id: 1,
+      firstPersonId: first.id,
+      secondPersonId: second.id,
+      firstRole: 'peer',
+      secondRole: 'peer',
+      kind: 'close-friend',
+      formedTick: 0,
+      changedTick: 0,
+      lastInteractionTick: 0,
+      observedSinceTick: 0,
+      trend: 'stable',
+      firstToSecond: { affinity: 80, trust: 80, closeness: 80, commitment: 0, grievance: 0 },
+      secondToFirst: { affinity: 80, trust: 80, closeness: 80, commitment: 0, grievance: 0 },
+      sharedEvents,
+      rng: deriveXoshiro128State(withSources.seed, 'paged-relationship-events'),
+      legacySocietyCounters: null,
+    };
+    const interpersonal = admitActiveRelationship(
+      createInitialInterpersonalState(withSources.seed, 0, inputs),
+      inputs,
+      relationship,
+    );
+    const state = {
+      ...withSources,
+      civilization: {
+        ...withSources.civilization,
+        society: { ...withSources.civilization.society, interpersonal },
+      },
+    };
+
+    const relationshipPage = projectRelationshipPage(state, first.id, 0);
+    const firstEventPage = projectRelationshipEventPage(state, first.id, 'social:1', 0);
+    const secondEventPage = projectRelationshipEventPage(state, first.id, 'social:1', 8);
+    expect(relationshipPage.relationships[0]).toMatchObject({ sharedEventTotal: 16 });
+    expect(firstEventPage).toMatchObject({ offset: 0, total: 16 });
+    expect(secondEventPage).toMatchObject({ offset: 8, total: 16 });
+    expect(firstEventPage.events).toHaveLength(8);
+    expect(secondEventPage.events).toHaveLength(8);
+    expect(secondEventPage.events.map((event) => event.eventId)).not.toStrictEqual(
+      firstEventPage.events.map((event) => event.eventId),
+    );
+  });
+
+  it('projects exact child-arrival policy evidence for deliberate person inspection', () => {
+    const state = stepWorld(
+      createInitialWorld([19, 23, 29, 31], { societyYearTicks: 5_000 }),
+      120_000,
+    );
+    const arrival = state.civilization.society.interpersonal.childArrivals[0]!;
+    const person = projectWorldFrame(state).society.people.find(
+      (candidate) => candidate.id === arrival.childId,
+    );
+
+    expect(person?.childArrival).toStrictEqual({
+      tick: arrival.tick,
+      eventId: arrival.eventId,
+      eligibilityEventId: arrival.eligibilityEventId,
+      policy: arrival.policy,
+      householdId: arrival.householdId,
+      guardianIds: arrival.guardianIds,
+      partnerRelationshipId: arrival.partnerRelationshipId,
+      partnerKindAtArrival: arrival.partnerKindAtArrival,
+      minimumPartnerTrustAtArrival: arrival.minimumPartnerTrustAtArrival,
+      minimumPartnerCommitmentAtArrival: arrival.minimumPartnerCommitmentAtArrival,
+      selectionScoreAtArrival: arrival.selectionScoreAtArrival,
+    });
+  });
+
+  it('projects an event-backed guardian bond without rejecting its factual formation source', () => {
+    const initial = createInitialWorld([3, 5, 7, 11], { width: 4, height: 3, chunkSize: 2 });
+    const guardian = initial.civilization.society.people[0]!;
+    const child = initial.civilization.society.people[1]!;
+    const withSource = appendWorldEvent(initial, 'guardianship-formed', 0, {
+      subjectKind: 'person',
+      subjectId: guardian.id,
+      targetKind: 'person',
+      targetId: child.id,
+      summary: `${guardian.name} became ${child.name}'s guardian.`,
+    });
+    const eventId = withSource.nextEventId - 1;
+    const interpersonal = {
+      ...withSource.civilization.society.interpersonal,
+      familyBonds: [
+        {
+          parentId: guardian.id,
+          adultId: guardian.id,
+          childId: child.id,
+          kind: 'guardian' as const,
+          provenance: 'recorded-guardianship' as const,
+          stateProvenance: 'recorded' as const,
+          formedEventId: eventId,
+          formedTick: 0,
+          changedTick: 0,
+          lastInteractionTick: 0,
+          trend: 'improving' as const,
+          parentToChild: {
+            affinity: 60,
+            trust: 60,
+            closeness: 50,
+            commitment: 70,
+            grievance: 0,
+          },
+          childToParent: {
+            affinity: 60,
+            trust: 60,
+            closeness: 50,
+            commitment: 70,
+            grievance: 0,
+          },
+          sharedEvents: [{ eventId, importance: 3, tick: 0 }],
+        },
+      ],
+    };
+    const state = {
+      ...withSource,
+      civilization: {
+        ...withSource.civilization,
+        society: { ...withSource.civilization.society, interpersonal },
+      },
+    };
+
+    const projected = projectRelationshipPage(state, guardian.id, 0).relationships.find(
+      (relationship) => relationship.id === `family:guardian:${guardian.id}:${child.id}`,
+    );
+    expect(projected).toMatchObject({
+      kind: 'guardian',
+      firstRole: 'guardian',
+      secondRole: 'child',
+    });
+    expect(projected?.sharedEvents[0]?.eventId).toBe(eventId);
+    expect(projected?.sharedEvents[0]?.summary).toMatch(/guardian/);
+  });
+
+  it('validates relationship page requests and bounds stable, clamped responses to eight rows', () => {
+    expect(
+      validateUiToWorkerMessage({
+        type: 'requestRelationshipPage',
+        protocolVersion: WORKER_PROTOCOL_VERSION,
+        requestId: 'relationship-page',
+        personId: 1,
+        offset: 0,
+      }),
+    ).toMatchObject({ kind: 'valid' });
+    expect(
+      validateUiToWorkerMessage({
+        type: 'requestRelationshipEventPage',
+        protocolVersion: WORKER_PROTOCOL_VERSION,
+        requestId: 'relationship-event-page',
+        personId: 1,
+        relationshipId: 'social:1',
+        offset: 8,
+      }),
+    ).toMatchObject({ kind: 'valid' });
+    for (const invalid of [
+      { personId: 0, offset: 0 },
+      { personId: 1, offset: -1 },
+      { personId: 1.5, offset: 0 },
+      { personId: 1, offset: Number.POSITIVE_INFINITY },
+    ])
+      expect(
+        validateUiToWorkerMessage({
+          type: 'requestRelationshipPage',
+          protocolVersion: WORKER_PROTOCOL_VERSION,
+          requestId: 'invalid-relationship-page',
+          ...invalid,
+        }),
+      ).toMatchObject({ kind: 'invalid' });
+    expect(
+      validateUiToWorkerMessage({
+        type: 'requestRelationshipEventPage',
+        protocolVersion: WORKER_PROTOCOL_VERSION,
+        requestId: 'invalid-relationship-event-page',
+        personId: 1,
+        relationshipId: '',
+        offset: 0,
+      }),
+    ).toMatchObject({ kind: 'invalid' });
+  });
+
+  it('uses family/salience/stable-id order and never places every relationship edge on a frame', () => {
+    const initial = createInitialWorld([13, 17, 19, 23], { width: 4, height: 3, chunkSize: 2 });
+    const active = Array.from({ length: 9 }, (_, index): ActiveRelationship => ({
+      id: index + 1,
+      firstPersonId: 1,
+      secondPersonId: index + 2,
+      firstRole: 'peer',
+      secondRole: 'peer',
+      kind: 'friend',
+      formedTick: 0,
+      changedTick: 0,
+      lastInteractionTick: 0,
+      observedSinceTick: 0,
+      trend: 'stable',
+      firstToSecond: { affinity: 60, trust: 60, closeness: 10, commitment: 0, grievance: 0 },
+      secondToFirst: { affinity: 60, trust: 60, closeness: 10, commitment: 0, grievance: 0 },
+      sharedEvents: [],
+      rng: deriveXoshiro128State(initial.seed, `page-${index}`),
+      legacySocietyCounters: null,
+    }));
+    const state = {
+      ...initial,
+      civilization: {
+        ...initial.civilization,
+        society: {
+          ...initial.civilization.society,
+          interpersonal: { ...initial.civilization.society.interpersonal, active },
+        },
+      },
+    };
+
+    const page = projectRelationshipPage(state, 1, 999);
+    expect(page).toMatchObject({ personId: 1, offset: 8, total: 9 });
+    expect(page.relationships).toHaveLength(1);
+    expect(page.relationships.map((relationship) => relationship.id)).toStrictEqual(['social:9']);
+    expect(projectRelationshipPage(state, 1, 0).relationships).toHaveLength(8);
   });
 });

@@ -1,6 +1,11 @@
 import { hashCanonicalJson } from '../canonical';
 import { deriveXoshiro128State, Xoshiro128StarStar } from '../random';
 import {
+  childArrivalEligibilityEvidenceMatchesRecord,
+  childArrivalEligibilityEventMatches,
+  type ChildArrivalEligibilityEvidence,
+} from '../relationships';
+import {
   ACCELERATED_YEAR_TICKS,
   NORMAL_YEAR_TICKS,
   attachSocietyBiographyEventIds,
@@ -57,6 +62,7 @@ export interface WorldEvent {
   readonly targetId: number;
   readonly tileIndex: number;
   readonly amount: number;
+  readonly childArrivalEligibility?: ChildArrivalEligibilityEvidence;
 }
 
 export interface WorldEventDetails {
@@ -67,6 +73,7 @@ export interface WorldEventDetails {
   readonly targetId?: number;
   readonly tileIndex?: number;
   readonly amount?: number;
+  readonly childArrivalEligibility?: ChildArrivalEligibilityEvidence;
 }
 
 export interface WorldTileFields {
@@ -531,6 +538,41 @@ function settlementTerrain(state: WorldState): SettlementTerrain {
   });
 }
 
+function societyAuthoritativeEvent(event: WorldEvent): SocietyAuthoritativeEvent {
+  return Object.freeze({
+    id: event.id,
+    tick: event.tick,
+    kind: event.kind,
+    summary: event.summary,
+    subject: Object.freeze({ kind: event.subjectKind, id: event.subjectId }),
+    target: Object.freeze({ kind: event.targetKind, id: event.targetId }),
+    ...(event.childArrivalEligibility === undefined
+      ? {}
+      : { childArrivalEligibility: event.childArrivalEligibility }),
+  });
+}
+
+function biographyHistoricalSources(
+  state: WorldState,
+  sourceEvents: readonly SocietyAuthoritativeEvent[],
+): readonly SocietyAuthoritativeEvent[] {
+  const ids = new Set(sourceEvents.map((source) => source.id));
+  for (const person of state.civilization.society.people)
+    for (const id of person.biographyEventIds) ids.add(id);
+  return Object.freeze(
+    [...ids]
+      .sort((left, right) => left - right)
+      .map((id) => {
+        const event = state.eventLog[id - 1];
+        if (event?.id !== id)
+          throw new Error(
+            'Biography event id must reference the retained authoritative event log.',
+          );
+        return societyAuthoritativeEvent(event);
+      }),
+  );
+}
+
 /** Advances integer ticks and runs M3 systems only at deterministic action-pulse boundaries. */
 export function stepWorld(state: WorldState, ticks = 1): WorldState {
   if (!Number.isSafeInteger(ticks) || ticks < 0 || state.tick + ticks > Number.MAX_SAFE_INTEGER) {
@@ -553,21 +595,15 @@ export function stepWorld(state: WorldState, ticks = 1): WorldState {
       next = appendWorldEvent(next, draft.kind, pulseTick, draft);
       createdEvents.push(next.eventLog.at(-1)!);
     }
+    const societyEvents = createdEvents.map(societyAuthoritativeEvent);
     next = Object.freeze({
       ...next,
       civilization: Object.freeze({
         ...attachFactualMemories(next.civilization, createdEvents),
         society: attachSocietyBiographyEventIds(
           next.civilization.society,
-          createdEvents.map((event): SocietyAuthoritativeEvent =>
-            Object.freeze({
-              id: event.id,
-              kind: event.kind,
-              summary: event.summary,
-              subject: Object.freeze({ kind: event.subjectKind, id: event.subjectId }),
-              target: Object.freeze({ kind: event.targetKind, id: event.targetId }),
-            }),
-          ),
+          societyEvents,
+          biographyHistoricalSources(next, societyEvents),
         ),
       }),
     });
@@ -636,6 +672,9 @@ export function appendWorldEvent(
     targetId,
     tileIndex,
     amount,
+    ...(details.childArrivalEligibility === undefined
+      ? {}
+      : { childArrivalEligibility: details.childArrivalEligibility }),
   });
   return Object.freeze({
     ...state,
@@ -859,6 +898,23 @@ export function assertWorldInvariants(state: WorldState): void {
     eventsById.set(event.id, event);
     previousEventId = event.id;
   }
+  for (const arrival of state.civilization.society.interpersonal.childArrivals) {
+    const source = eventsById.get(arrival.eligibilityEventId);
+    if (
+      source?.tick !== arrival.tick ||
+      source.amount !== arrival.householdId ||
+      !childArrivalEligibilityEventMatches(arrival, {
+        kind: source.kind,
+        subjectKind: source.subjectKind,
+        subjectId: source.subjectId,
+        targetKind: source.targetKind,
+        targetId: source.targetId,
+      }) ||
+      source.childArrivalEligibility === undefined ||
+      !childArrivalEligibilityEvidenceMatchesRecord(arrival, source.childArrivalEligibility)
+    )
+      throw new Error('Child arrival eligibility source event is inconsistent.');
+  }
   for (const agent of state.civilization.agents) {
     for (const memory of agent.memories) {
       const sourceEvent = eventsById.get(memory.eventId);
@@ -904,6 +960,9 @@ export function canonicalWorldJson(state: WorldState): string {
     targetId: event.targetId,
     tick: event.tick,
     tileIndex: event.tileIndex,
+    ...(event.childArrivalEligibility === undefined
+      ? {}
+      : { childArrivalEligibility: event.childArrivalEligibility }),
   }));
   return JSON.stringify({
     animals: arrayDto(state.animals),

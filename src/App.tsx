@@ -424,6 +424,10 @@ export function App({ focusAlerts, focusClock, persistence, workerFactory }: App
           <SocietyPanel
             cultures={simulation.frame.society.cultures}
             dashboard={simulation.frame.society.dashboard}
+            relationshipEventPage={simulation.relationshipEventPage}
+            relationshipPage={simulation.relationshipPage}
+            onRelationshipEventPageRequest={simulation.requestRelationshipEventPage}
+            onRelationshipPageRequest={simulation.requestRelationshipPage}
             onTimelinePageRequest={simulation.requestTimelinePage}
             people={simulation.frame.society.people}
             timeline={simulation.timeline.entries}

@@ -1,58 +1,49 @@
 # Progress
 
-Last updated: 2026-08-24
+Last updated: 2026-08-29
 
 ## Release state
 
 - Goal: build, verify, package, and privately release the complete Chrono Forge v1.0.0 contract; never stop at a prototype or partial roadmap.
-- Current milestone: M4 economy, generations, society, culture, and factual history is merged and acceptance-complete. Release-blocking M4.5 deep interpersonal relationships and family life is now part of the durable `main` contract before M5; no M4.5 implementation or M5 work has begun.
-- Git checkpoint: M4.5 documentation PR #6 merged as `37b82b313a089b55c99776d1697b6346c38d9f27`; PR CI run `32700486882` and durable main CI run `32701182442` are green including aggregate `Required`. Private origin is `https://github.com/LionLoo/chrono-forge`.
+- Current milestone: M4.5 deep interpersonal relationships and family life is implemented, independently reviewed, and locally acceptance-complete on `feature/deep-relationships-family-life`. The checkpoint commit, PR, hosted CI, and merge remain before M5.
+- Git checkpoint: branch base and `main` are `205031d30e0e20caccffab281b74655d1750afa9`. The M4.5 implementation worktree is intentionally dirty until the verified checkpoint commit. Live `gh auth status -h github.com` currently reports the saved `LionLoo` token invalid, so reauthentication is required before push.
 - Included usage: no read-only weekly allowance meter is exposed. Only the included ChatGPT/Codex plan path is used; no API key, purchased/promotional credit, or account credit is used.
-- v1.0 completion: not satisfied. M4.5-M12 and release remain fully blocking; M5 may not begin before M4.5 is accepted and merged.
+- v1.0 completion: not satisfied. M5-M12 and the private release remain fully blocking.
 
 ## HARNESS EVALUATION
 
-- Requirements completed versus remaining: M0-M4 are merged and verified. M4 delivers economy, generations, parentage, static household foundations, cultures/institutions, generic social events, and factual biographies. M4.5 now explicitly requires the missing persistent typed relationship graph, evolving family bonds, relationship-grounded births and decisions, dynamic households/lineages, interpersonal history/inspection, v4 persistence, and sparse M8-compatible bounds. M4.5-M12 remain.
-- Build/test/CI: documentation PR #6 CI `32700486882` and merged main CI `32701182442` are green, including web quality/tests/E2E, Windows Rust/native E2E/installer, and aggregate `Required`. The product amendment changed seven Markdown planning/status files only; focused Prettier and `git diff --check` passed. No implementation test result is being claimed for M4.5.
-- Known defects/debt: the current merged product has only parent IDs, static household assignments, generic affinity/trust, and a limited generic social bond; it does not yet provide M4.5 depth or inspection. That is now an explicit release blocker rather than hidden scope. Existing non-blocking debt remains the >500 kB web bundle warning and misleading upstream WDIO diagnostics; M8 scale budgets, signing credentials, and private-plan branch protection remain future/operational gates.
-- Major failures and recovery: live Git/GitHub verification corrected stale durable text that still described M4 PR #5 as open. Product/code inspection exposed that broad relationship requirements were under-decomposed after M4; the plan now inserts M4.5 and binds M5-M8 to one relationship authority instead of relying on final-review interpretation. The first documentation review found undecided graph caps/retention and family/migration rules; Sol locked ADR-025/026 and exact acceptance, and follow-up review passed. No code recovery or behavior change occurred.
-- Review/subagent findings: independent Terra/high documentation review found the requested scope otherwise complete but initially flagged two P1 decision gaps and one P2 stale date. Remediation fixed 24 active/24 archived elective edges, quotas/retention, evolving O(population) parent/guardian bonds, finite `pair-bond`/`communal-guardianship` rules, close-kin exclusions, exact legacy migration, and the date. Follow-up review returned a clean verdict with no P0-P2 findings; implementation evidence remains future M4.5 work.
-- Demonstrated scale/performance: five locked accelerated worlds cover 240,000-600,000 ticks. Viable hashes/operation counts are `86af5e5c`/436,530, `d71be8fc`/433,105, and `f61d4ca4`/451,502; scarcity is `78a68790`/109,522; collapse/recovery is `ebbc5fa1`/339,060. The long scenario file passes 3/3 in 30-39 seconds on this machine, with residents capped at 64 and exact source-event histories. This is M4 intermediate evidence, not the M8 release-scale claim.
-- Buildable/runnable: yes. Web production and the actual Tauri/WebView2 app build and run; native E2E exercises SQLite save/reload/resume/complete, 200% text, the reduced-motion stylesheet, non-color condition text, and a non-invented short-session recap.
-- Fresh-root recoverability: yes. The repository identifies M4 as merged, M4.5 as unimplemented and next, its release-blocking acceptance and locked decisions, green PR/main CI evidence, known debt, and the exact future implementation action without prior conversation context.
+- Requirements completed versus remaining: M0-M4 are merged. M4.5 now implements the persistent typed sparse relationship graph, evolving family bonds, culturally valid relationship-grounded child arrival, dynamic household history, bounded interpersonal events, decision consequences, inspection, factual biographies, and canonical v4 persistence/migration required by `PLAN.md`. M5-M12 remain.
+- Build/test/CI: the final monolithic `npm run ci` is green: 45 files/243 coverage tests (89.71% statements, 83.20% branches, 96.03% functions, 91.45% lines); Rust 19/19; web E2E 3/3; native SQLite/relaunch E2E 1/1; formatting, lint, type checking, web build, installer build, SBOM, and production test-hook exclusion all pass. Separate M4.5 long scenarios pass 2/2 and M4 regression scenarios pass 3/3. The branch PR and hosted CI are pending.
+- Known defects/debt: no confirmed M4.5 correctness or accessibility defect remains. Non-blocking debt is the >500 kB web chunk warning and misleading upstream WebdriverIO driver diagnostic. GitHub CLI must be reauthenticated before delivery; Windows signing credentials remain a later release gate.
+- Major failures and recovery: a persistence bootstrap replay that could overwrite a freshly imported world was root-caused and fixed with a one-time workspace bootstrap. A full-suite failure compared immutable birth-time pair evidence with the relationship's later state; the invariant now performs that live comparison only for a pending same-tick arrival while persisted worlds still require exact event-backed evidence. Native launch and NSIS download were initially sandbox-blocked; authorized local reruns passed without product changes.
+- Review/subagent findings: independent Terra/high review found no P0-P3 issues after the final invariant patch. Its follow-up inspected relationship authority, snapshot provenance, and long-world evidence; 3 files/33 tests passed in 19.11 seconds. Integration, PR, and hosted-CI ownership remains with Sol.
+- Demonstrated scale/performance: three 60-year, three-generation accelerated worlds are canonical at `e844141c`/12,990, `97d6d243`/10,356, and `f0976f34`/19,986 relationship operations. Each preserves a bond for at least 20 years, remains within 24 active/24 archived edges per detailed person and 16 household intervals, and passes partition plus mid-history v4 reload equivalence. Kernel benchmark: about 15,669 deterministic ticks/second. This is M4.5 bounded-detail evidence, not M8 release-scale proof.
+- Buildable/runnable: yes. The production web app, native executable, and unsigned Windows NSIS installer build; browser and real Tauri/WebView2 flows run and preserve relationship-rich saves through reload.
+- Fresh-root recoverability: yes after this documentation update. Repository state identifies the exact branch/base, implemented M4.5 scope, validation evidence, current GitHub-auth blocker, remaining delivery gates, and exact next action without prior chat context.
 
-## M4 delivered
+## M4.5 delivered locally
 
-- One authoritative settlement/society graph with stable IDs, strict cross-reference invariants, deterministic 100-tick settlement pulses and 1,000-tick society pulses, 100,000-tick normal years, and explicit 5,000-tick accelerated acceptance worlds.
-- Conserved communal/household resources, role-gated production, inventories, credits, offers, prices, exchange, carried transport, inequality, scarcity, and stability.
-- Named founders and descendants with parent links, traits/skills, households, births, aging, inheritance/knowledge continuity, deaths, explicit off-map migration, and synchronized settlement/society life state.
-- Two inspectably distinct cultures plus groups, institutions, leadership/government change, cooperation, disagreement, crime/conflict, reconciliation, collapse hysteresis, and autonomous recovery.
-- Immutable typed factual events and summaries, bounded biography source IDs, session-scoped recaps, eight-row pageable full history, and 256-record recent Worker batches.
-- Canonical snapshot/Worker protocol v3, strict semantic recovery, v2 migration without retroactive events, partition/save/Worker equivalence, and non-boundary continuation recovery.
-- Read-only accessible society dashboard, person biographies, cultures, timeline paging, 200% text and reduced-motion coverage, and textual structure condition independent of color.
-
-## M4.5 contract added — not implemented
-
-- Persistent typed friendships, close friendships, rivalries/enmities, mentorships, partnerships or cultural equivalents, separation/estrangement/reconciliation/widowhood, and meaningful parent-child/sibling/extended-kin bonds must evolve from deterministic lived context over decades.
-- Dynamic household formation/split/merge/migration and relationship- or culture-grounded child arrival replace arbitrary eligible-adult pairing; recognizable lineages must survive generations.
-- Salient bonds must affect help/resources/care, family formation, migration, knowledge, politics/factions, conflict/reconciliation, crisis response, and inheritance, with controlled causal comparisons.
-- Optional person/family/relationship inspectors and factual multi-decade biographies expose current state and source-event history without cluttering focus mode.
-- Snapshot v4 migration, save/Worker/partition equivalence, graph/reference invariants, bounded sparse work/storage, and an M8 aggregation contract are release gates. None of this behavior exists yet merely because the plan names it.
+- Stable sparse elective bonds cover acquaintance, friendship/close friendship, rivalry/enmity, mentorship, partnership/long-term partnership, separation, estrangement, reconciliation, and widowhood with directional state, lifecycle ticks, bounded shared events, deterministic RNG, caps, archival, and lifetime summaries.
+- Indexed genealogy supplies evolving parent/guardian bonds plus sibling and practical extended-kin inspection without an all-population pair graph. Household membership keeps bounded factual intervals across formation, joining, splitting, merging, separation, migration, care, and child arrival.
+- `pair-bond` and `communal-guardianship` child-arrival policies require persisted household/culture/goal/resource/relationship eligibility. The immutable eligibility event and child-arrival record carry matching guardian, household, relationship, threshold, and selection evidence; arbitrary adult pairing is rejected.
+- Controlled comparisons prove relationship influence on help/resources/care/crisis preference, family formation/inheritance, migration companions, knowledge transfer, political support, and retaliation/reconciliation while retaining utility-based outcomes.
+- Worker-owned bounded projections expose optional keyboard-operable family/social navigation, relationship detail, and all retained shared events through eight-row pages. Significant interpersonal events feed both factual biographies and the world timeline.
+- Canonical snapshot v4 round-trips full authority, conservatively migrates v3 without invented social history, rejects malformed relationship/family/event evidence, and remains equivalent across tick partitions, Worker requests, save/reload, import/export, and recovery.
 
 ## Active risks and blockers
 
-- No genuine external blocker. Remaining included weekly usage is not readable through available tools.
-- GitHub private-plan branch protection returns HTTP 403; policy is enforced operationally with independent review and green aggregate `Required` CI before merge.
+- GitHub CLI authentication is currently invalid and must be repaired before push/PR/CI. Browser cookies are unrelated.
+- No read-only included-usage meter exists; do not use credits or an API key.
+- GitHub private-plan branch protection returns HTTP 403; enforce policy operationally with independent review and green aggregate `Required` CI before merge.
 - Windows signing credentials are not established; the documented private unsigned-installer fallback remains unless existing credentials become available.
-- Current M4 relationship/family behavior is deliberately insufficient for M4.5: no typed persistent relationship lifecycle, relationship-grounded births, dynamic household history, or family/social graph inspector is implemented yet.
-- M4 proves gradual normal-session feedback and long-horizon accelerated deterministic generations; it does not yet prove literal repeated-session retention. The return-over-many-hours enjoyment question remains release-blocking and must be reevaluated at later visual/content/scale milestones.
+- The enjoyment/return-over-many-hours criterion remains release-blocking and must be reevaluated with M5-M10 content, visual, and scale work.
 
 ## Root rotation state
 
-- This root owns the checkout and its task title is `INPROGRESS`; the prior root is `RETIRED`. The long-running goal controller reports paused, while the user explicitly authorized this documentation-only amendment.
-- Do not begin M4.5 implementation or M5 during this checkpoint. Any later root must reconstruct from repository/Git/GitHub/CI, recognize M4.5 as the next release-blocking milestone, state its exact next task, and accept ownership before editing.
-- At the next required rotation, transfer the unchanged original goal plus the expanded M4.5-M12 release contract, authority, billing guardrail, harness, and stop conditions. M5 cannot be selected as the next milestone until M4.5 is merged.
+- This Sol/xhigh root owns the shared checkout and the task title is `INPROGRESS`. Do not run a second root against it.
+- Rotate only after the M4.5 checkpoint is committed, pushed, independently reviewed, green in hosted CI, and merged, or after a safe externally blocked checkpoint is durable.
+- A successor must reconstruct from repository/Git/GitHub/CI, state the exact next task, and accept the unchanged full v1.0 goal before editing; the relinquishing root then becomes `RETIRED` and stops.
 
 ## Exact next action
 
-Stop after this documentation-only handoff; do not begin M4.5 or M5 under the current request. When implementation is explicitly resumed, create `feature/deep-relationships-family-life`, lock M4.5's scenario catalogue and failing observable tests from `PLAN.md`, and implement M4.5 before any M5 work.
+Commit the explicit M4.5 paths, repair GitHub CLI authentication, push `feature/deep-relationships-family-life`, open the private PR, verify hosted aggregate `Required` CI, merge after the existing independent clean review, then update durable `main` evidence and begin M5 only after the next allowance check.

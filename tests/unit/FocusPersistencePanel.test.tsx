@@ -36,7 +36,17 @@ function createSimulation(): {
       loadSnapshot,
       performOfflineCatchUp,
       requestSave: vi.fn<() => Promise<string>>().mockResolvedValue(snapshot),
+      requestRelationshipEventPage: vi.fn(),
+      requestRelationshipPage: vi.fn(),
       requestTimelinePage: vi.fn(),
+      relationshipEventPage: {
+        personId: null,
+        relationshipId: null,
+        offset: 0,
+        total: 0,
+        events: [],
+      },
+      relationshipPage: { personId: null, offset: 0, total: 0, relationships: [] },
       status: 'ready',
       timeline: { entries: [], offset: 0, total: 0 },
     },
@@ -71,6 +81,16 @@ function createStatefulSimulation(initialWorld?: WorldState): {
         return serializeWorldSnapshot(world);
       }),
       requestTimelinePage: vi.fn(),
+      requestRelationshipEventPage: vi.fn(),
+      requestRelationshipPage: vi.fn(),
+      relationshipEventPage: {
+        personId: null,
+        relationshipId: null,
+        offset: 0,
+        total: 0,
+        events: [],
+      },
+      relationshipPage: { personId: null, offset: 0, total: 0, relationships: [] },
       status: 'ready',
       timeline: { entries: [], offset: 0, total: 0 },
     },
@@ -294,6 +314,42 @@ describe('FocusPersistencePanel offline progression', () => {
     await screen.findByRole('button', { name: 'Start focus' });
     expect(screen.getByRole('combobox', { name: 'Load local slot' })).toHaveValue('world-2');
     expect(restored.currentTick()).toBe(42);
+  });
+
+  it('does not replay stale bootstrap state when the simulation projection changes', async () => {
+    const user = userEvent.setup();
+    const gateway = createInMemoryPersistenceGateway(() => 1_000);
+    await gateway.commitSaveSlot('primary', 'Founding world', snapshot);
+    await gateway.commitSaveSlot('world-2', 'Second world', snapshot);
+    const stateful = createStatefulSimulation();
+    const alerts = { notifyCompletion: () => Promise.resolve() };
+    const clock = { now: () => 1_000 };
+    const runtime = { gateway, mode: 'browser-preview' } as const;
+    const rendered = render(
+      <FocusPersistencePanel
+        alerts={alerts}
+        clock={clock}
+        runtime={runtime}
+        simulation={stateful.simulation}
+      />,
+    );
+
+    const slots = await screen.findByRole('combobox', { name: 'Load local slot' });
+    await user.selectOptions(slots, 'world-2');
+    await screen.findByText('Loaded Second world.');
+    expect(screen.getByRole('combobox', { name: 'Load local slot' })).toHaveValue('world-2');
+
+    rendered.rerender(
+      <FocusPersistencePanel
+        alerts={alerts}
+        clock={clock}
+        runtime={runtime}
+        simulation={{ ...stateful.simulation, events: [] }}
+      />,
+    );
+    await act(async () => Promise.resolve());
+    expect(screen.getByRole('combobox', { name: 'Load local slot' })).toHaveValue('world-2');
+    expect(screen.getByText('Loaded Second world.')).toBeVisible();
   });
 
   it('scopes statistics and recaps to the active world slot', async () => {
