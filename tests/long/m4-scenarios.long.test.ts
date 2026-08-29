@@ -49,6 +49,8 @@ function createScenarioWorld(seed: readonly [number, number, number, number], ye
 }
 
 describe('locked M4 long-horizon scenarios', () => {
+  // Hosted runners can be several times slower than the locked local baseline.
+  // Correctness and scale remain enforced by hashes and operation counts.
   it('keeps all three viable worlds multi-generational, social, cultural, and hash-locked', () => {
     for (const scenario of scenariosFor('viable-generations')) {
       const world = stepWorld(
@@ -111,7 +113,7 @@ describe('locked M4 long-horizon scenarios', () => {
       ).toBe(true);
       expect(() => assertWorldInvariants(world)).not.toThrow();
     }
-  }, 240_000);
+  }, 600_000);
 
   it('compares one lean-market checkpoint and proves a recorded non-collapse shortage propagates', () => {
     const scenario = scenariosFor('scarcity-control')[0]!;
@@ -179,7 +181,7 @@ describe('locked M4 long-horizon scenarios', () => {
     expect(final.civilization.society.collapsed).toBe(false);
     expect(final.civilization.society.stability).toBeGreaterThanOrEqual(60);
     expect(() => assertWorldInvariants(final)).not.toThrow();
-  }, 60_000);
+  }, 180_000);
 
   it('records severe decline and then recovers autonomously without a reset or M5 disaster', () => {
     const scenario = scenariosFor('collapse-recovery')[0]!;
@@ -252,5 +254,5 @@ describe('locked M4 long-horizon scenarios', () => {
       ),
     ).toBe(false);
     expect(() => assertWorldInvariants(world)).not.toThrow();
-  }, 60_000);
+  }, 240_000);
 });
