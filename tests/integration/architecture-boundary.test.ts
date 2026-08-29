@@ -6,6 +6,7 @@ const forbiddenPatterns = [
   /\bDate\.now\s*\(/,
   /\bMath\.random\s*\(/,
   /\bperformance\.now\s*\(/,
+  /\.localeCompare\s*\(/,
   /from\s+['"](?:react|pixi\.js|@tauri-apps\/)/,
   /\b(?:document|window)\./,
 ] as const;

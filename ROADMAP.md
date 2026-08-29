@@ -2,7 +2,7 @@
 
 `PRODUCT_SPEC.md` is the product contract and `PLAN.md` contains the decision-complete acceptance criteria, branches, and validation for each item. Milestones run in this order:
 
-Current checkpoint: M0-M4 are merged, independently reviewed, and verified on `main` at `98f07cd`; main CI run `32694827633` is green. M4.5 deep interpersonal relationships and family life is now the next release-blocking product milestone. It must be completed before M5 begins; M4.5-M12 and release remain blocking.
+Current checkpoint: M0-M4 are merged and verified on `main` at `205031d`. M4.5 deep interpersonal relationships and family life is implemented, independently reviewed, and passing its complete local gate on `feature/deep-relationships-family-life`; its private PR, hosted CI, and merge remain before M5. M5-M12 and release remain blocking.
 
 | Order | Milestone                                                    | Outcome                                                                                       |
 | ----- | ------------------------------------------------------------ | --------------------------------------------------------------------------------------------- |

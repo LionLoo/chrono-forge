@@ -3,6 +3,8 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   WORKER_PROTOCOL_VERSION,
   type UiToWorkerMessage,
+  type SocietyRelationshipEventProjection,
+  type SocietyRelationshipProjection,
   type SocietyTimelineProjection,
   type WorkerEvent,
   type WorkerToUiMessage,
@@ -58,6 +60,25 @@ export interface WorldSimulationView {
   readonly performOfflineCatchUp: (elapsedMilliseconds: number, rate: number) => Promise<void>;
   readonly requestSave: () => Promise<string>;
   readonly requestTimelinePage: (offset: number) => void;
+  readonly requestRelationshipPage: (personId: number, offset: number) => void;
+  readonly requestRelationshipEventPage: (
+    personId: number,
+    relationshipId: string,
+    offset: number,
+  ) => void;
+  readonly relationshipPage: {
+    readonly personId: number | null;
+    readonly offset: number;
+    readonly total: number;
+    readonly relationships: readonly SocietyRelationshipProjection[];
+  };
+  readonly relationshipEventPage: {
+    readonly personId: number | null;
+    readonly relationshipId: string | null;
+    readonly offset: number;
+    readonly total: number;
+    readonly events: readonly SocietyRelationshipEventProjection[];
+  };
   readonly status: 'booting' | 'ready' | 'faulted';
   readonly timeline: {
     readonly entries: readonly SocietyTimelineProjection[];
@@ -82,6 +103,17 @@ export function useWorldSimulation(
     offset: 0,
     total: 0,
   });
+  const [relationshipPage, setRelationshipPage] = useState<WorldSimulationView['relationshipPage']>(
+    {
+      personId: null,
+      offset: 0,
+      total: 0,
+      relationships: [],
+    },
+  );
+  const [relationshipEventPage, setRelationshipEventPage] = useState<
+    WorldSimulationView['relationshipEventPage']
+  >({ personId: null, relationshipId: null, offset: 0, total: 0, events: [] });
   const [error, setError] = useState<string | null>(null);
   const workerRef = useRef<SimulationWorkerPort | null>(null);
   const requestSequenceRef = useRef(0);
@@ -138,6 +170,15 @@ export function useWorldSimulation(
     };
     const applyFrame = (nextFrame: WorldFrameProjection, replaceEvents: boolean) => {
       setFrame(nextFrame);
+      // A page belongs to an earlier authoritative state and must never be displayed as current.
+      setRelationshipPage({ personId: null, offset: 0, total: 0, relationships: [] });
+      setRelationshipEventPage({
+        personId: null,
+        relationshipId: null,
+        offset: 0,
+        total: 0,
+        events: [],
+      });
       setTimeline({
         entries: nextFrame.society.timeline,
         offset: nextFrame.society.timelineOffset,
@@ -159,6 +200,11 @@ export function useWorldSimulation(
       switch (message.type) {
         case 'ready': {
           applyFrame(message.frame, true);
+          const pendingLoad = pendingLoads.get(message.requestId);
+          if (pendingLoad !== undefined) {
+            pendingLoads.delete(message.requestId);
+            pendingLoad.resolve();
+          }
           return;
         }
         case 'frameDelta': {
@@ -179,6 +225,30 @@ export function useWorldSimulation(
             entries: message.timeline,
             offset: message.offset,
             total: message.total,
+          });
+          return;
+        case 'relationshipPage':
+          setRelationshipEventPage({
+            personId: null,
+            relationshipId: null,
+            offset: 0,
+            total: 0,
+            events: [],
+          });
+          setRelationshipPage({
+            personId: message.personId,
+            offset: message.offset,
+            total: message.total,
+            relationships: message.relationships,
+          });
+          return;
+        case 'relationshipEventPage':
+          setRelationshipEventPage({
+            personId: message.personId,
+            relationshipId: message.relationshipId,
+            offset: message.offset,
+            total: message.total,
+            events: message.events,
           });
           return;
         case 'saveSnapshot': {
@@ -284,6 +354,45 @@ export function useWorldSimulation(
     [nextRequestId],
   );
 
+  const requestRelationshipPage = useCallback(
+    (personId: number, offset: number) => {
+      if (!Number.isSafeInteger(personId) || personId <= 0)
+        throw new RangeError('Relationship person id must be a positive safe integer.');
+      assertNonNegativeSafeInteger(offset, 'Relationship offset');
+      const worker = workerRef.current;
+      if (worker === null) return;
+      worker.postMessage({
+        type: 'requestRelationshipPage',
+        protocolVersion: WORKER_PROTOCOL_VERSION,
+        requestId: nextRequestId('relationship'),
+        personId,
+        offset,
+      });
+    },
+    [nextRequestId],
+  );
+
+  const requestRelationshipEventPage = useCallback(
+    (personId: number, relationshipId: string, offset: number) => {
+      if (!Number.isSafeInteger(personId) || personId <= 0)
+        throw new RangeError('Relationship person id must be a positive safe integer.');
+      if (relationshipId.length === 0 || relationshipId.length > 128)
+        throw new RangeError('Relationship id must be between 1 and 128 characters.');
+      assertNonNegativeSafeInteger(offset, 'Relationship event offset');
+      const worker = workerRef.current;
+      if (worker === null) return;
+      worker.postMessage({
+        type: 'requestRelationshipEventPage',
+        protocolVersion: WORKER_PROTOCOL_VERSION,
+        requestId: nextRequestId('relationship-events'),
+        personId,
+        relationshipId,
+        offset,
+      });
+    },
+    [nextRequestId],
+  );
+
   const loadSnapshot = useCallback(
     (snapshot: string): Promise<void> => {
       const worker = workerRef.current;
@@ -338,6 +447,10 @@ export function useWorldSimulation(
       loadSnapshot,
       performOfflineCatchUp,
       requestSave,
+      relationshipEventPage,
+      relationshipPage,
+      requestRelationshipEventPage,
+      requestRelationshipPage,
       requestTimelinePage,
       status: error === null ? (frame === null ? 'booting' : 'ready') : 'faulted',
       timeline,
@@ -350,6 +463,10 @@ export function useWorldSimulation(
       loadSnapshot,
       performOfflineCatchUp,
       requestSave,
+      relationshipEventPage,
+      relationshipPage,
+      requestRelationshipEventPage,
+      requestRelationshipPage,
       requestTimelinePage,
       timeline,
     ],

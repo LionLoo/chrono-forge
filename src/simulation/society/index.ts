@@ -1,4 +1,33 @@
 import { deriveXoshiro128State, type Xoshiro128State, Xoshiro128StarStar } from '../random';
+import {
+  assertInterpersonalInvariants,
+  childArrivalEligibilityEvidence,
+  childArrivalEligibilityEvidenceMatchesRecord,
+  childArrivalEligibilityEventMatches,
+  compareOrdinalText,
+  createInitialInterpersonalState,
+  interpersonalDto,
+  isDirectFamily,
+  childIdsFor,
+  guardianIdsFor,
+  listRelationshipsForPerson,
+  parentIdsFor,
+  relationshipEventMatchesFamilyBond,
+  relationshipEventMatchesSocialEdge,
+  retainSharedEventReferences,
+  synchronizeInterpersonalPeople,
+  type FamilyBond,
+  type ChildArrivalEligibilityEvidence,
+  type InterpersonalPersonInput,
+  type InterpersonalState,
+} from '../relationships';
+import {
+  advanceInterpersonalLifecycle,
+  relationshipDecisionInfluence,
+  selectPreferredRelatedPerson,
+  type RelationshipLifecycleEvent,
+  type RelationshipPersonContext,
+} from '../relationships/lifecycle';
 
 export const SOCIETY_PULSE_TICKS = 1_000;
 export const NORMAL_YEAR_TICKS = 100_000;
@@ -22,8 +51,10 @@ export interface SocietyPersonObservation {
   readonly alive: boolean;
   readonly health: number;
   readonly tileIndex: number;
+  readonly traits: readonly [number, number, number, number];
   readonly skills: readonly [number, number, number, number];
   readonly occupation: string;
+  readonly recentEventIds: readonly number[];
 }
 
 export interface CommunalStockpileInput {
@@ -74,6 +105,7 @@ export interface SocietyHousehold {
   readonly credits: number;
   readonly meals: number;
   readonly tools: number;
+  readonly lastChildArrivalTick: number;
 }
 
 export interface SocietyCulture {
@@ -83,6 +115,8 @@ export interface SocietyCulture {
   readonly belief: string;
   readonly tradition: string;
   readonly architectureStyle: string;
+  readonly familyPolicy: 'pair-bond' | 'communal-guardianship';
+  readonly partnershipLimit: 1 | 2;
 }
 
 export interface SocietyGroup {
@@ -111,14 +145,6 @@ export interface SocietyOffer {
   readonly transportDemand: number;
 }
 
-export interface SocietyBond {
-  readonly firstPersonId: number;
-  readonly secondPersonId: number;
-  readonly cooperation: number;
-  readonly disagreement: number;
-  readonly conflict: number;
-}
-
 export interface BiographyFact {
   readonly personId: number;
   readonly kind: string;
@@ -140,7 +166,7 @@ export interface SocietyState {
   readonly groups: readonly SocietyGroup[];
   readonly institution: SocietyInstitution;
   readonly offers: readonly SocietyOffer[];
-  readonly bonds: readonly SocietyBond[];
+  readonly interpersonal: InterpersonalState;
   readonly scarcity: number;
   readonly inequality: number;
   readonly stability: number;
@@ -169,12 +195,19 @@ export interface SocietyNeedReliefPatch {
   readonly thirstRelief: number;
 }
 
+export interface SocietySkillPatch {
+  readonly personId: number;
+  readonly skillIndex: 0 | 1 | 2 | 3;
+  readonly amount: number;
+}
+
 export interface SocietyEventDraft {
   readonly kind: string;
   readonly subject: SocietyEntityRef;
   readonly target: SocietyEntityRef;
   readonly amount: number;
   readonly summary: string;
+  readonly childArrivalEligibility?: ChildArrivalEligibilityEvidence;
 }
 
 export interface SocietyPulseResult {
@@ -184,15 +217,18 @@ export interface SocietyPulseResult {
   readonly personMigrationDrafts: readonly SocietyPersonDraft[];
   readonly deathPersonIds: readonly number[];
   readonly roleOrNeedReliefPatches: readonly SocietyNeedReliefPatch[];
+  readonly skillPatches: readonly SocietySkillPatch[];
   readonly events: readonly SocietyEventDraft[];
 }
 
 export interface SocietyAuthoritativeEvent {
   readonly id: number;
+  readonly tick: number;
   readonly kind: string;
   readonly subject: SocietyEntityRef;
   readonly target: SocietyEntityRef;
   readonly summary: string;
+  readonly childArrivalEligibility?: ChildArrivalEligibilityEvidence;
 }
 
 export interface SocietySummary {
@@ -300,7 +336,13 @@ function assertObservation(observation: SocietyPersonObservation): void {
   if (observation.alive !== observation.health > 0) {
     throw new Error('Person observation life and health are inconsistent.');
   }
+  for (const trait of observation.traits) assertInteger(trait, 'Person observation trait', 0, 100);
   for (const skill of observation.skills) assertInteger(skill, 'Person observation skill', 0, 100);
+  if (observation.recentEventIds.length > 16)
+    throw new Error('Person observation event history is too long.');
+  for (const eventId of observation.recentEventIds)
+    assertInteger(eventId, 'Person observation event id', 1);
+  assertSortedUnique(observation.recentEventIds, 'Person observation event ids');
 }
 
 function assertStockpile(stockpile: CommunalStockpileInput): void {
@@ -347,9 +389,17 @@ function event(
   target: SocietyEntityRef,
   amount: number,
   text: string,
+  eligibilityEvidence?: ChildArrivalEligibilityEvidence,
 ): SocietyEventDraft {
   assertInteger(amount, 'Society event amount');
-  return Object.freeze({ kind, subject, target, amount, summary: summary(text) });
+  return Object.freeze({
+    kind,
+    subject,
+    target,
+    amount,
+    summary: summary(text),
+    ...(eligibilityEvidence === undefined ? {} : { childArrivalEligibility: eligibilityEvidence }),
+  });
 }
 
 function adultIdsFor(
@@ -371,19 +421,6 @@ function adultIdsFor(
   );
 }
 
-function pairKey(firstPersonId: number, secondPersonId: number): string {
-  return `${firstPersonId}:${secondPersonId}`;
-}
-
-function sortedBonds(bonds: readonly SocietyBond[]): readonly SocietyBond[] {
-  return Object.freeze(
-    [...bonds].sort(
-      (left, right) =>
-        left.firstPersonId - right.firstPersonId || left.secondPersonId - right.secondPersonId,
-    ),
-  );
-}
-
 function inequalityFor(households: readonly SocietyHousehold[]): number {
   if (households.length === 0) return 0;
   const wealth = households.map(
@@ -395,17 +432,44 @@ function inequalityFor(households: readonly SocietyHousehold[]): number {
 function chooseLeader(
   people: readonly SocietyPerson[],
   households: readonly SocietyHousehold[],
+  interpersonal?: InterpersonalState,
 ): number {
   const wealthByHousehold = new Map(
     households.map((household) => [household.id, household.credits]),
   );
-  const leader = people
+  const candidates = people
     .filter((person) => person.alive)
     .sort(
       (left, right) =>
         (wealthByHousehold.get(right.householdId) ?? 0) -
           (wealthByHousehold.get(left.householdId) ?? 0) || left.id - right.id,
-    )[0];
+    )
+    .slice(0, 4);
+  if (interpersonal === undefined || candidates.length < 2) return candidates[0]?.id ?? 0;
+  const baseUtility = new Map(
+    candidates.map((candidate) => [
+      candidate.id,
+      (wealthByHousehold.get(candidate.householdId) ?? 0) * 4 +
+        (candidate.role === 'caretaker' ? 8 : candidate.role === 'trader' ? 4 : 0),
+    ]),
+  );
+  const support = new Map(candidates.map((candidate) => [candidate.id, 0]));
+  for (const voter of people.filter((person) => person.alive).sort(compareId)) {
+    const selected = selectPreferredRelatedPerson(
+      interpersonal,
+      voter.id,
+      candidates.map((candidate) => candidate.id),
+      'politics',
+      baseUtility,
+    );
+    if (selected !== null) support.set(selected, (support.get(selected) ?? 0) + 1);
+  }
+  const leader = candidates.sort(
+    (left, right) =>
+      (baseUtility.get(right.id) ?? 0) +
+        (support.get(right.id) ?? 0) * 12 -
+        ((baseUtility.get(left.id) ?? 0) + (support.get(left.id) ?? 0) * 12) || left.id - right.id,
+  )[0];
   return leader?.id ?? 0;
 }
 
@@ -418,6 +482,235 @@ function matchingFact(fact: BiographyFact, source: SocietyAuthoritativeEvent): b
     source.target.kind === fact.target.kind &&
     source.target.id === fact.target.id
   );
+}
+
+function relationshipEventImportance(kind: string): number {
+  if (
+    [
+      'person-born',
+      'person-died',
+      'long-term-partnership-formed',
+      'partnership-separated',
+      'partner-widowed',
+      'relationship-reconciled',
+      'family-estranged',
+      'guardianship-formed',
+      'family-inheritance',
+      'household-migrated',
+      'pair-bond-child-arrival',
+      'communal-child-arrival',
+    ].includes(kind)
+  )
+    return 3;
+  if (
+    [
+      'friendship-formed',
+      'close-friendship-formed',
+      'friendship-ended',
+      'rivalry-formed',
+      'enmity-formed',
+      'mentorship-formed',
+      'partnership-formed',
+      'sibling-bond-formed',
+      'parent-child-bond-changed',
+      'resource-shared',
+      'crisis-assisted',
+      'knowledge-shared',
+      'conflict',
+      'household-formed',
+      'household-split',
+      'household-merged',
+    ].includes(kind)
+  )
+    return 2;
+  return 1;
+}
+
+function biographyMilestoneGroup(kind: string): string | null {
+  if (
+    [
+      'person-born',
+      'sibling-bond-formed',
+      'parent-child-bond-changed',
+      'guardianship-formed',
+      'pair-bond-child-arrival',
+      'communal-child-arrival',
+    ].includes(kind)
+  )
+    return 'childhood-family';
+  if (
+    [
+      'relationship-formed',
+      'friendship-formed',
+      'close-friendship-formed',
+      'mentorship-formed',
+    ].includes(kind)
+  )
+    return 'friendship';
+  if (
+    [
+      'partnership-formed',
+      'long-term-partnership-formed',
+      'household-formed',
+      'household-merged',
+      'household-migrated',
+    ].includes(kind)
+  )
+    return 'partnership-household';
+  if (
+    [
+      'friendship-ended',
+      'rivalry-formed',
+      'enmity-formed',
+      'family-estranged',
+      'partnership-separated',
+      'household-split',
+      'conflict',
+    ].includes(kind)
+  )
+    return 'conflict-loss';
+  if (['relationship-reconciled', 'partner-widowed', 'person-died'].includes(kind))
+    return 'resolution-bereavement';
+  return null;
+}
+
+function retainBiographyEventIds(
+  existingIds: readonly number[],
+  addedIds: readonly number[],
+  historicalSources: readonly SocietyAuthoritativeEvent[],
+): readonly number[] {
+  const candidates = [...new Set([...existingIds, ...addedIds])];
+  if (candidates.length <= MAX_BIOGRAPHY_EVENT_IDS)
+    return Object.freeze(candidates.sort((left, right) => left - right));
+
+  const sourceById = new Map(historicalSources.map((source) => [source.id, source]));
+  const selected = new Set<number>();
+  const milestoneGroups = new Map<string, SocietyAuthoritativeEvent[]>();
+  for (const id of candidates) {
+    const source = sourceById.get(id);
+    if (source === undefined) continue;
+    const group = biographyMilestoneGroup(source.kind);
+    if (group === null) continue;
+    const grouped = milestoneGroups.get(group);
+    if (grouped === undefined) milestoneGroups.set(group, [source]);
+    else grouped.push(source);
+  }
+  for (const grouped of milestoneGroups.values()) {
+    grouped.sort((left, right) => left.tick - right.tick || left.id - right.id);
+    selected.add(grouped[0]!.id);
+  }
+  const ranked = candidates
+    .filter((id) => !selected.has(id))
+    .sort((leftId, rightId) => {
+      const left = sourceById.get(leftId);
+      const right = sourceById.get(rightId);
+      return (
+        relationshipEventImportance(right?.kind ?? '') -
+          relationshipEventImportance(left?.kind ?? '') ||
+        (right?.tick ?? 0) - (left?.tick ?? 0) ||
+        rightId - leftId
+      );
+    });
+  for (const id of ranked) {
+    if (selected.size >= MAX_BIOGRAPHY_EVENT_IDS) break;
+    selected.add(id);
+  }
+  return Object.freeze([...selected].sort((left, right) => left - right));
+}
+
+function attachInterpersonalEventIds(
+  state: InterpersonalState,
+  sourceEvents: readonly SocietyAuthoritativeEvent[],
+): InterpersonalState {
+  const referenceFor = (source: SocietyAuthoritativeEvent) =>
+    Object.freeze({
+      eventId: source.id,
+      importance: relationshipEventImportance(source.kind),
+      tick: source.tick,
+    });
+  const identityFor = (source: SocietyAuthoritativeEvent) => ({
+    kind: source.kind,
+    subjectKind: source.subject.kind,
+    subjectId: source.subject.id,
+    targetKind: source.target.kind,
+    targetId: source.target.id,
+  });
+  const active = state.active.map((edge) => {
+    const matching = sourceEvents.filter((source) =>
+      relationshipEventMatchesSocialEdge(edge, identityFor(source)),
+    );
+    return matching.length === 0
+      ? edge
+      : Object.freeze({
+          ...edge,
+          sharedEvents: retainSharedEventReferences([
+            ...edge.sharedEvents,
+            ...matching.map(referenceFor),
+          ]),
+        });
+  });
+  const archived = state.archived.map((edge) => {
+    const matching = sourceEvents.filter((source) =>
+      relationshipEventMatchesSocialEdge(edge, identityFor(source)),
+    );
+    return matching.length === 0
+      ? edge
+      : Object.freeze({
+          ...edge,
+          sharedEvents: retainSharedEventReferences([
+            ...edge.sharedEvents,
+            ...matching.map(referenceFor),
+          ]),
+        });
+  });
+  const familyBonds = state.familyBonds.map((bond) => {
+    const matching = sourceEvents.filter((source) =>
+      relationshipEventMatchesFamilyBond(bond, identityFor(source)),
+    );
+    if (matching.length === 0) return bond;
+    const formation = matching.find(
+      (source) => source.kind === 'person-born' || source.kind === 'guardianship-formed',
+    );
+    return Object.freeze({
+      ...bond,
+      formedEventId: bond.formedEventId !== 0 ? bond.formedEventId : (formation?.id ?? 0),
+      sharedEvents: retainSharedEventReferences([
+        ...bond.sharedEvents,
+        ...matching.map(referenceFor),
+      ]),
+    });
+  });
+  const childArrivals = state.childArrivals.map((arrival) => {
+    if (arrival.eventId !== 0 && arrival.eligibilityEventId !== 0) return arrival;
+    const formation = sourceEvents.find(
+      (source) =>
+        source.kind === 'person-born' &&
+        source.subject.kind === 'person' &&
+        source.subject.id === arrival.childId &&
+        source.target.kind === 'household' &&
+        source.target.id === arrival.householdId,
+    );
+    const eligibility = sourceEvents.find(
+      (source) =>
+        source.tick === arrival.tick &&
+        childArrivalEligibilityEventMatches(arrival, identityFor(source)) &&
+        source.childArrivalEligibility !== undefined &&
+        childArrivalEligibilityEvidenceMatchesRecord(arrival, source.childArrivalEligibility),
+    );
+    return Object.freeze({
+      ...arrival,
+      eventId: arrival.eventId !== 0 ? arrival.eventId : (formation?.id ?? 0),
+      eligibilityEventId:
+        arrival.eligibilityEventId !== 0 ? arrival.eligibilityEventId : (eligibility?.id ?? 0),
+    });
+  });
+  return Object.freeze({
+    ...state,
+    active: Object.freeze(active),
+    archived: Object.freeze(archived),
+    familyBonds: Object.freeze(familyBonds),
+    childArrivals: Object.freeze(childArrivals),
+  });
 }
 
 function civilPeriodTicks(yearTicks: number): number {
@@ -454,6 +747,53 @@ function cultureIdentity(culture: SocietyCulture): string {
   );
 }
 
+function interpersonalPeople(
+  people: readonly SocietyPerson[],
+): readonly InterpersonalPersonInput[] {
+  return Object.freeze(
+    people.map((person) =>
+      Object.freeze({
+        id: person.id,
+        alive: person.alive,
+        birthTick: person.birthTick,
+        parentIds: person.parentIds,
+        householdId: person.householdId,
+      }),
+    ),
+  );
+}
+
+function relationshipPeople(
+  people: readonly SocietyPerson[],
+  observations: ReadonlyMap<number, SocietyPersonObservation>,
+): readonly RelationshipPersonContext[] {
+  return Object.freeze(
+    people.map((person) => {
+      const observation = observations.get(person.id);
+      return Object.freeze({
+        ...interpersonalPeople([person])[0]!,
+        name: person.name,
+        cultureId: person.cultureId,
+        tileIndex: person.tileIndex,
+        traits: observation?.traits ?? ([50, 50, 50, 50] as const),
+        skills: observation?.skills ?? ([25, 25, 25, 25] as const),
+        occupation: observation?.occupation ?? person.role,
+        recentEventIds: observation?.recentEventIds ?? Object.freeze([]),
+      });
+    }),
+  );
+}
+
+function relationshipEventDraft(draft: RelationshipLifecycleEvent): SocietyEventDraft {
+  return event(
+    draft.kind,
+    ref('person', draft.firstPersonId),
+    ref('person', draft.secondPersonId),
+    draft.amount,
+    draft.summary,
+  );
+}
+
 /** Creates a deterministic, self-contained M4 social graph from current authoritative people. */
 export function createInitialSociety(input: SocietyInitializationInput): SocietyState {
   assertInteger(input.tick, 'Society initial tick');
@@ -478,6 +818,8 @@ export function createInitialSociety(input: SocietyInitializationInput): Society
       belief: BELIEFS[rng.nextInt(BELIEFS.length)]!,
       tradition: TRADITIONS[rng.nextInt(TRADITIONS.length)]!,
       architectureStyle: STYLES[rng.nextInt(STYLES.length)]!,
+      familyPolicy: id === 1 ? ('pair-bond' as const) : ('communal-guardianship' as const),
+      partnershipLimit: id === 1 ? (1 as const) : (2 as const),
     }),
   );
   if (cultureIdentity(cultures[0]!) === cultureIdentity(cultures[1]!)) {
@@ -527,6 +869,7 @@ export function createInitialSociety(input: SocietyInitializationInput): Society
       credits: 12 + id * 3,
       meals: 4,
       tools: 1,
+      lastChildArrivalTick: input.tick,
     });
   });
   const groups: SocietyGroup[] = cultures.map((culture) =>
@@ -559,7 +902,11 @@ export function createInitialSociety(input: SocietyInitializationInput): Society
     groups: Object.freeze(groups),
     institution,
     offers: Object.freeze([]),
-    bonds: Object.freeze([]),
+    interpersonal: createInitialInterpersonalState(
+      input.seed,
+      input.tick,
+      interpersonalPeople(people),
+    ),
     scarcity: 0,
     inequality: inequalityFor(households),
     stability: 80,
@@ -664,7 +1011,7 @@ export function advanceSociety(state: SocietyState, input: SocietyPulseInput): S
       institution.leaderId !== 0 &&
       !people.some((person) => person.id === institution.leaderId && person.alive)
     ) {
-      const leaderId = chooseLeader(people, households);
+      const leaderId = chooseLeader(people, households, state.interpersonal);
       institution = Object.freeze({ ...institution, leaderId, changedTick: input.tick });
       const governmentDraft = event(
         'government-changed',
@@ -681,6 +1028,11 @@ export function advanceSociety(state: SocietyState, input: SocietyPulseInput): S
       lastTick: input.tick,
       centerTileIndex: input.centerTileIndex,
       people: Object.freeze(people),
+      interpersonal: synchronizeInterpersonalPeople(
+        state.interpersonal,
+        input.tick,
+        interpersonalPeople(people),
+      ),
       households: Object.freeze(households),
       groups: Object.freeze(groups),
       institution,
@@ -695,6 +1047,7 @@ export function advanceSociety(state: SocietyState, input: SocietyPulseInput): S
       personMigrationDrafts: Object.freeze([]),
       deathPersonIds: Object.freeze(deathIds.sort((left, right) => left - right)),
       roleOrNeedReliefPatches: Object.freeze([]),
+      skillPatches: Object.freeze([]),
       events: Object.freeze(events),
     });
   }
@@ -739,6 +1092,7 @@ export function advanceSociety(state: SocietyState, input: SocietyPulseInput): S
         credits: 10,
         meals: 2,
         tools: 0,
+        lastChildArrivalTick: input.tick,
       });
     }
   }
@@ -908,6 +1262,7 @@ export function advanceSociety(state: SocietyState, input: SocietyPulseInput): S
 
   const years =
     Math.floor(input.tick / state.yearTicks) - Math.floor(state.lastTick / state.yearTicks);
+  const skillPatches: SocietySkillPatch[] = [];
   const living = () => people.filter((person) => person.alive);
   if (years > 0) {
     people = people.map((person) => {
@@ -935,35 +1290,388 @@ export function advanceSociety(state: SocietyState, input: SocietyPulseInput): S
       return person;
     });
   }
+  let interpersonal = synchronizeInterpersonalPeople(
+    state.interpersonal,
+    input.tick,
+    interpersonalPeople(people),
+  );
+  let lifecycleEvents: readonly RelationshipLifecycleEvent[] = Object.freeze([]);
+  if (years > 0) {
+    const lifecycle = advanceInterpersonalLifecycle(interpersonal, {
+      tick: input.tick,
+      yearTicks: state.yearTicks,
+      worldWidth: input.worldWidth,
+      people: relationshipPeople(people, observationById),
+      cultures: state.cultures.map((culture) => ({
+        id: culture.id,
+        familyPolicy: culture.familyPolicy,
+        partnershipLimit: culture.partnershipLimit,
+      })),
+      scarcity,
+      stability: state.stability,
+    });
+    interpersonal = lifecycle.state;
+    lifecycleEvents = lifecycle.events;
+    for (const relationshipEvent of lifecycle.events) {
+      const draft = relationshipEventDraft(relationshipEvent);
+      events.push(draft);
+      addBiographyFact(facts, relationshipEvent.firstPersonId, draft);
+      addBiographyFact(facts, relationshipEvent.secondPersonId, draft);
+    }
+  }
+  if (years > 0 && interpersonal.familyBonds.length > 0) {
+    const changedFamilyBonds = interpersonal.familyBonds.map((bond) => {
+      const parent = people.find((person) => person.id === bond.parentId);
+      const child = people.find((person) => person.id === bond.childId);
+      if (parent === undefined || child === undefined || !parent.alive || !child.alive) return bond;
+      const sharedHousehold = parent.householdId === child.householdId;
+      const positive = sharedHousehold ? 3 : 1;
+      const grievance = Math.max(0, Math.trunc((scarcity - state.stability) / 20));
+      const parentToChild = Object.freeze({
+        affinity: clamp(bond.parentToChild.affinity + positive - grievance, 0, 100),
+        trust: clamp(bond.parentToChild.trust + positive, 0, 100),
+        closeness: clamp(bond.parentToChild.closeness + positive, 0, 100),
+        commitment: clamp(bond.parentToChild.commitment + 2, 0, 100),
+        grievance: clamp(bond.parentToChild.grievance + grievance - positive, 0, 100),
+      });
+      const childToParent = Object.freeze({
+        affinity: clamp(bond.childToParent.affinity + positive - grievance, 0, 100),
+        trust: clamp(bond.childToParent.trust + positive, 0, 100),
+        closeness: clamp(bond.childToParent.closeness + positive, 0, 100),
+        commitment: clamp(bond.childToParent.commitment + 1, 0, 100),
+        grievance: clamp(bond.childToParent.grievance + grievance - positive, 0, 100),
+      });
+      const trend = positive >= grievance ? ('improving' as const) : ('deteriorating' as const);
+      if (input.tick % (state.yearTicks * 5) === 0) {
+        const draft = event(
+          'parent-child-bond-changed',
+          ref('person', parent.id),
+          ref('person', child.id),
+          Math.max(parentToChild.closeness, childToParent.closeness),
+          `${parent.name} and ${child.name}'s family bond ${trend === 'improving' ? 'strengthened' : 'came under strain'}.`,
+        );
+        events.push(draft);
+        addBiographyFact(facts, parent.id, draft);
+        addBiographyFact(facts, child.id, draft);
+      }
+      return Object.freeze({
+        ...bond,
+        stateProvenance: 'recorded' as const,
+        changedTick: input.tick,
+        lastInteractionTick: sharedHousehold ? input.tick : bond.lastInteractionTick,
+        trend,
+        parentToChild,
+        childToParent,
+      });
+    });
+    interpersonal = Object.freeze({
+      ...interpersonal,
+      familyBonds: Object.freeze(changedFamilyBonds),
+      operationCount: interpersonal.operationCount + changedFamilyBonds.length,
+    });
+  }
+  const householdChangedPersonIds = new Set<number>();
+  for (const relationshipEvent of lifecycleEvents) {
+    const first = people.find(
+      (person) => person.id === relationshipEvent.firstPersonId && person.alive,
+    );
+    const second = people.find(
+      (person) => person.id === relationshipEvent.secondPersonId && person.alive,
+    );
+    if (first === undefined || second === undefined) continue;
+    if (
+      relationshipEvent.kind === 'long-term-partnership-formed' &&
+      first.householdId !== second.householdId &&
+      !householdChangedPersonIds.has(first.id) &&
+      !householdChangedPersonIds.has(second.id)
+    ) {
+      const firstPrior = households.find((household) => household.id === first.householdId)!;
+      const secondPrior = households.find((household) => household.id === second.householdId)!;
+      const householdId = nextHouseholdId++;
+      const credits = Math.min(2, firstPrior.credits) + Math.min(2, secondPrior.credits);
+      const meals = Math.min(1, firstPrior.meals) + Math.min(1, secondPrior.meals);
+      const tools = Math.min(1, firstPrior.tools) + Math.min(1, secondPrior.tools);
+      firstPrior.credits -= Math.min(2, firstPrior.credits);
+      secondPrior.credits -= Math.min(2, secondPrior.credits);
+      firstPrior.meals -= Math.min(1, firstPrior.meals);
+      secondPrior.meals -= Math.min(1, secondPrior.meals);
+      firstPrior.tools -= Math.min(1, firstPrior.tools);
+      secondPrior.tools -= Math.min(1, secondPrior.tools);
+      people = people.map((person) =>
+        person.id === first.id || person.id === second.id
+          ? Object.freeze({ ...person, householdId })
+          : person,
+      );
+      interpersonal = synchronizeInterpersonalPeople(
+        interpersonal,
+        input.tick,
+        interpersonalPeople(people),
+        'formation',
+      );
+      householdChangedPersonIds.add(first.id);
+      householdChangedPersonIds.add(second.id);
+      households.push({
+        id: householdId,
+        cultureId: first.cultureId,
+        adultIds: Object.freeze([first.id, second.id].sort((left, right) => left - right)),
+        credits,
+        meals,
+        tools,
+        lastChildArrivalTick: input.tick - state.yearTicks * 2,
+      });
+      const formed = event(
+        'household-formed',
+        ref('person', first.id),
+        ref('person', second.id),
+        householdId,
+        `${first.name} and ${second.name} formed household ${householdId}.`,
+      );
+      const split = event(
+        'household-split',
+        ref('person', second.id),
+        ref('person', first.id),
+        householdId,
+        `${second.name} left household ${second.householdId} to form household ${householdId}.`,
+      );
+      events.push(formed, split);
+      addBiographyFact(facts, first.id, formed);
+      addBiographyFact(facts, second.id, formed);
+      addBiographyFact(facts, first.id, split);
+      addBiographyFact(facts, second.id, split);
+      const firstRemaining = people.some(
+        (person) => person.alive && person.householdId === firstPrior.id,
+      );
+      const secondRemaining = people.some(
+        (person) => person.alive && person.householdId === secondPrior.id,
+      );
+      if (!firstRemaining || !secondRemaining) {
+        const merged = event(
+          'household-merged',
+          ref('person', first.id),
+          ref('person', second.id),
+          householdId,
+          `Household ${!firstRemaining ? firstPrior.id : secondPrior.id} merged into household ${householdId}.`,
+        );
+        events.push(merged);
+        addBiographyFact(facts, first.id, merged);
+        addBiographyFact(facts, second.id, merged);
+      }
+    }
+    if (
+      relationshipEvent.kind === 'partnership-separated' &&
+      first.householdId === second.householdId &&
+      !householdChangedPersonIds.has(first.id) &&
+      !householdChangedPersonIds.has(second.id)
+    ) {
+      const prior = households.find((household) => household.id === second.householdId)!;
+      const householdId = nextHouseholdId++;
+      const credits = Math.min(2, prior.credits);
+      const meals = Math.min(1, prior.meals);
+      const tools = Math.min(1, prior.tools);
+      prior.credits -= credits;
+      prior.meals -= meals;
+      prior.tools -= tools;
+      people = people.map((person) =>
+        person.id === second.id ? Object.freeze({ ...person, householdId }) : person,
+      );
+      interpersonal = synchronizeInterpersonalPeople(
+        interpersonal,
+        input.tick,
+        interpersonalPeople(people),
+        'split',
+      );
+      householdChangedPersonIds.add(first.id);
+      householdChangedPersonIds.add(second.id);
+      households.push({
+        id: householdId,
+        cultureId: second.cultureId,
+        adultIds: Object.freeze([second.id]),
+        credits,
+        meals,
+        tools,
+        lastChildArrivalTick: input.tick,
+      });
+      const split = event(
+        'household-split',
+        ref('person', second.id),
+        ref('person', first.id),
+        householdId,
+        `${second.name} separated from household ${prior.id} into household ${householdId}.`,
+      );
+      events.push(split);
+      addBiographyFact(facts, first.id, split);
+      addBiographyFact(facts, second.id, split);
+    }
+  }
   const birthDrafts: SocietyPersonDraft[] = [];
   const migrationDrafts: SocietyPersonDraft[] = [];
+  const childArrivals = [...interpersonal.childArrivals];
   if (years > 0 && living().length < MAX_SOCIETY_RESIDENTS) {
     const adults = living()
       .filter((person) => input.tick - person.birthTick >= 18 * state.yearTicks)
-      .sort((left, right) => right.generation - left.generation || left.id - right.id);
-    let parents: readonly [number, number] | undefined;
-    for (const first of adults) {
-      const firstParents = new Set(first.parentIds.filter((id) => id !== 0));
-      const second = adults.find(
-        (candidate) =>
-          candidate.id !== first.id &&
-          candidate.householdId !== first.householdId &&
-          candidate.parentIds.every((parentId) => parentId === 0 || !firstParents.has(parentId)),
-      );
-      if (second !== undefined) {
-        parents = [first.id, second.id];
-        break;
-      }
-    }
-    const eligibleHousehold =
-      parents === undefined || scarcity >= 65 || living().length > input.shelterCapacity
-        ? undefined
-        : households.find(
-            (household) =>
-              household.id === people.find((person) => person.id === parents[0])?.householdId &&
-              household.meals >= 2,
+      .sort((left, right) => left.id - right.id);
+    let eligibility:
+      | Readonly<{
+          householdId: number;
+          parents: readonly [number, number];
+          guardianIds: readonly number[];
+          policy: 'pair-bond' | 'communal-guardianship';
+          cultureId: number;
+          guardianBirthTicks: readonly number[];
+          guardianHouseholdIdsAtArrival: readonly number[];
+          guardianHouseholdMembershipStartTicksAtArrival: readonly (number | null)[];
+          partnerRelationshipId: number | null;
+          partnerKindAtArrival: 'partner' | 'long-term-partner' | null;
+          minimumPartnerTrustAtArrival: number | null;
+          minimumPartnerCommitmentAtArrival: number | null;
+          selectionScoreAtArrival: number;
+        }>
+      | undefined;
+    for (const household of households.slice().sort(compareId)) {
+      const culture = state.cultures.find((candidate) => candidate.id === household.cultureId)!;
+      const residentAdults = adults.filter((person) => person.householdId === household.id);
+      const dependentCount = living().filter(
+        (person) =>
+          person.householdId === household.id &&
+          input.tick - person.birthTick < 18 * state.yearTicks,
+      ).length;
+      if (
+        residentAdults.length < (culture.familyPolicy === 'pair-bond' ? 2 : 1) ||
+        dependentCount >= 2 ||
+        household.meals + stockpile.food < 2 ||
+        input.tick - household.lastChildArrivalTick < state.yearTicks * 2 ||
+        scarcity >= 85 ||
+        input.shelterCapacity <= 0 ||
+        living().length >= Math.max(input.shelterCapacity, households.length * 4)
+      )
+        continue;
+      const candidates = interpersonal.active
+        .filter(
+          (edge) =>
+            residentAdults.some((person) => person.id === edge.firstPersonId) &&
+            residentAdults.some((person) => person.id === edge.secondPersonId),
+        )
+        .sort(
+          (left, right) =>
+            Math.min(
+              right.firstToSecond.commitment,
+              right.secondToFirst.commitment,
+              right.firstToSecond.trust,
+              right.secondToFirst.trust,
+            ) -
+              Math.min(
+                left.firstToSecond.commitment,
+                left.secondToFirst.commitment,
+                left.firstToSecond.trust,
+                left.secondToFirst.trust,
+              ) ||
+            left.firstPersonId - right.firstPersonId ||
+            left.secondPersonId - right.secondPersonId,
+        );
+      const selected = candidates.find((edge) => {
+        if (culture.familyPolicy === 'pair-bond')
+          return (
+            (edge.kind === 'partner' || edge.kind === 'long-term-partner') &&
+            edge.firstToSecond.trust >= 50 &&
+            edge.secondToFirst.trust >= 50 &&
+            edge.firstToSecond.commitment >= 60 &&
+            edge.secondToFirst.commitment >= 60
           );
-    if (eligibleHousehold !== undefined && parents !== undefined) {
+        return (
+          edge.kind === 'partner' ||
+          edge.kind === 'long-term-partner' ||
+          edge.kind === 'close-friend' ||
+          isDirectFamily(interpersonal, edge.firstPersonId, edge.secondPersonId)
+        );
+      });
+      if (selected === undefined && culture.familyPolicy === 'pair-bond') continue;
+      const guardianIds =
+        selected === undefined
+          ? Object.freeze([
+              residentAdults
+                .slice()
+                .sort(
+                  (left, right) =>
+                    Number(right.role === 'caretaker') - Number(left.role === 'caretaker') ||
+                    right.health - left.health ||
+                    left.id - right.id,
+                )[0]!.id,
+            ])
+          : Object.freeze([selected.firstPersonId, selected.secondPersonId]);
+      if (
+        guardianIds.some(
+          (personId) =>
+            interpersonal.familyBonds.filter(
+              (bond) => bond.kind === 'parent' && bond.parentId === personId,
+            ).length >= 4,
+        )
+      )
+        continue;
+      const familyUtility =
+        selected === undefined
+          ? state.stability -
+            scarcity +
+            120 +
+            (residentAdults.find((person) => person.id === guardianIds[0])?.role === 'caretaker'
+              ? 20
+              : 0)
+          : state.stability -
+            scarcity +
+            Math.min(selected.firstToSecond.trust, selected.secondToFirst.trust) +
+            Math.min(selected.firstToSecond.commitment, selected.secondToFirst.commitment);
+      if (familyUtility < 100) continue;
+      eligibility = Object.freeze({
+        householdId: household.id,
+        parents: Object.freeze([guardianIds[0]!, guardianIds[1] ?? 0] as const),
+        guardianIds,
+        policy: culture.familyPolicy,
+        cultureId: culture.id,
+        guardianBirthTicks: Object.freeze(
+          guardianIds.map((personId) => people.find((person) => person.id === personId)!.birthTick),
+        ),
+        guardianHouseholdIdsAtArrival: Object.freeze(guardianIds.map(() => household.id)),
+        guardianHouseholdMembershipStartTicksAtArrival: Object.freeze(
+          guardianIds.map((personId) => {
+            const interval = interpersonal.householdHistories.get(personId)?.intervals?.at(-1);
+            if (interval?.householdId !== household.id || interval.endTick !== null)
+              throw new Error('Selected guardian lacks current household membership evidence.');
+            return interval.startTick;
+          }),
+        ),
+        partnerRelationshipId: culture.familyPolicy === 'pair-bond' ? selected!.id : null,
+        partnerKindAtArrival:
+          culture.familyPolicy === 'pair-bond'
+            ? (selected!.kind as 'partner' | 'long-term-partner')
+            : null,
+        minimumPartnerTrustAtArrival:
+          culture.familyPolicy === 'pair-bond'
+            ? Math.min(selected!.firstToSecond.trust, selected!.secondToFirst.trust)
+            : null,
+        minimumPartnerCommitmentAtArrival:
+          culture.familyPolicy === 'pair-bond'
+            ? Math.min(selected!.firstToSecond.commitment, selected!.secondToFirst.commitment)
+            : null,
+        selectionScoreAtArrival: familyUtility,
+      });
+      break;
+    }
+    if (eligibility !== undefined) {
+      const {
+        householdId,
+        parents,
+        guardianIds,
+        policy,
+        cultureId,
+        guardianBirthTicks,
+        guardianHouseholdIdsAtArrival,
+        guardianHouseholdMembershipStartTicksAtArrival,
+        partnerRelationshipId,
+        partnerKindAtArrival,
+        minimumPartnerTrustAtArrival,
+        minimumPartnerCommitmentAtArrival,
+        selectionScoreAtArrival,
+      } = eligibility;
+      const eligibleHousehold = households.find((household) => household.id === householdId)!;
       const id = Math.max(state.nextPersonId, ...people.map((person) => person.id + 1));
       const culture = state.cultures.find(
         (candidate) => candidate.id === eligibleHousehold.cultureId,
@@ -996,16 +1704,53 @@ export function advanceSociety(state: SocietyState, input: SocietyPulseInput): S
           biographyEventIds: Object.freeze([]),
         }),
       ].sort(compareId);
-      eligibleHousehold.meals -= 2;
-      events.push(
-        event(
-          'person-born',
-          ref('person', id),
-          ref('household', eligibleHousehold.id),
-          draft.generation,
-          `${draft.name} was born into household ${eligibleHousehold.id}.`,
-        ),
+      const householdMeals = Math.min(2, eligibleHousehold.meals);
+      eligibleHousehold.meals -= householdMeals;
+      stockpile = Object.freeze({
+        ...stockpile,
+        food: stockpile.food - (2 - householdMeals),
+      });
+      eligibleHousehold.lastChildArrivalTick = input.tick;
+      const arrivalRecord = Object.freeze({
+        childId: id,
+        tick: input.tick,
+        eventId: 0,
+        eligibilityEventId: 0,
+        policy,
+        cultureId,
+        householdId: eligibleHousehold.id,
+        guardianIds: Object.freeze([...guardianIds].sort((left, right) => left - right)),
+        guardianBirthTicks,
+        guardianHouseholdIdsAtArrival,
+        guardianHouseholdMembershipStartTicksAtArrival,
+        partnerRelationshipId,
+        partnerKindAtArrival,
+        minimumPartnerTrustAtArrival,
+        minimumPartnerCommitmentAtArrival,
+        selectionScoreAtArrival,
+      });
+      childArrivals.push(arrivalRecord);
+      const birthEvent = event(
+        'person-born',
+        ref('person', id),
+        ref('household', eligibleHousehold.id),
+        draft.generation,
+        `${draft.name} was born into household ${eligibleHousehold.id}.`,
       );
+      const guardianNames = guardianIds.map(
+        (guardianId) => people.find((person) => person.id === guardianId)!.name,
+      );
+      const eligibilityEvent = event(
+        policy === 'pair-bond' ? 'pair-bond-child-arrival' : 'communal-child-arrival',
+        ref('person', guardianIds[0]!),
+        ref('person', guardianIds[1] ?? id),
+        eligibleHousehold.id,
+        policy === 'pair-bond'
+          ? `${draft.name}'s arrival was supported by ${guardianNames.join(' and ')} through a recorded ${partnerKindAtArrival?.replaceAll('-', ' ')} bond.`
+          : `${draft.name}'s arrival was supported by ${guardianNames.join(' and ')} through communal guardianship.`,
+        childArrivalEligibilityEvidence(arrivalRecord),
+      );
+      events.push(birthEvent, eligibilityEvent);
       facts.push({
         personId: id,
         kind: 'person-born',
@@ -1013,6 +1758,7 @@ export function advanceSociety(state: SocietyState, input: SocietyPulseInput): S
         target: ref('household', eligibleHousehold.id),
         summary: `${draft.name} was born into household ${eligibleHousehold.id}.`,
       });
+      for (const guardianId of guardianIds) addBiographyFact(facts, guardianId, eligibilityEvent);
     }
   }
   if (years > 0 && living().length < 4 && living().length < MAX_SOCIETY_RESIDENTS) {
@@ -1049,6 +1795,7 @@ export function advanceSociety(state: SocietyState, input: SocietyPulseInput): S
       credits: 8,
       meals: 2,
       tools: 0,
+      lastChildArrivalTick: input.tick,
     });
     events.push(
       event(
@@ -1066,94 +1813,488 @@ export function advanceSociety(state: SocietyState, input: SocietyPulseInput): S
       target: ref('culture', culture.id),
       summary: `${draft.name} arrived from beyond the settlement.`,
     });
+    const householdMigration = event(
+      'household-migrated',
+      ref('person', id),
+      ref('household', householdId),
+      1,
+      `${draft.name} established migrant household ${householdId}.`,
+    );
+    events.push(householdMigration);
+    addBiographyFact(facts, id, householdMigration);
   }
   households = households.map((household) => ({
     ...household,
     adultIds: adultIdsFor(people, household.id, input.tick, state.yearTicks),
   }));
-
-  const currentBonds = new Map(
-    state.bonds.map((bond) => [pairKey(bond.firstPersonId, bond.secondPersonId), bond]),
-  );
   const adults = living()
     .filter((person) => input.tick - person.birthTick >= 18 * state.yearTicks)
     .sort(compareId);
-  let bonds: SocietyBond[] = [];
-  if (adults.length >= 2) {
-    const first = adults[0]!;
-    const second = adults[1]!;
-    const prior = currentBonds.get(pairKey(first.id, second.id)) ?? {
-      firstPersonId: first.id,
-      secondPersonId: second.id,
-      cooperation: 50,
-      disagreement: 0,
-      conflict: 0,
-    };
-    const nextBond =
-      scarcity >= 60
-        ? {
-            ...prior,
-            cooperation: clamp(prior.cooperation - 4, 0, 100),
-            disagreement: clamp(prior.disagreement + 5, 0, 100),
-            conflict: clamp(prior.conflict + (scarcity >= 85 ? 8 : 0), 0, 100),
-          }
-        : {
-            ...prior,
-            cooperation: clamp(prior.cooperation + 4, 0, 100),
-            disagreement: clamp(prior.disagreement - 3, 0, 100),
-            conflict: clamp(prior.conflict - 4, 0, 100),
-          };
-    bonds = [Object.freeze(nextBond)];
-    if (scarcity >= 85) {
-      const conflictDraft = event(
-        'conflict',
-        ref('person', first.id),
-        ref('person', second.id),
-        nextBond.conflict,
-        `${first.name} and ${second.name} entered a scarcity conflict.`,
-      );
-      events.push(conflictDraft);
-      addBiographyFact(facts, first.id, conflictDraft);
-      addBiographyFact(facts, second.id, conflictDraft);
-      const victim = households.find((household) => household.id === second.householdId);
-      const thief = households.find((household) => household.id === first.householdId);
-      if (victim !== undefined && thief !== undefined && victim.credits > 0) {
-        victim.credits -= 1;
-        thief.credits += 1;
-        const theftDraft = event(
-          'theft',
-          ref('person', first.id),
-          ref('household', victim.id),
-          1,
-          `${first.name} took one credit during scarcity.`,
+
+  // Salient relationships change who receives voluntary help and crisis care.
+  if (years > 0) {
+    const helpers = adults
+      .filter((person) => {
+        const household = households.find((candidate) => candidate.id === person.householdId);
+        return household !== undefined && household.meals > 1;
+      })
+      .sort((left, right) => {
+        const leftHousehold = households.find((candidate) => candidate.id === left.householdId)!;
+        const rightHousehold = households.find((candidate) => candidate.id === right.householdId)!;
+        return (
+          rightHousehold.meals - leftHousehold.meals ||
+          rightHousehold.credits - leftHousehold.credits ||
+          left.id - right.id
         );
-        events.push(theftDraft);
-        addBiographyFact(facts, first.id, theftDraft);
-      }
-    } else if (prior.conflict > 0) {
-      const reconciliationDraft = event(
-        'reconciliation',
-        ref('person', first.id),
-        ref('person', second.id),
-        nextBond.cooperation,
-        `${first.name} and ${second.name} reconciled.`,
+      });
+    for (const helper of helpers) {
+      const helperHousehold = households.find((candidate) => candidate.id === helper.householdId)!;
+      const candidates = living().filter(
+        (candidate) => candidate.id !== helper.id && candidate.householdId !== helper.householdId,
       );
-      events.push(reconciliationDraft);
-      addBiographyFact(facts, first.id, reconciliationDraft);
-      addBiographyFact(facts, second.id, reconciliationDraft);
-    } else {
-      const cooperationDraft = event(
-        'cooperation',
-        ref('person', first.id),
-        ref('person', second.id),
-        nextBond.cooperation,
-        `${first.name} and ${second.name} cooperated.`,
+      const baseUtility = new Map(
+        candidates.map((candidate) => {
+          const household = households.find((entry) => entry.id === candidate.householdId)!;
+          return [candidate.id, (100 - candidate.health) * 2 + (8 - household.meals) * 6] as const;
+        }),
       );
-      events.push(cooperationDraft);
-      addBiographyFact(facts, first.id, cooperationDraft);
-      addBiographyFact(facts, second.id, cooperationDraft);
+      const recipientId = selectPreferredRelatedPerson(
+        interpersonal,
+        helper.id,
+        candidates.map((candidate) => candidate.id),
+        'help',
+        baseUtility,
+      );
+      const recipient = candidates.find((candidate) => candidate.id === recipientId);
+      const edge =
+        recipient === undefined
+          ? undefined
+          : listRelationshipsForPerson(interpersonal, helper.id).find(
+              (candidate) =>
+                candidate.firstPersonId === recipient.id ||
+                candidate.secondPersonId === recipient.id,
+            );
+      const recipientHousehold = households.find(
+        (candidate) => candidate.id === recipient?.householdId,
+      );
+      if (
+        recipient === undefined ||
+        edge === undefined ||
+        recipientHousehold === undefined ||
+        helperHousehold.meals <= recipientHousehold.meals ||
+        relationshipDecisionInfluence(edge, helper.id, 'help') < 40
+      )
+        continue;
+      helperHousehold.meals -= 1;
+      recipientHousehold.meals += 1;
+      const draft = event(
+        scarcity >= 80 ? 'crisis-assisted' : 'resource-shared',
+        ref('person', helper.id),
+        ref('person', recipient.id),
+        1,
+        scarcity >= 80
+          ? `${helper.name} protected ${recipient.name}'s household with a meal during scarcity.`
+          : `${helper.name} shared a meal with ${recipient.name}'s household.`,
+      );
+      events.push(draft);
+      addBiographyFact(facts, helper.id, draft);
+      addBiographyFact(facts, recipient.id, draft);
+      break;
     }
   }
+
+  // One bounded annual teaching interaction changes authoritative settlement skills.
+  if (years > 0) {
+    const teaching = interpersonal.active
+      .flatMap((edge) => {
+        const first = people.find((person) => person.id === edge.firstPersonId && person.alive);
+        const second = people.find((person) => person.id === edge.secondPersonId && person.alive);
+        const firstObservation = observationById.get(edge.firstPersonId);
+        const secondObservation = observationById.get(edge.secondPersonId);
+        if (
+          first === undefined ||
+          second === undefined ||
+          firstObservation === undefined ||
+          secondObservation === undefined
+        )
+          return [];
+        return (
+          [
+            [first, firstObservation, second, secondObservation],
+            [second, secondObservation, first, firstObservation],
+          ] as const
+        ).flatMap(([teacher, teacherObservation, learner, learnerObservation]) =>
+          teacherObservation.skills.flatMap((teacherSkill, skillIndex) => {
+            const gap = teacherSkill - learnerObservation.skills[skillIndex]!;
+            const influence = relationshipDecisionInfluence(edge, learner.id, 'knowledge');
+            return gap < 5 || influence < 40
+              ? []
+              : [
+                  {
+                    teacher,
+                    learner,
+                    skillIndex: skillIndex as 0 | 1 | 2 | 3,
+                    score: gap * 4 + influence,
+                  },
+                ];
+          }),
+        );
+      })
+      .sort(
+        (left, right) =>
+          right.score - left.score ||
+          left.teacher.id - right.teacher.id ||
+          left.learner.id - right.learner.id ||
+          left.skillIndex - right.skillIndex,
+      )[0];
+    if (teaching !== undefined) {
+      skillPatches.push(
+        Object.freeze({
+          personId: teaching.learner.id,
+          skillIndex: teaching.skillIndex,
+          amount: 1,
+        }),
+      );
+      const draft = event(
+        'knowledge-shared',
+        ref('person', teaching.teacher.id),
+        ref('person', teaching.learner.id),
+        teaching.skillIndex,
+        `${teaching.teacher.name} taught ${teaching.learner.name} practical knowledge through their relationship.`,
+      );
+      events.push(draft);
+      addBiographyFact(facts, teaching.teacher.id, draft);
+      addBiographyFact(facts, teaching.learner.id, draft);
+    }
+  }
+
+  // Death transfers a bounded family resource share to a relationship-ranked heir.
+  if (years > 0) {
+    for (const deceasedId of [...new Set(deathIds)].sort((left, right) => left - right)) {
+      const deceased = people.find((person) => person.id === deceasedId);
+      if (deceased === undefined) continue;
+      const childIds = childIdsFor(interpersonal, deceasedId);
+      const parentIds = parentIdsFor(interpersonal, deceasedId);
+      const guardianIds = guardianIdsFor(interpersonal, deceasedId);
+      const partnerIds = listRelationshipsForPerson(interpersonal, deceasedId, true)
+        .filter((edge) =>
+          ['partner', 'long-term-partner', 'former-partner', 'widowed'].includes(edge.kind),
+        )
+        .map((edge) =>
+          edge.firstPersonId === deceasedId ? edge.secondPersonId : edge.firstPersonId,
+        );
+      const candidateIds = [...new Set([...childIds, ...partnerIds, ...parentIds, ...guardianIds])]
+        .filter((id) => people.some((person) => person.id === id && person.alive))
+        .sort((left, right) => left - right);
+      const baseUtility = new Map(
+        candidateIds.map((id) => [
+          id,
+          childIds.includes(id) ? 240 : partnerIds.includes(id) ? 220 : 160,
+        ]),
+      );
+      const heirId = selectPreferredRelatedPerson(
+        interpersonal,
+        deceasedId,
+        candidateIds,
+        'family',
+        baseUtility,
+      );
+      const heir = people.find((person) => person.id === heirId);
+      const sourceHousehold = households.find((household) => household.id === deceased.householdId);
+      const targetHousehold = households.find((household) => household.id === heir?.householdId);
+      if (heir === undefined || sourceHousehold === undefined || targetHousehold === undefined)
+        continue;
+      const amount =
+        sourceHousehold.id === targetHousehold.id ? 0 : Math.min(1, sourceHousehold.credits);
+      sourceHousehold.credits -= amount;
+      targetHousehold.credits += amount;
+      const draft = event(
+        'family-inheritance',
+        ref('person', deceased.id),
+        ref('person', heir.id),
+        amount,
+        amount > 0
+          ? `${heir.name} received one family credit after ${deceased.name}'s death.`
+          : `${heir.name} retained ${deceased.name}'s family holdings within household ${targetHousehold.id}.`,
+      );
+      events.push(draft);
+      addBiographyFact(facts, deceased.id, draft);
+      addBiographyFact(facts, heir.id, draft);
+    }
+  }
+
+  // Dependents without a living parent receive an event-backed, culturally valid guardian.
+  if (years > 0) {
+    for (const child of living()
+      .filter(
+        (person) =>
+          input.tick - person.birthTick < 18 * state.yearTicks &&
+          parentIdsFor(interpersonal, person.id).length > 0,
+      )
+      .sort(compareId)) {
+      const parents = parentIdsFor(interpersonal, child.id);
+      if (parents.some((id) => people.some((person) => person.id === id && person.alive))) continue;
+      if (
+        guardianIdsFor(interpersonal, child.id).some((id) =>
+          people.some((person) => person.id === id && person.alive),
+        )
+      )
+        continue;
+      const salient = new Set<number>();
+      for (const relatedId of [child.id, ...parents])
+        for (const edge of listRelationshipsForPerson(interpersonal, relatedId, true))
+          salient.add(edge.firstPersonId === relatedId ? edge.secondPersonId : edge.firstPersonId);
+      const candidates = adults.filter(
+        (candidate) =>
+          candidate.cultureId === child.cultureId &&
+          (candidate.householdId === child.householdId ||
+            isDirectFamily(interpersonal, candidate.id, child.id) ||
+            salient.has(candidate.id)),
+      );
+      const baseUtility = new Map(
+        candidates.map((candidate) => [
+          candidate.id,
+          (candidate.householdId === child.householdId ? 160 : 0) +
+            (isDirectFamily(interpersonal, candidate.id, child.id) ? 120 : 0) +
+            (salient.has(candidate.id) ? 80 : 0),
+        ]),
+      );
+      const guardianId = selectPreferredRelatedPerson(
+        interpersonal,
+        child.id,
+        candidates.map((candidate) => candidate.id),
+        'help',
+        baseUtility,
+      );
+      const guardian = candidates.find((candidate) => candidate.id === guardianId);
+      if (guardian === undefined) continue;
+      const neutralDirection = Object.freeze({
+        affinity: 60,
+        trust: 60,
+        closeness: 50,
+        commitment: 70,
+        grievance: 0,
+      });
+      const bond: FamilyBond = Object.freeze({
+        parentId: guardian.id,
+        adultId: guardian.id,
+        childId: child.id,
+        kind: 'guardian',
+        provenance: 'recorded-guardianship',
+        stateProvenance: 'recorded',
+        formedEventId: 0,
+        formedTick: input.tick,
+        changedTick: input.tick,
+        lastInteractionTick: input.tick,
+        trend: 'improving',
+        parentToChild: neutralDirection,
+        childToParent: neutralDirection,
+        sharedEvents: Object.freeze([]),
+      });
+      interpersonal = Object.freeze({
+        ...interpersonal,
+        familyBonds: Object.freeze(
+          [...interpersonal.familyBonds, bond].sort(
+            (left, right) =>
+              left.childId - right.childId ||
+              left.parentId - right.parentId ||
+              compareOrdinalText(left.kind, right.kind),
+          ),
+        ),
+      });
+      if (child.householdId !== guardian.householdId) {
+        people = people.map((person) =>
+          person.id === child.id
+            ? Object.freeze({ ...person, householdId: guardian.householdId })
+            : person,
+        );
+        interpersonal = synchronizeInterpersonalPeople(
+          interpersonal,
+          input.tick,
+          interpersonalPeople(people),
+          'guardianship',
+        );
+      }
+      const draft = event(
+        'guardianship-formed',
+        ref('person', guardian.id),
+        ref('person', child.id),
+        guardian.householdId,
+        `${guardian.name} became ${child.name}'s guardian in household ${guardian.householdId}.`,
+      );
+      events.push(draft);
+      addBiographyFact(facts, guardian.id, draft);
+      addBiographyFact(facts, child.id, draft);
+    }
+  }
+
+  // A decadal scarcity migration moves a relationship-ranked pair together.
+  if (years > 0 && scarcity >= 75 && input.tick % (state.yearTicks * 10) === 0) {
+    const eligibleMovers = adults.filter((person) => {
+      if (householdChangedPersonIds.has(person.id)) return false;
+      const history = interpersonal.householdHistories.get(person.id);
+      const start = history?.intervals.at(-1)?.startTick;
+      return start === null || start === undefined || input.tick - start >= state.yearTicks * 10;
+    });
+    const mover = eligibleMovers.sort((left, right) => {
+      const leftHousehold = households.find((household) => household.id === left.householdId)!;
+      const rightHousehold = households.find((household) => household.id === right.householdId)!;
+      return (
+        leftHousehold.credits +
+          leftHousehold.meals * 2 -
+          (rightHousehold.credits + rightHousehold.meals * 2) || left.id - right.id
+      );
+    })[0];
+    if (mover !== undefined) {
+      const candidateIds = eligibleMovers
+        .filter((person) => person.id !== mover.id)
+        .map((person) => person.id);
+      const baseUtility = new Map(
+        candidateIds.map((id) => [
+          id,
+          people.find((person) => person.id === id)?.householdId === mover.householdId ? 30 : 0,
+        ]),
+      );
+      const companionId = selectPreferredRelatedPerson(
+        interpersonal,
+        mover.id,
+        candidateIds,
+        'migration',
+        baseUtility,
+      );
+      const companion = people.find((person) => person.id === companionId && person.alive);
+      const edge =
+        companion === undefined
+          ? undefined
+          : listRelationshipsForPerson(interpersonal, mover.id).find(
+              (candidate) =>
+                candidate.firstPersonId === companion.id ||
+                candidate.secondPersonId === companion.id,
+            );
+      if (
+        companion !== undefined &&
+        edge !== undefined &&
+        relationshipDecisionInfluence(edge, mover.id, 'migration') >= 80
+      ) {
+        const householdId = nextHouseholdId++;
+        let credits = 0;
+        let meals = 0;
+        let tools = 0;
+        for (const priorId of [...new Set([mover.householdId, companion.householdId])]) {
+          const prior = households.find((household) => household.id === priorId)!;
+          const creditShare = Math.min(2, prior.credits);
+          const mealShare = Math.min(1, prior.meals);
+          const toolShare = Math.min(1, prior.tools);
+          prior.credits -= creditShare;
+          prior.meals -= mealShare;
+          prior.tools -= toolShare;
+          credits += creditShare;
+          meals += mealShare;
+          tools += toolShare;
+        }
+        people = people.map((person) =>
+          person.id === mover.id || person.id === companion.id
+            ? Object.freeze({ ...person, householdId })
+            : person,
+        );
+        households.push({
+          id: householdId,
+          cultureId: mover.cultureId,
+          adultIds: Object.freeze([mover.id, companion.id].sort((left, right) => left - right)),
+          credits,
+          meals,
+          tools,
+          lastChildArrivalTick: input.tick,
+        });
+        interpersonal = synchronizeInterpersonalPeople(
+          interpersonal,
+          input.tick,
+          interpersonalPeople(people),
+          'migration-current-household',
+        );
+        householdChangedPersonIds.add(mover.id);
+        householdChangedPersonIds.add(companion.id);
+        const draft = event(
+          'household-migrated',
+          ref('person', mover.id),
+          ref('person', companion.id),
+          householdId,
+          `${mover.name} and ${companion.name} migrated together into household ${householdId}.`,
+        );
+        events.push(draft);
+        addBiographyFact(facts, mover.id, draft);
+        addBiographyFact(facts, companion.id, draft);
+      }
+    }
+  }
+
+  // Scarcity retaliation targets a represented rival or grievance, never an arbitrary first pair.
+  if (years > 0 && scarcity >= 70) {
+    const retaliation = interpersonal.active
+      .flatMap((edge) => [
+        {
+          edge,
+          actorId: edge.firstPersonId,
+          targetId: edge.secondPersonId,
+          score: relationshipDecisionInfluence(edge, edge.firstPersonId, 'conflict'),
+        },
+        {
+          edge,
+          actorId: edge.secondPersonId,
+          targetId: edge.firstPersonId,
+          score: relationshipDecisionInfluence(edge, edge.secondPersonId, 'conflict'),
+        },
+      ])
+      .filter(
+        (candidate) =>
+          candidate.score > 0 &&
+          people.some((person) => person.id === candidate.actorId && person.alive) &&
+          people.some((person) => person.id === candidate.targetId && person.alive),
+      )
+      .sort(
+        (left, right) =>
+          right.score - left.score ||
+          left.actorId - right.actorId ||
+          left.targetId - right.targetId,
+      )[0];
+    if (retaliation !== undefined) {
+      const actor = people.find((person) => person.id === retaliation.actorId)!;
+      const target = people.find((person) => person.id === retaliation.targetId)!;
+      const actorHousehold = households.find((household) => household.id === actor.householdId)!;
+      const targetHousehold = households.find((household) => household.id === target.householdId)!;
+      const amount =
+        actorHousehold.id === targetHousehold.id ? 0 : Math.min(1, targetHousehold.credits);
+      targetHousehold.credits -= amount;
+      actorHousehold.credits += amount;
+      const draft = event(
+        'conflict',
+        ref('person', actor.id),
+        ref('person', target.id),
+        retaliation.score,
+        amount > 0
+          ? `${actor.name} retaliated against ${target.name} and took one credit during scarcity.`
+          : `${actor.name} retaliated against ${target.name} during scarcity.`,
+      );
+      events.push(draft);
+      addBiographyFact(facts, actor.id, draft);
+      addBiographyFact(facts, target.id, draft);
+      if (amount > 0) {
+        const theftDraft = event(
+          'theft',
+          ref('person', actor.id),
+          ref('household', targetHousehold.id),
+          amount,
+          `${actor.name} took one credit from household ${targetHousehold.id} during the conflict.`,
+        );
+        events.push(theftDraft);
+        addBiographyFact(facts, actor.id, theftDraft);
+      }
+    }
+  }
+  households = households.map((household) => ({
+    ...household,
+    adultIds: adultIdsFor(people, household.id, input.tick, state.yearTicks),
+  }));
   const inequality = inequalityFor(households);
   const stability = clamp(
     state.stability +
@@ -1184,7 +2325,7 @@ export function advanceSociety(state: SocietyState, input: SocietyPulseInput): S
         'The settlement recovered through renewed production and cooperation.',
       ),
     );
-  const leaderId = chooseLeader(people, households);
+  const leaderId = chooseLeader(people, households, interpersonal);
   const government: GovernmentKind = stability < 35 ? 'stewardship' : 'council';
   const institution = Object.freeze({
     ...state.institution,
@@ -1231,7 +2372,21 @@ export function advanceSociety(state: SocietyState, input: SocietyPulseInput): S
     groups: Object.freeze(groups),
     institution,
     offers: Object.freeze(offers),
-    bonds: sortedBonds(bonds),
+    interpersonal: synchronizeInterpersonalPeople(
+      Object.freeze({
+        ...interpersonal,
+        childArrivals: Object.freeze(
+          childArrivals.sort((left, right) => left.childId - right.childId),
+        ),
+      }),
+      input.tick,
+      interpersonalPeople(people),
+      birthDrafts.length > 0
+        ? 'child-arrival'
+        : migrationDrafts.length > 0
+          ? 'migration-current-household'
+          : 'join',
+    ),
     scarcity,
     inequality,
     stability,
@@ -1256,6 +2411,7 @@ export function advanceSociety(state: SocietyState, input: SocietyPulseInput): S
         }),
       ),
     ),
+    skillPatches: Object.freeze(skillPatches),
     events: Object.freeze(events),
   });
 }
@@ -1264,6 +2420,7 @@ export function advanceSociety(state: SocietyState, input: SocietyPulseInput): S
 export function attachSocietyBiographyEventIds(
   state: SocietyState,
   sourceEvents: readonly SocietyAuthoritativeEvent[],
+  historicalSources: readonly SocietyAuthoritativeEvent[] = sourceEvents,
 ): SocietyState {
   assertSocietyInvariants(state);
   const sources = [...sourceEvents].sort(compareId);
@@ -1283,14 +2440,15 @@ export function attachSocietyBiographyEventIds(
   }
   const next: SocietyState = Object.freeze({
     ...state,
+    interpersonal: attachInterpersonalEventIds(state.interpersonal, sources),
     people: Object.freeze(
       state.people.map((person) =>
         Object.freeze({
           ...person,
-          biographyEventIds: Object.freeze(
-            [...new Set([...person.biographyEventIds, ...(attached.get(person.id) ?? [])])]
-              .sort((left, right) => left - right)
-              .slice(-MAX_BIOGRAPHY_EVENT_IDS),
+          biographyEventIds: retainBiographyEventIds(
+            person.biographyEventIds,
+            attached.get(person.id) ?? [],
+            historicalSources,
           ),
         }),
       ),
@@ -1304,7 +2462,6 @@ export function attachSocietyBiographyEventIds(
 export function societyDto(state: SocietyState): Readonly<Record<string, unknown>> {
   assertSocietyInvariants(state);
   return Object.freeze({
-    bonds: state.bonds.map((bond) => ({ ...bond })),
     centerTileIndex: state.centerTileIndex,
     collapsed: state.collapsed,
     cultures: state.cultures.map((culture) => ({ ...culture })),
@@ -1314,6 +2471,7 @@ export function societyDto(state: SocietyState): Readonly<Record<string, unknown
       adultIds: [...household.adultIds],
     })),
     inequality: state.inequality,
+    interpersonal: interpersonalDto(state.interpersonal),
     institution: { ...state.institution },
     lastTick: state.lastTick,
     nextHouseholdId: state.nextHouseholdId,
@@ -1373,6 +2531,7 @@ export function assertSocietyInvariants(state: SocietyState): void {
   const householdIds = new Set(state.households.map((household) => household.id));
   const cultureIds = new Set(state.cultures.map((culture) => culture.id));
   const peopleById = new Map(state.people.map((person) => [person.id, person]));
+  assertInterpersonalInvariants(state.interpersonal, interpersonalPeople(state.people));
   for (const person of state.people) {
     assertInteger(person.id, 'Society person id', 1);
     if (personIds.has(person.id)) throw new Error('Society person ids must be unique.');
@@ -1389,7 +2548,7 @@ export function assertSocietyInvariants(state: SocietyState): void {
     assertInteger(person.generation, 'Society generation');
     if (
       (person.generation === 0 && (person.parentIds[0] !== 0 || person.parentIds[1] !== 0)) ||
-      (person.generation > 0 && (person.parentIds[0] === 0 || person.parentIds[1] === 0))
+      (person.generation > 0 && person.parentIds[0] === 0)
     ) {
       throw new Error('Society parent generation is invalid.');
     }
@@ -1441,6 +2600,12 @@ export function assertSocietyInvariants(state: SocietyState): void {
     assertInteger(household.credits, 'Household credits');
     assertInteger(household.meals, 'Household meals');
     assertInteger(household.tools, 'Household tools');
+    assertInteger(
+      household.lastChildArrivalTick,
+      'Household last child arrival tick',
+      Number.MIN_SAFE_INTEGER,
+      state.lastTick,
+    );
   }
   if (state.cultures.length < 2) throw new Error('Society requires two cultures.');
   const cultureIdentities = new Set<string>();
@@ -1453,12 +2618,36 @@ export function assertSocietyInvariants(state: SocietyState): void {
     assertBoundedString(culture.architectureStyle, 'Society culture architecture style');
     if (!ROLES.includes(culture.preference))
       throw new Error('Society culture preference is invalid.');
+    if (
+      (culture.familyPolicy !== 'pair-bond' && culture.familyPolicy !== 'communal-guardianship') ||
+      (culture.partnershipLimit !== 1 && culture.partnershipLimit !== 2)
+    )
+      throw new Error('Society culture family policy is invalid.');
     const identity = cultureIdentity(culture);
     if (cultureIdentities.has(identity))
       throw new Error('Society cultures must have distinct identities.');
     cultureIdentities.add(identity);
     if (cultureNames.has(culture.name)) throw new Error('Society culture names must be unique.');
     cultureNames.add(culture.name);
+  }
+  for (const arrival of state.interpersonal.childArrivals) {
+    const child = peopleById.get(arrival.childId);
+    const culture = state.cultures.find((candidate) => candidate.id === arrival.cultureId);
+    const household = state.households.find((candidate) => candidate.id === arrival.householdId);
+    if (
+      child?.origin !== 'birth' ||
+      child.cultureId !== arrival.cultureId ||
+      culture?.familyPolicy !== arrival.policy ||
+      household?.cultureId !== arrival.cultureId
+    )
+      throw new Error('Child arrival culture or household evidence is invalid.');
+    if (
+      arrival.guardianIds.some((guardianId) => {
+        const guardian = peopleById.get(guardianId);
+        return guardian === undefined || arrival.tick - guardian.birthTick < 18 * state.yearTicks;
+      })
+    )
+      throw new Error('Child arrival guardian was not an adult at arrival.');
   }
   for (const group of state.groups) {
     assertInteger(group.id, 'Society group id', 1);
@@ -1482,32 +2671,6 @@ export function assertSocietyInvariants(state: SocietyState): void {
     (state.institution.leaderId !== 0 && !peopleById.get(state.institution.leaderId)?.alive)
   )
     throw new Error('Institution leader or government is invalid.');
-  const bonds = new Set<string>();
-  let previousFirstPersonId = 0;
-  let previousSecondPersonId = 0;
-  for (const bond of state.bonds) {
-    if (
-      !personIds.has(bond.firstPersonId) ||
-      !personIds.has(bond.secondPersonId) ||
-      bond.firstPersonId >= bond.secondPersonId
-    )
-      throw new Error('Society bond references are invalid.');
-    const key = pairKey(bond.firstPersonId, bond.secondPersonId);
-    if (bonds.has(key)) throw new Error('Society bonds must be unique.');
-    if (
-      previousFirstPersonId > bond.firstPersonId ||
-      (previousFirstPersonId === bond.firstPersonId &&
-        previousSecondPersonId >= bond.secondPersonId)
-    ) {
-      throw new Error('Society bonds must be sorted.');
-    }
-    bonds.add(key);
-    previousFirstPersonId = bond.firstPersonId;
-    previousSecondPersonId = bond.secondPersonId;
-    assertInteger(bond.cooperation, 'Society cooperation', 0, 100);
-    assertInteger(bond.disagreement, 'Society disagreement', 0, 100);
-    assertInteger(bond.conflict, 'Society conflict', 0, 100);
-  }
   for (const offer of state.offers) {
     assertInteger(offer.id, 'Society offer id', 1);
     if (

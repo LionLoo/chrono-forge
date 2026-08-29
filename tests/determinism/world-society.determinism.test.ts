@@ -21,14 +21,14 @@ function advanceInPartitions(partitions: readonly number[]) {
 }
 
 describe('M4 society world determinism', () => {
-  it('matches one-shot and irregular fixed tick partitions through multiple generations', () => {
+  it('matches one-shot and irregular fixed tick partitions after relationship-grounded births', () => {
     const oneShot = stepWorld(acceleratedWorld(), TOTAL_TICKS);
     const partitioned = advanceInPartitions([
       1, 999, 17, 4_983, 1_001, 7_777, 23, 31_199, 10_000, 42_000, 22_000,
     ]);
 
     expect(partitioned.tick).toBe(TOTAL_TICKS);
-    expect(partitioned.civilization.society.people.some((person) => person.generation >= 2)).toBe(
+    expect(partitioned.civilization.society.people.some((person) => person.generation >= 1)).toBe(
       true,
     );
     expect(hashWorldState(partitioned)).toBe(hashWorldState(oneShot));
@@ -41,7 +41,7 @@ describe('M4 society world determinism', () => {
     const restored = deserializeWorldSnapshot(serializeWorldSnapshot(firstHalf));
     const resumed = stepWorld(restored, 60_000);
 
-    expect(resumed.civilization.society.people.some((person) => person.generation >= 2)).toBe(true);
+    expect(resumed.civilization.society.people.some((person) => person.generation >= 1)).toBe(true);
     expect(hashWorldState(resumed)).toBe(hashWorldState(oneShot));
     expect(canonicalWorldJson(resumed)).toBe(canonicalWorldJson(oneShot));
   }, 30_000);

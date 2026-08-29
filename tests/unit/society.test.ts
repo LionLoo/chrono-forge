@@ -17,6 +17,7 @@ function observations(state?: SocietyState): readonly SocietyPersonObservation[]
       alive: person.alive,
       health: person.health,
       tileIndex: person.tileIndex,
+      traits: [45, 55, 65, 75] as const,
       skills:
         person.role === 'grower'
           ? ([90, 10, 10, 10] as const)
@@ -26,6 +27,7 @@ function observations(state?: SocietyState): readonly SocietyPersonObservation[]
               ? ([10, 10, 90, 10] as const)
               : ([10, 10, 10, 90] as const),
       occupation: person.role,
+      recentEventIds: [] as const,
     }));
   }
   return [1, 2, 3, 4].map((id) => ({
@@ -33,6 +35,7 @@ function observations(state?: SocietyState): readonly SocietyPersonObservation[]
     alive: true,
     health: 100,
     tileIndex: 10 + id,
+    traits: [20 + id * 10, 30 + id * 5, 40 + id * 3, 50 + id * 2] as const,
     skills:
       id === 1
         ? ([90, 10, 10, 10] as const)
@@ -42,6 +45,7 @@ function observations(state?: SocietyState): readonly SocietyPersonObservation[]
             ? ([10, 10, 90, 10] as const)
             : ([10, 10, 10, 90] as const),
     occupation: 'generalist',
+    recentEventIds: [] as const,
   }));
 }
 
@@ -182,21 +186,37 @@ describe('deterministic living societies core', () => {
     let state = initial();
     let sawBirth = false;
     let sawGrandchild = false;
-    for (let tick = 1_000; tick <= 110_000; tick += 1_000) {
-      const before = state;
+    for (let tick = 1_000; tick <= 300_000; tick += 1_000) {
       const result = pulse(state, tick, 200);
-      state = result.society;
+      state =
+        result.society.pendingBiographyFacts.length === 0
+          ? result.society
+          : attachSocietyBiographyEventIds(
+              result.society,
+              result.events.map((draft, index) => ({
+                id: tick * 100 + index + 1,
+                tick,
+                kind: draft.kind,
+                subject: draft.subject,
+                target: draft.target,
+                summary: draft.summary,
+              })),
+            );
       sawBirth ||= result.personBirthDrafts.length > 0;
       sawGrandchild ||= result.personBirthDrafts.some((draft) => draft.generation >= 2);
       for (const draft of result.personBirthDrafts) {
-        expect(draft.householdId).toBe(
-          before.people.find((person) => person.id === draft.parentIds[0])?.householdId,
-        );
+        expect(
+          draft.parentIds.every(
+            (parentId) =>
+              result.society.people.find((person) => person.id === parentId)?.householdId ===
+              draft.householdId,
+          ),
+        ).toBe(true);
       }
     }
-    const deceased = state.people.find((person) => person.id === 1)!;
+    const deceased = state.people.find((person) => person.alive)!;
     const death = advanceSociety(state, {
-      tick: 111_000,
+      tick: 301_000,
       centerTileIndex: 10,
       worldWidth: 8,
       people: observations(state).map((person) =>
@@ -211,17 +231,32 @@ describe('deterministic living societies core', () => {
     expect(death.deathPersonIds).toContain(deceased.id);
     expect(death.society.people.find((person) => person.id === deceased.id)).toMatchObject({
       alive: false,
-      deathTick: 111_000,
+      deathTick: 301_000,
     });
   });
 
   it('propagates scarcity into conflict, collapse, and later recovery', () => {
     const state = initial();
     let current = state;
-    for (let tick = 1_000; tick <= 6_000; tick += 1_000)
-      current = pulse(current, tick, 0, 0).society;
+    let sawConflict = false;
+    for (let tick = 1_000; tick <= 6_000; tick += 1_000) {
+      const result = pulse(current, tick, 0, 0);
+      current = result.society;
+      sawConflict ||= result.events.some((event) =>
+        ['conflict', 'rivalry-formed', 'enmity-formed'].includes(event.kind),
+      );
+    }
     expect(current.scarcity).toBeGreaterThanOrEqual(80);
-    expect(current.bonds[0]?.conflict).toBeGreaterThan(0);
+    expect(sawConflict).toBe(true);
+    expect(
+      current.interpersonal.active.some(
+        (edge) =>
+          edge.kind === 'rival' ||
+          edge.kind === 'enemy' ||
+          edge.firstToSecond.grievance > 0 ||
+          edge.secondToFirst.grievance > 0,
+      ),
+    ).toBe(true);
     expect(current.stability).toBeLessThan(state.stability);
     expect(current.collapsed).toBe(true);
 
@@ -237,15 +272,26 @@ describe('deterministic living societies core', () => {
     for (let tick = 1_000; tick <= ACCELERATED_YEAR_TICKS; tick += 1_000)
       state = pulse(state, tick, 20).society;
     expect(state.pendingBiographyFacts.length).toBeGreaterThanOrEqual(3);
-    expect(state.pendingBiographyFacts.some((fact) => fact.kind === 'cooperation')).toBe(true);
+    expect(
+      state.pendingBiographyFacts.some((fact) =>
+        [
+          'relationship-formed',
+          'friendship-formed',
+          'rivalry-formed',
+          'mentorship-formed',
+          'resource-shared',
+        ].includes(fact.kind),
+      ),
+    ).toBe(true);
     const sources = state.pendingBiographyFacts.map((fact, index) => ({
       id: 91 + index,
+      tick: state.lastTick,
       kind: fact.kind,
       subject: fact.source,
       target: fact.target,
       summary: fact.summary,
     }));
-    const fact = state.pendingBiographyFacts.find((candidate) => candidate.kind === 'person-born')!;
+    const fact = state.pendingBiographyFacts[0]!;
     const attached = attachSocietyBiographyEventIds(state, sources);
 
     expect(
@@ -254,6 +300,67 @@ describe('deterministic living societies core', () => {
     expect(() =>
       attachSocietyBiographyEventIds(state, [{ ...sources[0]!, summary: 'invented history' }]),
     ).toThrow(/exact authoritative/i);
+  });
+
+  it('retains factual milestones from childhood through reconciliation across a long life', () => {
+    let state = initial();
+    const historical: {
+      id: number;
+      tick: number;
+      kind: string;
+      subject: { kind: 'person'; id: number };
+      target: { kind: 'person'; id: number };
+      summary: string;
+    }[] = [];
+    const milestoneKinds = [
+      'sibling-bond-formed',
+      'friendship-formed',
+      'partnership-formed',
+      'family-estranged',
+      'relationship-reconciled',
+    ] as const;
+    const allKinds = [
+      ...milestoneKinds,
+      ...Array.from({ length: 20 }, (_, index) =>
+        index % 2 === 0 ? 'resource-shared' : 'knowledge-shared',
+      ),
+    ];
+
+    for (const [index, kind] of allKinds.entries()) {
+      const source = {
+        id: 501 + index,
+        tick: (index + 1) * ACCELERATED_YEAR_TICKS * 3,
+        kind,
+        subject: { kind: 'person' as const, id: 1 },
+        target: { kind: 'person' as const, id: 2 },
+        summary: `Factual ${kind} milestone ${index + 1}.`,
+      };
+      historical.push(source);
+      state = attachSocietyBiographyEventIds(
+        {
+          ...state,
+          pendingBiographyFacts: [
+            {
+              personId: 1,
+              kind: source.kind,
+              source: source.subject,
+              target: source.target,
+              summary: source.summary,
+            },
+          ],
+        },
+        [source],
+        historical,
+      );
+    }
+
+    const biography = state.people.find((person) => person.id === 1)!.biographyEventIds;
+    expect(biography).toHaveLength(16);
+    for (const kind of milestoneKinds) {
+      const source = historical.find((event) => event.kind === kind)!;
+      expect(biography, kind).toContain(source.id);
+    }
+    expect(biography).toStrictEqual([...biography].sort((left, right) => left - right));
   });
 
   it('rejects malformed family and household references', () => {

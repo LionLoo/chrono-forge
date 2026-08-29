@@ -8,7 +8,7 @@ import {
   type TauriInvoke,
 } from '../../src/adapters/persistence';
 import { checkpointFocus, createIdleFocusState, startFocus } from '../../src/focus';
-import { serializeWorldSnapshot } from '../../src/simulation/persistence';
+import { deserializeWorldSnapshot, serializeWorldSnapshot } from '../../src/simulation/persistence';
 import { createInitialWorld, stepWorld } from '../../src/simulation/world';
 
 const ticksByName: Readonly<Record<string, number>> = {
@@ -190,6 +190,18 @@ describe('persistence adapter', () => {
 
   it('falls back from a checksum-valid but semantically invalid native head', async () => {
     const malformedSnapshot = '{"hello":"world"}';
+    const recoveredWorld = stepWorld(
+      createInitialWorld([81, 82, 83, 84], {
+        width: 12,
+        height: 8,
+        chunkSize: 4,
+        societyYearTicks: 5_000,
+      }),
+      30_000,
+    );
+    expect(recoveredWorld.civilization.society.interpersonal.active.length).toBeGreaterThan(0);
+    const recoveredSnapshot = serializeWorldSnapshot(recoveredWorld);
+    const recoveredChecksum = checksumOf(recoveredSnapshot);
     const gateway = createTauriPersistenceGateway(async (command) => {
       await Promise.resolve();
       if (command !== 'load_save_slot_candidates') throw new Error('unexpected command');
@@ -213,17 +225,21 @@ describe('persistence adapter', () => {
           recoveredFromCorruption: true,
           savedAtMs: 1_000,
           focusSession: null,
-          snapshot: snapshot('one'),
-          checksum: snapshotOneChecksum,
+          snapshot: recoveredSnapshot,
+          checksum: recoveredChecksum,
         },
       ] as never;
     });
 
-    await expect(gateway.loadSaveSlot('alpha')).resolves.toMatchObject({
+    const recovered = await gateway.loadSaveSlot('alpha');
+    expect(recovered).toMatchObject({
       recoveredGeneration: 1,
       recoveredFromCorruption: true,
-      snapshot: snapshot('one'),
+      snapshot: recoveredSnapshot,
     });
+    const reloaded = deserializeWorldSnapshot(recovered!.snapshot);
+    expect(reloaded.civilization.society.interpersonal.active.length).toBeGreaterThan(0);
+    expect(serializeWorldSnapshot(reloaded)).toBe(recoveredSnapshot);
   });
 
   it('round-trips independent slots, immutable increasing generations, and export/import', async () => {

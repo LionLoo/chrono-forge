@@ -1,8 +1,51 @@
 import { expect, test } from '@playwright/test';
+import { createHash } from 'node:crypto';
+import { serializeWorldSnapshot } from '../../src/simulation/persistence';
+import { createInitialWorld, stepWorld } from '../../src/simulation/world';
+import { projectRelationshipPage } from '../../src/workers/simulation-runtime';
 import { startProductionServer } from './static-server';
 
 let origin: string;
 let closeServer: () => Promise<void>;
+
+function buildRelationshipArchive() {
+  const world = stepWorld(
+    createInitialWorld([7, 11, 13, 17], { societyYearTicks: 5_000 }),
+    300_000,
+  );
+  for (const person of world.civilization.society.people) {
+    const page = projectRelationshipPage(world, person.id, 0);
+    const relationship = page.relationships.find(
+      (candidate) => candidate.category === 'social' && candidate.sharedEvents.length > 0,
+    );
+    const hasFamily = page.relationships.some((candidate) => candidate.category === 'family');
+    if (relationship === undefined || !hasFamily) continue;
+    const snapshot = serializeWorldSnapshot(world);
+    const otherId =
+      relationship.firstPersonId === person.id
+        ? relationship.secondPersonId
+        : relationship.firstPersonId;
+    const other = world.civilization.society.people.find((candidate) => candidate.id === otherId);
+    if (other === undefined) throw new Error('Relationship archive has a dangling person.');
+    return {
+      personId: person.id,
+      personName: person.name,
+      otherName: other.name,
+      relationshipId: relationship.id,
+      relationshipKind: relationship.kind.replaceAll('-', ' '),
+      eventSummary: relationship.sharedEvents[0]!.summary,
+      savePackage: JSON.stringify({
+        format: 'chrono-forge-save-export',
+        version: 1,
+        slotId: 'relationship-e2e',
+        name: 'Relationship archive',
+        snapshot,
+        checksum: createHash('sha256').update(snapshot).digest('hex'),
+      }),
+    };
+  }
+  throw new Error('Locked M4.5 world did not expose a family-connected social relationship.');
+}
 
 test.beforeAll(async () => {
   const productionServer = await startProductionServer();
@@ -85,5 +128,51 @@ test('society controls remain readable with reduced motion and 200% text', async
     await page
       .getByRole('button', { name: 'Observe 100 fixed ticks' })
       .evaluate((element) => getComputedStyle(element).transitionDuration),
+  );
+});
+
+test('imports, inspects, saves, and reloads a relationship-rich world', async ({ page }) => {
+  test.setTimeout(120_000);
+  const fixture = buildRelationshipArchive();
+  await page.goto(origin);
+
+  await page.getByText('Import or export package').click();
+  await page.getByRole('textbox', { name: 'Import package' }).fill(fixture.savePackage);
+  await page.getByRole('button', { name: 'Validate and import' }).click();
+  await expect(page.getByText('Loaded Relationship archive.')).toBeVisible({ timeout: 20_000 });
+  const localSlots = page.getByRole('combobox', { name: 'Load local slot' });
+  await expect(localSlots.locator('option')).toHaveCount(2);
+  await expect(localSlots).toHaveValue('relationship-e2e');
+
+  const inspectPerson = page.getByRole('combobox', { name: 'Inspect person' });
+  await inspectPerson.selectOption(String(fixture.personId));
+  await expect(page.getByRole('heading', { name: fixture.personName })).toBeVisible();
+  await expect(page.getByRole('combobox', { name: 'Inspect relationship' })).toBeVisible();
+  await page
+    .getByRole('combobox', { name: 'Inspect relationship' })
+    .selectOption(fixture.relationshipId);
+  const detail = page.getByRole('article', { name: 'Relationship detail' });
+  await expect(detail).toContainText(`${fixture.personName} and ${fixture.otherName}`);
+  await expect(detail).toContainText(fixture.relationshipKind);
+  await expect(detail).toContainText(fixture.eventSummary);
+  await expect(page.getByText('Factual biography')).toBeVisible();
+  await expect(
+    page.getByRole('region', { name: /Parents|Guardians|Children|Siblings/ }).first(),
+  ).toBeVisible();
+
+  await page.getByRole('button', { name: 'Save now' }).click();
+  await expect(page.getByText('World saved manually.')).toBeVisible();
+  await expect(localSlots.locator('option')).toHaveCount(2);
+  await localSlots.selectOption('primary');
+  await expect(page.getByText('Loaded Founding world.')).toBeVisible();
+  await expect(localSlots.locator('option')).toHaveCount(2);
+  await localSlots.selectOption('relationship-e2e');
+  await expect(page.getByText('Loaded Relationship archive.')).toBeVisible({ timeout: 20_000 });
+  await inspectPerson.selectOption(String(fixture.personId));
+  await page
+    .getByRole('combobox', { name: 'Inspect relationship' })
+    .selectOption(fixture.relationshipId);
+  await expect(page.getByRole('article', { name: 'Relationship detail' })).toContainText(
+    fixture.eventSummary,
   );
 });

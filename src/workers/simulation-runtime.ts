@@ -11,17 +11,32 @@ import {
   type InitializeRequest,
   type LoadRequest,
   type PerformOfflineCatchUpRequest,
+  type RequestRelationshipEventPageRequest,
+  type RequestRelationshipPageRequest,
   type RequestSaveRequest,
   type RequestTimelinePageRequest,
   type RunMode,
   type SettlementSummary,
   type SocietyProjection,
+  type SocietyRelationshipProjection,
   type WorkerEvent,
   type WorkerFaultCode,
   type WorkerToUiMessage,
   type WorldFrameProjection,
 } from '../protocol';
 import { deserializeWorldSnapshot, serializeWorldSnapshot } from '../simulation/persistence';
+import {
+  RELATIONSHIP_PAGE_SIZE,
+  relationshipEventMatchesFamilyBond,
+  relationshipEventMatchesSocialEdge,
+} from '../simulation/relationships';
+import type {
+  ActiveRelationship,
+  ArchivedRelationshipSummary,
+  FamilyBond,
+  RelationshipDirectionalState,
+  SharedRelationshipEvent,
+} from '../simulation/relationships';
 import {
   appendWorldEvent,
   createInitialWorld,
@@ -194,14 +209,339 @@ function projectTimelinePage(
   });
 }
 
+function projectRelationshipDirection(
+  direction: RelationshipDirectionalState,
+): SocietyRelationshipProjection['firstToSecond'] {
+  return Object.freeze({
+    affinity: direction.affinity,
+    trust: direction.trust,
+    closeness: direction.closeness,
+    commitment: direction.commitment,
+    grievance: direction.grievance,
+  });
+}
+
+function projectRelationshipEvents(
+  references: readonly SharedRelationshipEvent[],
+  eventsById: ReadonlyMap<number, WorldState['eventLog'][number]>,
+  belongsToRelationship: (source: WorldState['eventLog'][number]) => boolean,
+  offset = 0,
+): readonly SocietyRelationshipProjection['sharedEvents'][number][] {
+  return Object.freeze(
+    references.slice(offset, offset + RELATIONSHIP_PAGE_SIZE).map((reference) => {
+      const source = eventsById.get(reference.eventId);
+      if (source?.tick !== reference.tick || !belongsToRelationship(source))
+        throw new Error('Projected relationship source event is missing or inconsistent.');
+      return Object.freeze({
+        eventId: source.id,
+        tick: source.tick,
+        summary: source.summary,
+        importance: reference.importance,
+      });
+    }),
+  );
+}
+
+function projectSocialRelationship(
+  edge: ActiveRelationship | ArchivedRelationshipSummary,
+  status: 'active' | 'archived',
+  eventsById: ReadonlyMap<number, WorldState['eventLog'][number]>,
+): SocietyRelationshipProjection {
+  return Object.freeze({
+    id: `social:${edge.id}`,
+    category: 'social',
+    status,
+    kind: edge.kind,
+    firstPersonId: edge.firstPersonId,
+    secondPersonId: edge.secondPersonId,
+    firstRole: edge.firstRole,
+    secondRole: edge.secondRole,
+    trend: edge.trend,
+    formedTick: edge.formedTick,
+    changedTick: edge.changedTick,
+    endedTick: status === 'archived' ? (edge as ArchivedRelationshipSummary).endedTick : null,
+    firstToSecond: projectRelationshipDirection(edge.firstToSecond),
+    secondToFirst: projectRelationshipDirection(edge.secondToFirst),
+    sharedEventTotal: edge.sharedEvents.length,
+    sharedEvents: projectRelationshipEvents(edge.sharedEvents, eventsById, (source) =>
+      relationshipEventMatchesSocialEdge(edge, source),
+    ),
+  });
+}
+
+function projectFamilyRelationship(
+  bond: FamilyBond,
+  eventsById: ReadonlyMap<number, WorldState['eventLog'][number]>,
+): SocietyRelationshipProjection {
+  return Object.freeze({
+    id: `family:${bond.kind}:${bond.parentId}:${bond.childId}`,
+    category: 'family',
+    status: 'family',
+    kind: bond.kind,
+    firstPersonId: bond.parentId,
+    secondPersonId: bond.childId,
+    firstRole: bond.kind === 'parent' ? 'parent' : 'guardian',
+    secondRole: 'child',
+    trend: bond.trend,
+    formedTick: bond.formedTick,
+    changedTick: bond.changedTick,
+    endedTick: null,
+    firstToSecond: projectRelationshipDirection(bond.parentToChild),
+    secondToFirst: projectRelationshipDirection(bond.childToParent),
+    sharedEventTotal: bond.sharedEvents.length,
+    sharedEvents: projectRelationshipEvents(bond.sharedEvents, eventsById, (source) =>
+      relationshipEventMatchesFamilyBond(bond, source),
+    ),
+  });
+}
+
+function relationshipSalience(relationship: SocietyRelationshipProjection): number {
+  return Math.max(
+    relationship.firstToSecond.closeness,
+    relationship.firstToSecond.commitment,
+    relationship.firstToSecond.grievance,
+    relationship.secondToFirst.closeness,
+    relationship.secondToFirst.commitment,
+    relationship.secondToFirst.grievance,
+  );
+}
+
+function compareProjectedRelationship(
+  left: SocietyRelationshipProjection,
+  right: SocietyRelationshipProjection,
+): number {
+  const family = left.category === right.category ? 0 : left.category === 'family' ? -1 : 1;
+  const salience = relationshipSalience(right) - relationshipSalience(left);
+  const category = left.category < right.category ? -1 : left.category > right.category ? 1 : 0;
+  return (
+    family ||
+    salience ||
+    category ||
+    Math.min(left.firstPersonId, left.secondPersonId) -
+      Math.min(right.firstPersonId, right.secondPersonId) ||
+    Math.max(left.firstPersonId, left.secondPersonId) -
+      Math.max(right.firstPersonId, right.secondPersonId) ||
+    (left.id < right.id ? -1 : left.id > right.id ? 1 : 0)
+  );
+}
+
+function projectedRelationshipsForPerson(
+  state: WorldState,
+  personId: number,
+): readonly SocietyRelationshipProjection[] {
+  const society = state.civilization.society;
+  if (!society.people.some((person) => person.id === personId))
+    throw new RangeError(`Person ${personId} is not available for inspection.`);
+  const eventsById = new Map(state.eventLog.map((event) => [event.id, event]));
+  return Object.freeze(
+    [
+      ...society.interpersonal.active
+        .filter((edge) => edge.firstPersonId === personId || edge.secondPersonId === personId)
+        .map((edge) => projectSocialRelationship(edge, 'active', eventsById)),
+      ...society.interpersonal.archived
+        .filter((edge) => edge.firstPersonId === personId || edge.secondPersonId === personId)
+        .map((edge) => projectSocialRelationship(edge, 'archived', eventsById)),
+      ...society.interpersonal.familyBonds
+        .filter((bond) => bond.parentId === personId || bond.childId === personId)
+        .map((bond) => projectFamilyRelationship(bond, eventsById)),
+    ].sort(compareProjectedRelationship),
+  );
+}
+
+export function projectRelationshipPage(
+  state: WorldState,
+  personId: number,
+  requestedOffset: number,
+): {
+  readonly personId: number;
+  readonly offset: number;
+  readonly total: number;
+  readonly relationships: readonly SocietyRelationshipProjection[];
+} {
+  const relationships = projectedRelationshipsForPerson(state, personId);
+  const total = relationships.length;
+  const lastOffset = Math.max(
+    0,
+    Math.floor(Math.max(0, total - 1) / RELATIONSHIP_PAGE_SIZE) * RELATIONSHIP_PAGE_SIZE,
+  );
+  const offset = Math.min(requestedOffset, lastOffset);
+  return Object.freeze({
+    personId,
+    offset,
+    total,
+    relationships: Object.freeze(relationships.slice(offset, offset + RELATIONSHIP_PAGE_SIZE)),
+  });
+}
+
+export function projectRelationshipEventPage(
+  state: WorldState,
+  personId: number,
+  relationshipId: string,
+  requestedOffset: number,
+): {
+  readonly personId: number;
+  readonly relationshipId: string;
+  readonly offset: number;
+  readonly total: number;
+  readonly events: SocietyRelationshipProjection['sharedEvents'];
+} {
+  const society = state.civilization.society;
+  if (!society.people.some((person) => person.id === personId))
+    throw new RangeError(`Person ${personId} is not available for relationship history.`);
+  const eventsById = new Map(state.eventLog.map((event) => [event.id, event]));
+  let references: readonly SharedRelationshipEvent[];
+  let belongsToRelationship: (source: WorldState['eventLog'][number]) => boolean;
+  if (relationshipId.startsWith('social:')) {
+    const relationshipNumber = Number(relationshipId.slice('social:'.length));
+    const edge = [...society.interpersonal.active, ...society.interpersonal.archived].find(
+      (candidate) =>
+        candidate.id === relationshipNumber &&
+        (candidate.firstPersonId === personId || candidate.secondPersonId === personId),
+    );
+    if (edge === undefined)
+      throw new RangeError(`Relationship ${relationshipId} is not available for this person.`);
+    references = edge.sharedEvents;
+    belongsToRelationship = (source) => relationshipEventMatchesSocialEdge(edge, source);
+  } else {
+    const bond = society.interpersonal.familyBonds.find(
+      (candidate) =>
+        `family:${candidate.kind}:${candidate.parentId}:${candidate.childId}` === relationshipId &&
+        (candidate.parentId === personId || candidate.childId === personId),
+    );
+    if (bond === undefined)
+      throw new RangeError(`Relationship ${relationshipId} is not available for this person.`);
+    references = bond.sharedEvents;
+    belongsToRelationship = (source) => relationshipEventMatchesFamilyBond(bond, source);
+  }
+  const total = references.length;
+  const lastOffset = Math.max(
+    0,
+    Math.floor(Math.max(0, total - 1) / RELATIONSHIP_PAGE_SIZE) * RELATIONSHIP_PAGE_SIZE,
+  );
+  const offset = Math.min(requestedOffset, lastOffset);
+  return Object.freeze({
+    personId,
+    relationshipId,
+    offset,
+    total,
+    events: projectRelationshipEvents(references, eventsById, belongsToRelationship, offset),
+  });
+}
+
+interface FamilyProjectionIndex {
+  readonly childIdsByParent: ReadonlyMap<number, readonly number[]>;
+  readonly guardianIdsByChild: ReadonlyMap<number, readonly number[]>;
+  readonly parentIdsByChild: ReadonlyMap<number, readonly number[]>;
+}
+
+function familyProjectionIndex(bonds: readonly FamilyBond[]): FamilyProjectionIndex {
+  const childIdsByParent = new Map<number, number[]>();
+  const guardianIdsByChild = new Map<number, number[]>();
+  const parentIdsByChild = new Map<number, number[]>();
+  const add = (index: Map<number, number[]>, key: number, value: number) => {
+    const values = index.get(key);
+    if (values === undefined) index.set(key, [value]);
+    else values.push(value);
+  };
+  for (const bond of bonds) {
+    if (bond.kind === 'parent') {
+      add(parentIdsByChild, bond.childId, bond.parentId);
+      add(childIdsByParent, bond.parentId, bond.childId);
+    } else add(guardianIdsByChild, bond.childId, bond.parentId);
+  }
+  for (const index of [childIdsByParent, guardianIdsByChild, parentIdsByChild])
+    for (const values of index.values()) values.sort((left, right) => left - right);
+  return Object.freeze({ childIdsByParent, guardianIdsByChild, parentIdsByChild });
+}
+
+function indexedIds(index: ReadonlyMap<number, readonly number[]>, id: number): readonly number[] {
+  return Object.freeze([...(index.get(id) ?? [])]);
+}
+
+function indexedAncestors(
+  index: FamilyProjectionIndex,
+  personId: number,
+  maximumDepth: number,
+): ReadonlyMap<number, number> {
+  const distances = new Map<number, number>();
+  let frontier = [personId];
+  for (let depth = 1; depth <= maximumDepth && frontier.length > 0; depth += 1) {
+    const next: number[] = [];
+    for (const childId of frontier)
+      for (const parentId of index.parentIdsByChild.get(childId) ?? [])
+        if (!distances.has(parentId)) {
+          distances.set(parentId, depth);
+          next.push(parentId);
+        }
+    frontier = next.sort((left, right) => left - right);
+  }
+  return distances;
+}
+
+function indexedDescendants(
+  index: FamilyProjectionIndex,
+  personId: number,
+  maximumDepth: number,
+): ReadonlyMap<number, number> {
+  const distances = new Map<number, number>();
+  let frontier = [personId];
+  for (let depth = 1; depth <= maximumDepth && frontier.length > 0; depth += 1) {
+    const next: number[] = [];
+    for (const parentId of frontier)
+      for (const childId of index.childIdsByParent.get(parentId) ?? [])
+        if (!distances.has(childId)) {
+          distances.set(childId, depth);
+          next.push(childId);
+        }
+    frontier = next.sort((left, right) => left - right);
+  }
+  return distances;
+}
+
+function indexedSiblingIds(index: FamilyProjectionIndex, personId: number): readonly number[] {
+  const siblings = new Set<number>();
+  for (const parentId of index.parentIdsByChild.get(personId) ?? [])
+    for (const childId of index.childIdsByParent.get(parentId) ?? [])
+      if (childId !== personId) siblings.add(childId);
+  return Object.freeze([...siblings].sort((left, right) => left - right));
+}
+
+function indexedExtendedKinIds(
+  index: FamilyProjectionIndex,
+  personId: number,
+  populationBound: number,
+): readonly number[] {
+  const ancestors = indexedAncestors(index, personId, 3);
+  const directAncestors = indexedAncestors(index, personId, populationBound);
+  const directDescendants = indexedDescendants(index, personId, populationBound);
+  const siblings = new Set(indexedSiblingIds(index, personId));
+  const kin = new Set<number>();
+  for (const ancestorId of ancestors.keys()) {
+    for (const candidateId of indexedDescendants(index, ancestorId, 3).keys()) {
+      if (
+        candidateId !== personId &&
+        !directAncestors.has(candidateId) &&
+        !directDescendants.has(candidateId) &&
+        !siblings.has(candidateId)
+      )
+        kin.add(candidateId);
+    }
+  }
+  return Object.freeze([...kin].sort((left, right) => left - right));
+}
+
 function projectSociety(state: WorldState): SocietyProjection {
   const society = state.civilization.society;
+  const familyIndex = familyProjectionIndex(society.interpersonal.familyBonds);
   const eventsById = new Map(state.eventLog.map((event) => [event.id, event]));
   const culturesById = new Map(society.cultures.map((culture) => [culture.id, culture]));
   const leaderName =
     society.people.find((person) => person.id === society.institution.leaderId)?.name ?? 'None';
   const people = society.people.map((person) => {
     const ageYears = Math.max(0, Math.floor((state.tick - person.birthTick) / society.yearTicks));
+    const childArrival = society.interpersonal.childArrivals.find(
+      (arrival) => arrival.childId === person.id,
+    );
     return Object.freeze({
       id: person.id,
       name: person.name,
@@ -217,6 +557,27 @@ function projectSociety(state: WorldState): SocietyProjection {
       role: person.role,
       cultureName: culturesById.get(person.cultureId)?.name ?? 'Unknown culture',
       householdName: `Household ${person.householdId}`,
+      parentIds: indexedIds(familyIndex.parentIdsByChild, person.id),
+      guardianIds: indexedIds(familyIndex.guardianIdsByChild, person.id),
+      childIds: indexedIds(familyIndex.childIdsByParent, person.id),
+      siblingIds: indexedSiblingIds(familyIndex, person.id),
+      extendedKinIds: indexedExtendedKinIds(familyIndex, person.id, society.people.length),
+      childArrival:
+        childArrival === undefined
+          ? null
+          : Object.freeze({
+              tick: childArrival.tick,
+              eventId: childArrival.eventId,
+              eligibilityEventId: childArrival.eligibilityEventId,
+              policy: childArrival.policy,
+              householdId: childArrival.householdId,
+              guardianIds: Object.freeze([...childArrival.guardianIds]),
+              partnerRelationshipId: childArrival.partnerRelationshipId,
+              partnerKindAtArrival: childArrival.partnerKindAtArrival,
+              minimumPartnerTrustAtArrival: childArrival.minimumPartnerTrustAtArrival,
+              minimumPartnerCommitmentAtArrival: childArrival.minimumPartnerCommitmentAtArrival,
+              selectionScoreAtArrival: childArrival.selectionScoreAtArrival,
+            }),
       biography: Object.freeze(
         person.biographyEventIds.map((eventId) => {
           const source = eventsById.get(eventId);
@@ -234,6 +595,7 @@ function projectSociety(state: WorldState): SocietyProjection {
       belief: culture.belief,
       tradition: culture.tradition,
       architectureStyle: culture.architectureStyle,
+      familyPolicy: culture.familyPolicy,
     }),
   );
   const timelinePage = projectTimelinePage(state, state.eventLog.length);
@@ -509,6 +871,47 @@ export function createSimulationRuntime(post: RuntimePost): SimulationRuntime {
     });
   }
 
+  function requestRelationshipPage(request: RequestRelationshipPageRequest): void {
+    if (world === undefined) {
+      fault(
+        request.requestId,
+        'not-initialized',
+        'Initialize a world before inspecting relationships.',
+      );
+      return;
+    }
+    const page = projectRelationshipPage(world, request.personId, request.offset);
+    emit({
+      type: 'relationshipPage',
+      protocolVersion: WORKER_PROTOCOL_VERSION,
+      requestId: request.requestId,
+      ...page,
+    });
+  }
+
+  function requestRelationshipEventPage(request: RequestRelationshipEventPageRequest): void {
+    if (world === undefined) {
+      fault(
+        request.requestId,
+        'not-initialized',
+        'Initialize a world before inspecting relationship history.',
+      );
+      return;
+    }
+    const page = projectRelationshipEventPage(
+      world,
+      request.personId,
+      request.relationshipId,
+      request.offset,
+    );
+    emit({
+      type: 'relationshipEventPage',
+      protocolVersion: WORKER_PROTOCOL_VERSION,
+      requestId: request.requestId,
+      ...page,
+    });
+  }
+
   function performOfflineCatchUp(request: PerformOfflineCatchUpRequest): void {
     if (world === undefined) {
       fault(request.requestId, 'not-initialized', 'Initialize a world before offline catch-up.');
@@ -589,6 +992,12 @@ export function createSimulationRuntime(post: RuntimePost): SimulationRuntime {
             return;
           case 'requestTimelinePage':
             requestTimelinePage(message);
+            return;
+          case 'requestRelationshipPage':
+            requestRelationshipPage(message);
+            return;
+          case 'requestRelationshipEventPage':
+            requestRelationshipEventPage(message);
             return;
           case 'performOfflineCatchUp':
             performOfflineCatchUp(message);

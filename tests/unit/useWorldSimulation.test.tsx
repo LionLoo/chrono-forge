@@ -64,6 +64,27 @@ function createLoadFaultWorker(): SimulationWorkerPort {
   return port;
 }
 
+function createLoadReadyOnlyWorker(): SimulationWorkerPort {
+  let active = true;
+  const runtime = createSimulationRuntime((message: WorkerToUiMessage) => {
+    if (message.type === 'metrics' && message.requestId.startsWith('load-')) return;
+    queueMicrotask(() => {
+      if (active) port.onmessage?.(new MessageEvent('message', { data: message }));
+    });
+  });
+  const port: SimulationWorkerPort = {
+    onerror: null,
+    onmessage: null,
+    postMessage(message: UiToWorkerMessage) {
+      runtime.handleMessage(message);
+    },
+    terminate() {
+      active = false;
+    },
+  };
+  return port;
+}
+
 describe('world simulation UI gateway', () => {
   it('loads and browses bounded factual history pages through the real Worker gateway', async () => {
     const { result } = renderHook(() => useWorldSimulation(createRuntimeWorker));
@@ -89,6 +110,62 @@ describe('world simulation UI gateway', () => {
       id: 1,
       tick: 0,
       summary: 'The founding world formed.',
+    });
+  });
+
+  it('treats a ready frame as the authoritative completion acknowledgement for a load', async () => {
+    const { result } = renderHook(() => useWorldSimulation(createLoadReadyOnlyWorker));
+    await waitFor(() => expect(result.current.status).toBe('ready'));
+    const snapshot = serializeWorldSnapshot(stepWorld(createInitialWorld([5, 7, 11, 13]), 100));
+
+    await expect(act(async () => result.current.loadSnapshot(snapshot))).resolves.toBeUndefined();
+    expect(result.current.frame?.tick).toBe(100);
+  });
+
+  it('requests bounded relationship and shared-event pages, then clears both after a frame change', async () => {
+    const { result } = renderHook(() => useWorldSimulation(createRuntimeWorker));
+    await waitFor(() => expect(result.current.status).toBe('ready'));
+    const lived = stepWorld(
+      createInitialWorld([19, 23, 29, 31], { societyYearTicks: 5_000 }),
+      120_000,
+    );
+    const relationship = [
+      ...lived.civilization.society.interpersonal.active,
+      ...lived.civilization.society.interpersonal.archived,
+    ].find((candidate) => candidate.sharedEvents.length > 0)!;
+    await act(async () => result.current.loadSnapshot(serializeWorldSnapshot(lived)));
+
+    act(() => result.current.requestRelationshipPage(relationship.firstPersonId, 0));
+    await waitFor(() =>
+      expect(result.current.relationshipPage.personId).toBe(relationship.firstPersonId),
+    );
+    expect(result.current.relationshipPage.relationships.length).toBeGreaterThan(0);
+    act(() =>
+      result.current.requestRelationshipEventPage(
+        relationship.firstPersonId,
+        `social:${relationship.id}`,
+        0,
+      ),
+    );
+    await waitFor(() =>
+      expect(result.current.relationshipEventPage.relationshipId).toBe(`social:${relationship.id}`),
+    );
+    expect(result.current.relationshipEventPage.events.length).toBeGreaterThan(0);
+
+    act(() => result.current.advanceTicks(1));
+    await waitFor(() => expect(result.current.frame?.tick).toBe(120_001));
+    expect(result.current.relationshipPage).toStrictEqual({
+      personId: null,
+      offset: 0,
+      total: 0,
+      relationships: [],
+    });
+    expect(result.current.relationshipEventPage).toStrictEqual({
+      personId: null,
+      relationshipId: null,
+      offset: 0,
+      total: 0,
+      events: [],
     });
   });
 

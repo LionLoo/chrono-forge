@@ -1,5 +1,7 @@
 import { findLocalPath } from '../pathfinding';
 import { deriveXoshiro128State, type Xoshiro128State, Xoshiro128StarStar } from '../random';
+import type { ChildArrivalEligibilityEvidence } from '../relationships';
+import { relationshipDecisionInfluence } from '../relationships/lifecycle';
 import {
   NORMAL_YEAR_TICKS,
   SOCIETY_PULSE_TICKS,
@@ -96,14 +98,6 @@ export interface AgentPlanStep {
   readonly targetStructureId: number;
 }
 
-export interface Relationship {
-  readonly id: number;
-  readonly firstAgentId: number;
-  readonly secondAgentId: number;
-  readonly affinity: number;
-  readonly trust: number;
-}
-
 export interface SettlementStructure {
   readonly id: number;
   readonly kind: StructureKind;
@@ -136,13 +130,11 @@ export interface ResourceDepletion {
 
 export interface CivilizationState {
   readonly nextAgentId: number;
-  readonly nextRelationshipId: number;
   readonly nextStructureId: number;
   readonly nextMemoryId: number;
   readonly centerTileIndex: number;
   readonly stockpile: SettlementStockpile;
   readonly agents: readonly SettlementAgent[];
-  readonly relationships: readonly Relationship[];
   readonly structures: readonly SettlementStructure[];
   readonly society: SocietyState;
   readonly resourceDepletion: readonly ResourceDepletion[];
@@ -172,6 +164,7 @@ export interface SettlementEventDraft {
   readonly targetId: number;
   readonly tileIndex: number;
   readonly amount: number;
+  readonly childArrivalEligibility?: ChildArrivalEligibilityEvidence;
 }
 
 export interface SettlementPulseResult {
@@ -301,8 +294,15 @@ function societyObservation(agent: SettlementAgent): SocietyPersonObservation {
     alive: agent.alive,
     health: agent.health,
     tileIndex: agent.tileIndex,
+    traits: agent.traits,
     skills: agent.skills,
     occupation: agent.occupation,
+    recentEventIds: Object.freeze(
+      agent.memories
+        .map((memory) => memory.eventId)
+        .sort((left, right) => left - right)
+        .slice(-16),
+    ),
   });
 }
 
@@ -351,21 +351,6 @@ export function createInitialCivilization(
       }),
     );
   }
-  const relationships: Relationship[] = [];
-  let nextRelationshipId = 1;
-  for (let first = 1; first <= SETTLEMENT_FOUNDER_COUNT; first += 1) {
-    for (let second = first + 1; second <= SETTLEMENT_FOUNDER_COUNT; second += 1) {
-      relationships.push(
-        Object.freeze({
-          id: nextRelationshipId++,
-          firstAgentId: first,
-          secondAgentId: second,
-          affinity: 50,
-          trust: 50,
-        }),
-      );
-    }
-  }
   const society = createInitialSociety({
     seed,
     tick,
@@ -376,7 +361,6 @@ export function createInitialCivilization(
   const names = new Map(society.people.map((person) => [person.id, person.name]));
   return Object.freeze({
     nextAgentId: SETTLEMENT_FOUNDER_COUNT + 1,
-    nextRelationshipId,
     nextStructureId: 1,
     nextMemoryId: 1,
     centerTileIndex,
@@ -384,7 +368,6 @@ export function createInitialCivilization(
     agents: Object.freeze(
       agents.map((agent) => Object.freeze({ ...agent, name: names.get(agent.id) ?? agent.name })),
     ),
-    relationships: Object.freeze(relationships),
     structures: Object.freeze([]),
     society,
     resourceDepletion: Object.freeze([]),
@@ -520,15 +503,18 @@ function bestResourceTile(
   return [bestTile, bestScore];
 }
 
-function socialContext(agent: SettlementAgent, relationships: readonly Relationship[]): number {
-  const linked = relationships.filter(
+function socialContext(agent: SettlementAgent, society: SocietyState): number {
+  const linked = society.interpersonal.active.filter(
     (relationship) =>
-      relationship.firstAgentId === agent.id || relationship.secondAgentId === agent.id,
+      relationship.firstPersonId === agent.id || relationship.secondPersonId === agent.id,
   );
   if (linked.length === 0) return 0;
   return Math.trunc(
-    linked.reduce((total, relationship) => total + relationship.affinity + relationship.trust, 0) /
-      linked.length,
+    linked.reduce(
+      (total, relationship) =>
+        total + relationshipDecisionInfluence(relationship, agent.id, 'help'),
+      0,
+    ) / linked.length,
   );
 }
 
@@ -557,7 +543,7 @@ function selectDecision(
       candidate.status === 'building' ||
       candidate.status === 'damaged',
   );
-  const social = socialContext(agent, civilization.relationships);
+  const social = socialContext(agent, civilization.society);
   const noShelter = !civilization.structures.some(
     (candidate) => candidate.kind === 'shelter' && candidate.status === 'operational',
   );
@@ -1121,6 +1107,7 @@ function applySocietyPulse(
   const relief = new Map(
     pulse.roleOrNeedReliefPatches.map((patch) => [patch.personId, patch] as const),
   );
+  const skillGrowth = new Map(pulse.skillPatches.map((patch) => [patch.personId, patch] as const));
   const stockpile: MutableStockpile = { ...pulse.communalStockpile };
   let agents = civilization.agents.map((agent) => {
     if (deaths.has(agent.id)) {
@@ -1140,13 +1127,17 @@ function applySocietyPulse(
       });
     }
     const patch = relief.get(agent.id);
-    return patch === undefined
-      ? agent
-      : Object.freeze({
-          ...agent,
-          hunger: clamp(agent.hunger - patch.hungerRelief, 0, 100),
-          thirst: clamp(agent.thirst - patch.thirstRelief, 0, 100),
-        });
+    const learned = skillGrowth.get(agent.id);
+    if (patch === undefined && learned === undefined) return agent;
+    const skills = [...agent.skills] as [number, number, number, number];
+    if (learned !== undefined)
+      skills[learned.skillIndex] = clamp(skills[learned.skillIndex] + learned.amount, 0, 100);
+    return Object.freeze({
+      ...agent,
+      hunger: clamp(agent.hunger - (patch?.hungerRelief ?? 0), 0, 100),
+      thirst: clamp(agent.thirst - (patch?.thirstRelief ?? 0), 0, 100),
+      skills: Object.freeze(skills),
+    });
   });
   const exchangeVolume = pulse.society.offers.reduce(
     (total, offer) => total + offer.fulfilledAmount,
@@ -1178,39 +1169,11 @@ function applySocietyPulse(
   )) {
     agents = [...agents, agentFromSocietyDraft(draft, { ...civilization, agents })];
   }
-  const relationshipPairs = new Set(
-    civilization.relationships.map(
-      (relationship) => `${relationship.firstAgentId}:${relationship.secondAgentId}`,
-    ),
-  );
-  let nextRelationshipId = civilization.nextRelationshipId;
-  const relationships = [...civilization.relationships];
-  for (const draft of pulse.personBirthDrafts) {
-    for (const parentId of draft.parentIds) {
-      if (parentId === 0) continue;
-      const firstAgentId = Math.min(parentId, draft.id);
-      const secondAgentId = Math.max(parentId, draft.id);
-      const key = `${firstAgentId}:${secondAgentId}`;
-      if (relationshipPairs.has(key)) continue;
-      relationshipPairs.add(key);
-      relationships.push(
-        Object.freeze({
-          id: nextRelationshipId++,
-          firstAgentId,
-          secondAgentId,
-          affinity: 75,
-          trust: 70,
-        }),
-      );
-    }
-  }
   const next: CivilizationState = Object.freeze({
     ...civilization,
     nextAgentId: Math.max(civilization.nextAgentId, ...agents.map((agent) => agent.id + 1)),
-    nextRelationshipId,
     stockpile: freezeStockpile(stockpile),
     agents: sortedAgents(agents),
-    relationships: Object.freeze(relationships.sort((left, right) => left.id - right.id)),
     society: pulse.society,
   });
   const events = pulse.events.map((draft) =>
@@ -1223,6 +1186,9 @@ function applySocietyPulse(
       targetId: draft.target.id,
       tileIndex: civilization.centerTileIndex,
       amount: draft.amount,
+      ...(draft.childArrivalEligibility === undefined
+        ? {}
+        : { childArrivalEligibility: draft.childArrivalEligibility }),
     }),
   );
   assertCivilizationInvariants(next, terrain);
@@ -1448,21 +1414,11 @@ export function advanceCivilization(
       routeCursor: 0,
     });
   });
-  const relationships = Object.freeze(
-    civilization.relationships.map((relationship) =>
-      Object.freeze({
-        ...relationship,
-        affinity: clamp(relationship.affinity + (systemRng.nextInt(3) - 1), 0, 100),
-        trust: clamp(relationship.trust + 1, 0, 100),
-      }),
-    ),
-  );
   let next: CivilizationState = Object.freeze({
     ...civilization,
     nextStructureId,
     stockpile: freezeStockpile(stockpile),
     agents: sortedAgents(agents),
-    relationships,
     structures: Object.freeze([...structures].sort((left, right) => left.id - right.id)),
     resourceDepletion: depletion,
     pathDemand,
@@ -1609,11 +1565,9 @@ export function civilizationDto(
     centerTileIndex: civilization.centerTileIndex,
     nextAgentId: civilization.nextAgentId,
     nextMemoryId: civilization.nextMemoryId,
-    nextRelationshipId: civilization.nextRelationshipId,
     nextStructureId: civilization.nextStructureId,
     operationCount: civilization.operationCount,
     pathDemand: Array.from(civilization.pathDemand),
-    relationships: civilization.relationships.map((relationship) => ({ ...relationship })),
     resourceDepletion: civilization.resourceDepletion.map((entry) => ({ ...entry })),
     society: societyDto(civilization.society),
     stockpile: { ...civilization.stockpile },
@@ -1700,18 +1654,6 @@ export function assertCivilizationInvariants(
   for (const person of civilization.society.people) {
     if (civilization.agents.find((agent) => agent.id === person.id)?.name !== person.name)
       throw new Error('Settlement and society person names must match.');
-  }
-  const relationshipPairs = new Set<string>();
-  for (const relationship of civilization.relationships) {
-    if (
-      !agentIds.has(relationship.firstAgentId) ||
-      !agentIds.has(relationship.secondAgentId) ||
-      relationship.firstAgentId >= relationship.secondAgentId
-    )
-      throw new Error('Relationship references are invalid.');
-    const pair = `${relationship.firstAgentId}:${relationship.secondAgentId}`;
-    if (relationshipPairs.has(pair)) throw new Error('Relationship pairs must be unique.');
-    relationshipPairs.add(pair);
   }
   const structureIds = new Set<number>();
   const activeStructureTiles = new Set<number>();
