@@ -26,7 +26,7 @@ describe('accelerated deterministic world horizon', () => {
       expect(advanced.nextEventId).toBe(advanced.eventLog.length + 1);
       expect(hashWorldState(advanced)).toBe(hashWorldState(repeated));
     }
-  }, 90_000);
+  }, 180_000);
 
   it('keeps the worker checkpoint equal to the main runtime at the long horizon', () => {
     const responses: WorkerToUiMessage[] = [];

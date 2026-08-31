@@ -8,6 +8,7 @@ import {
   type RelationshipKind,
 } from '../../src/simulation/relationships';
 import {
+  applyRelationshipExperience,
   advanceInterpersonalLifecycle,
   relationshipDecisionInfluence,
   selectPreferredRelatedPerson,
@@ -94,6 +95,38 @@ function at(state: InterpersonalState, tick: number): InterpersonalState {
 }
 
 describe('M4.5 deterministic relationship lifecycle', () => {
+  it('applies bounded factual M5 crisis experiences to the existing sparse bond', () => {
+    const population = people(2);
+    const initial = stateWith(population, edge(1, 'friend'));
+    const assisted = applyRelationshipExperience(initial, population, {
+      tick: YEAR,
+      firstPersonId: 1,
+      secondPersonId: 2,
+      kind: 'crisis-assistance',
+      amount: 20,
+    });
+    const changed = findActiveRelationship(assisted, 1, 2)!;
+
+    expect(changed.firstToSecond.trust).toBeGreaterThan(
+      findActiveRelationship(initial, 1, 2)!.firstToSecond.trust,
+    );
+    expect(changed.secondToFirst.closeness).toBeGreaterThan(
+      findActiveRelationship(initial, 1, 2)!.secondToFirst.closeness,
+    );
+    expect(changed.lastInteractionTick).toBe(YEAR);
+    expect(changed.trend).toBe('improving');
+
+    const abandoned = applyRelationshipExperience(assisted, population, {
+      tick: YEAR * 2,
+      firstPersonId: 1,
+      secondPersonId: 2,
+      kind: 'crisis-abandonment',
+      amount: 30,
+    });
+    expect(findActiveRelationship(abandoned, 1, 2)!.firstToSecond.grievance).toBeGreaterThan(0);
+    expect(findActiveRelationship(abandoned, 1, 2)!.trend).toBe('deteriorating');
+  });
+
   it('is repeatable and bounds yearly candidate evaluations without a population pair scan', () => {
     const population = people(160);
     const first = createInitialInterpersonalState([11, 12, 13, 14], 0, population);

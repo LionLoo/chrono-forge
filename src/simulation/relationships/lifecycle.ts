@@ -78,6 +78,17 @@ export interface RelationshipLifecycleResult {
   readonly events: readonly RelationshipLifecycleEvent[];
 }
 
+export type RelationshipExperienceKind =
+  'crisis-assistance' | 'shared-trauma' | 'crisis-abandonment';
+
+export interface RelationshipExperienceInput {
+  readonly tick: number;
+  readonly firstPersonId: number;
+  readonly secondPersonId: number;
+  readonly kind: RelationshipExperienceKind;
+  readonly amount: number;
+}
+
 export type RelationshipDecisionDomain =
   'help' | 'family' | 'migration' | 'knowledge' | 'politics' | 'conflict';
 
@@ -736,6 +747,83 @@ export function advanceInterpersonalLifecycle(
   });
   assertInterpersonalInvariants(next, people);
   return Object.freeze({ state: next, events: Object.freeze(events) });
+}
+
+/**
+ * Applies one factual M5 experience to an existing salient edge. The immutable
+ * source event is attached separately after the world assigns its stable id.
+ */
+export function applyRelationshipExperience(
+  state: InterpersonalState,
+  people: readonly InterpersonalPersonInput[],
+  input: RelationshipExperienceInput,
+): InterpersonalState {
+  assertInterpersonalInvariants(state, people);
+  if (
+    !Number.isSafeInteger(input.tick) ||
+    input.tick < state.tick ||
+    !Number.isSafeInteger(input.amount) ||
+    input.amount < 1 ||
+    input.amount > 100 ||
+    input.firstPersonId === input.secondPersonId
+  )
+    throw new RangeError('Relationship experience input is invalid.');
+  const existing = findActiveRelationship(state, input.firstPersonId, input.secondPersonId);
+  if (existing === undefined) return state;
+
+  const delta = Math.max(1, Math.floor(input.amount / 5));
+  const half = Math.max(1, Math.floor(delta / 2));
+  const revise = (
+    direction: RelationshipDirectionalState,
+    recipient: boolean,
+  ): RelationshipDirectionalState => {
+    switch (input.kind) {
+      case 'crisis-assistance':
+        return directed(
+          direction.affinity + half,
+          direction.trust + (recipient ? delta : half),
+          direction.closeness + delta,
+          direction.commitment + half,
+          direction.grievance - delta,
+        );
+      case 'shared-trauma':
+        return directed(
+          direction.affinity + half,
+          direction.trust + half,
+          direction.closeness + delta,
+          direction.commitment + half,
+          direction.grievance + half,
+        );
+      case 'crisis-abandonment':
+        return directed(
+          direction.affinity - delta,
+          direction.trust - delta,
+          direction.closeness - half,
+          direction.commitment - delta,
+          direction.grievance + delta,
+        );
+    }
+  };
+  const firstIsCanonical = existing.firstPersonId === input.firstPersonId;
+  const firstToSecond = revise(existing.firstToSecond, firstIsCanonical);
+  const secondToFirst = revise(existing.secondToFirst, !firstIsCanonical);
+  const updated = Object.freeze({
+    ...existing,
+    changedTick: input.tick,
+    lastInteractionTick: input.tick,
+    trend:
+      input.kind === 'crisis-abandonment' ? ('deteriorating' as const) : ('improving' as const),
+    firstToSecond,
+    secondToFirst,
+  });
+  const next = Object.freeze({
+    ...state,
+    tick: input.tick,
+    active: Object.freeze(state.active.map((edge) => (edge.id === existing.id ? updated : edge))),
+    operationCount: state.operationCount + 1,
+  });
+  assertInterpersonalInvariants(next, people);
+  return next;
 }
 
 export function relationshipDecisionInfluence(

@@ -7,6 +7,7 @@ import {
   projectionTransferables,
   validateUiToWorkerMessage,
   type AdvanceTicksRequest,
+  type DevelopmentProjection,
   type FrameDeltaResponse,
   type InitializeRequest,
   type LoadRequest,
@@ -38,6 +39,7 @@ import type {
   SharedRelationshipEvent,
 } from '../simulation/relationships';
 import {
+  applyWorldIntervention,
   appendWorldEvent,
   createInitialWorld,
   hashWorldState,
@@ -61,6 +63,32 @@ export type RuntimePost = (message: WorkerToUiMessage, transfer: readonly ArrayB
 
 export interface SimulationRuntime {
   readonly handleMessage: (message: unknown) => void;
+}
+
+function projectDevelopment(state: WorldState): DevelopmentProjection {
+  return Object.freeze({
+    researchFocusId: state.development.researchFocusId,
+    knowledge: Object.freeze(
+      state.development.knowledge.map((record) =>
+        Object.freeze({ id: record.id, status: record.status, progress: record.progress }),
+      ),
+    ),
+    conditions: Object.freeze({ ...state.development.conditions }),
+    activeCrises: Object.freeze(
+      state.development.activeCrises.map((crisis) =>
+        Object.freeze({
+          id: crisis.id,
+          kind: crisis.kind,
+          severity: crisis.severity,
+          startedTick: crisis.startedTick,
+          triggerCondition: crisis.triggerCondition,
+          triggerValue: crisis.triggerValue,
+        }),
+      ),
+    ),
+    recoveredCrisisCount: state.development.crisisHistory.length,
+    operationCount: state.development.operationCount,
+  });
 }
 
 function assertValidTicks(ticks: number): void {
@@ -722,6 +750,7 @@ export function projectWorldFrame(state: WorldState): WorldFrameProjection {
   }
   const settlementSummary = projectSettlementSummary(state.civilization, visibleStructures);
   const society = projectSociety(state);
+  const development = projectDevelopment(state);
 
   return Object.freeze({
     version: WORKER_PROTOCOL_VERSION,
@@ -745,6 +774,7 @@ export function projectWorldFrame(state: WorldState): WorldFrameProjection {
     structureCondition,
     settlementSummary,
     society,
+    development,
   });
 }
 
@@ -769,7 +799,11 @@ export function createSimulationRuntime(post: RuntimePost): SimulationRuntime {
       type: 'metrics',
       protocolVersion: WORKER_PROTOCOL_VERSION,
       requestId,
-      metrics: { tick: world?.tick ?? 0, runMode, queuedCommandCount: 0 },
+      metrics: {
+        tick: world?.tick ?? 0,
+        runMode,
+        queuedCommandCount: world?.development.pendingInterventions.length ?? 0,
+      },
     });
   }
 
@@ -981,11 +1015,31 @@ export function createSimulationRuntime(post: RuntimePost): SimulationRuntime {
             metrics(message.requestId);
             return;
           case 'queueCommand':
-            fault(
-              message.requestId,
-              'unsupported-operation',
-              'Direct simulation commands are unsupported; M3 settlement work remains autonomous.',
-            );
+            if (world === undefined) {
+              fault(
+                message.requestId,
+                'not-initialized',
+                'Initialize a world before queueing an intervention.',
+              );
+              return;
+            }
+            world = applyWorldIntervention(world, {
+              kind: message.command.payload.interventionKind,
+              intensity: message.command.payload.intensity,
+              polarity: message.command.payload.polarity,
+              targetTileIndex: message.command.payload.targetTileIndex,
+            });
+            emit({
+              type: 'commandAccepted',
+              protocolVersion: WORKER_PROTOCOL_VERSION,
+              requestId: message.requestId,
+              command: message.command,
+              sequence: world.development.nextInterventionId - 1,
+              targetTick:
+                (Math.floor(world.tick / world.config.societyYearTicks) + 1) *
+                world.config.societyYearTicks,
+            });
+            metrics(message.requestId);
             return;
           case 'requestSave':
             requestSave(message);

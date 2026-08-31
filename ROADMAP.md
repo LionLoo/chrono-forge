@@ -2,7 +2,7 @@
 
 `PRODUCT_SPEC.md` is the product contract and `PLAN.md` contains the decision-complete acceptance criteria, branches, and validation for each item. Milestones run in this order:
 
-Current checkpoint: M0-M4.5 are merged and verified on `main` at `cb7c5d0`; private PR #7, exact-head CI `33262229797`, and merged-main CI `33263909776` are green. M5-M12 and release remain blocking.
+Current checkpoint: M0-M4.5 are merged and verified on `main` at `dfc876d`. M5 is locally acceptance-complete on `feature/emergent-technology-disasters` and awaits its reviewed green PR/main integration. M6-M12 and release remain blocking.
 
 | Order | Milestone                                                    | Outcome                                                                                       |
 | ----- | ------------------------------------------------------------ | --------------------------------------------------------------------------------------------- |

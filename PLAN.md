@@ -86,6 +86,8 @@ Implement a contextual knowledge graph whose discoveries depend on prior knowled
 
 Acceptance: multiple fixed seeds demonstrate different branch order, specialization, delay/skips, and occasional knowledge loss; technologies never violate contextual requirements; each disaster arises from modeled conditions, changes inhabitants/world/economy, and admits autonomous response/recovery; interventions alter conditions without selecting exact outcomes. At least one locked crisis proves that an existing salient bond changes who protects, assists, cares for, or evacuates with whom, and that any bereavement or relationship transition is event-grounded and survives reload.
 
+Locked scenario contract: development advances once per civil year from one world-owned bounded state after normal society work. Accelerated seeds `[7,11,13,17]`, `[19,23,29,31]`, `[37,41,43,47]`, and `[53,59,61,67]` are observed at years 5/25/60 for divergent technology, relationship-ranked crisis response, and autonomous crisis recovery. Unit gates cover prerequisite/context exclusion, every listed modeled crisis precursor and effect, all closed intervention categories, bond-state consequences, invariant rejection, and recovery. Integration gates cover arbitrary tick partitions, v4-to-v5 migration, canonical save/reload, Worker command/projection bounds, factual event/back-link preservation, long-run hashes/operation counts, and regression of the M4 non-disaster control path.
+
 ## M6 — Multiple settlements, civilizations, diplomacy, and conflict
 
 Branch: `feature/multiple-civilizations`

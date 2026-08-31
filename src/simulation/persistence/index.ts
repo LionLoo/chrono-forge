@@ -1,6 +1,17 @@
 import { hashCanonicalJson } from '../canonical';
 import type { Xoshiro128State } from '../random';
 import {
+  DISASTER_KINDS,
+  KNOWLEDGE_DEFINITIONS,
+  assertDevelopmentInvariants,
+  createInitialDevelopment,
+  type ActiveCrisis,
+  type ConditionId,
+  type DevelopmentIntervention,
+  type DevelopmentState,
+  type KnowledgeRecord,
+} from '../development';
+import {
   attachFactualMemories,
   createCivilizationAtTick,
   MAX_AGENT_KNOWN_TILES,
@@ -58,9 +69,9 @@ import {
 } from '../world';
 
 export const WORLD_SNAPSHOT_FORMAT = 'chrono-forge-world';
-export const WORLD_SNAPSHOT_FORMAT_VERSION = 4;
-export const WORLD_ENGINE_VERSION = 4;
-export const WORLD_CONTENT_VERSION = 4;
+export const WORLD_SNAPSHOT_FORMAT_VERSION = 5;
+export const WORLD_ENGINE_VERSION = 5;
+export const WORLD_CONTENT_VERSION = 5;
 
 const MAX_WORLD_TILES = 1_000_000;
 const MAX_WORLD_SNAPSHOT_BYTES = 50 * 1024 * 1024;
@@ -190,6 +201,32 @@ const VERSION_FOUR_CIVILIZATION_KEYS = [
   'structures',
   'systemRng',
 ] as const;
+const DEVELOPMENT_CONDITION_IDS = [
+  'droughtPressure',
+  'floodPressure',
+  'firePressure',
+  'stormPressure',
+  'seismicPressure',
+  'diseasePressure',
+  'faminePressure',
+  'resourcePressure',
+  'politicalPressure',
+  'accidentPressure',
+  'meteorPressure',
+  'protection',
+] as const satisfies readonly ConditionId[];
+const KNOWLEDGE_STATUSES = new Set(['unknown', 'known', 'lost']);
+const INTERVENTION_KINDS = new Set([
+  'weather',
+  'resource',
+  'organism',
+  'omen',
+  'artifact',
+  'protection',
+  'disaster',
+  'alien-signal',
+]);
+const DISASTER_CONDITIONS = new Map(DISASTER_KINDS.map((entry) => [entry.kind, entry.condition]));
 
 const AGENT_ACTIONS = new Set<AgentAction>([
   'idle',
@@ -443,6 +480,337 @@ function parseRng(value: unknown, name: string): readonly [number, number, numbe
     throw new Error(`${name} must not be all zero.`);
   }
   return Object.freeze([values[0]!, values[1]!, values[2]!, values[3]!]);
+}
+
+function parseDevelopment(value: unknown, worldTick: number, tileCount: number): DevelopmentState {
+  if (!isRecord(value)) throw new Error('Snapshot development must be an object.');
+  assertExactKeys(
+    value,
+    [
+      'activeCrises',
+      'conditions',
+      'crisisHistory',
+      'disasterRng',
+      'knowledge',
+      'nextCrisisId',
+      'nextInterventionId',
+      'operationCount',
+      'pendingInterventions',
+      'researchFocusId',
+      'rng',
+      'tick',
+    ],
+    'Snapshot development',
+  );
+  const tick = safeInteger(value.tick, 'Development tick', 0, worldTick);
+  const nullableTick = (candidate: unknown, name: string): number | null =>
+    candidate === null ? null : safeInteger(candidate, name, 0, tick);
+  if (!isUnknownArray(value.knowledge) || value.knowledge.length !== KNOWLEDGE_DEFINITIONS.length)
+    throw new Error('Development knowledge records are invalid.');
+  const knowledge = Object.freeze(
+    value.knowledge.map((candidate, index) => {
+      if (!isRecord(candidate))
+        throw new Error(`Development knowledge ${index} must be an object.`);
+      assertExactKeys(
+        candidate,
+        ['discoveredTick', 'evidence', 'id', 'lostTick', 'progress', 'recoveredTick', 'status'],
+        `Development knowledge ${index}`,
+      );
+      const definition = KNOWLEDGE_DEFINITIONS[index];
+      if (
+        definition === undefined ||
+        candidate.id !== definition.id ||
+        !KNOWLEDGE_STATUSES.has(candidate.status as string)
+      )
+        throw new Error('Development knowledge records are invalid.');
+      const discoveredTick = nullableTick(
+        candidate.discoveredTick,
+        `Development knowledge ${index} discovered tick`,
+      );
+      const lostTick = nullableTick(candidate.lostTick, `Development knowledge ${index} lost tick`);
+      const recoveredTick = nullableTick(
+        candidate.recoveredTick,
+        `Development knowledge ${index} recovered tick`,
+      );
+      const status = candidate.status as KnowledgeRecord['status'];
+      const evidence = (() => {
+        if (candidate.evidence === null) return null;
+        if (!isRecord(candidate.evidence))
+          throw new Error(`Development knowledge ${index} evidence must be an object.`);
+        assertExactKeys(
+          candidate.evidence,
+          ['kind', 'prerequisiteIds', 'requirements', 'tick'],
+          `Development knowledge ${index} evidence`,
+        );
+        if (
+          candidate.evidence.kind !== 'founding' &&
+          candidate.evidence.kind !== 'discovery' &&
+          candidate.evidence.kind !== 'recovery'
+        )
+          throw new Error('Development knowledge evidence kind is invalid.');
+        if (!isUnknownArray(candidate.evidence.prerequisiteIds))
+          throw new Error('Development knowledge evidence prerequisites are invalid.');
+        const prerequisiteIds = Object.freeze(
+          candidate.evidence.prerequisiteIds.map((id, prerequisiteIndex) => {
+            if (id !== definition.prerequisites[prerequisiteIndex])
+              throw new Error('Development knowledge evidence prerequisites are invalid.');
+            return id as KnowledgeRecord['id'];
+          }),
+        );
+        if (prerequisiteIds.length !== definition.prerequisites.length)
+          throw new Error('Development knowledge evidence prerequisites are invalid.');
+        if (!isUnknownArray(candidate.evidence.requirements))
+          throw new Error('Development knowledge evidence requirements are invalid.');
+        const requirements = Object.freeze(
+          candidate.evidence.requirements.map((requirement, requirementIndex) => {
+            if (!isRecord(requirement))
+              throw new Error('Development knowledge evidence requirements are invalid.');
+            assertExactKeys(
+              requirement,
+              ['id', 'kind', 'minimum', 'value'],
+              `Development knowledge ${index} evidence requirement ${requirementIndex}`,
+            );
+            const expected = definition.context[requirementIndex];
+            if (
+              expected === undefined ||
+              requirement.kind !== expected.kind ||
+              requirement.id !== expected.id ||
+              requirement.minimum !== expected.minimum
+            )
+              throw new Error('Development knowledge evidence requirements are invalid.');
+            return Object.freeze({
+              kind: expected.kind,
+              id: expected.id,
+              minimum: expected.minimum,
+              value: safeInteger(
+                requirement.value,
+                `Development knowledge ${index} evidence requirement ${requirementIndex} value`,
+              ),
+            });
+          }),
+        );
+        if (requirements.length !== definition.context.length)
+          throw new Error('Development knowledge evidence requirements are invalid.');
+        return Object.freeze({
+          kind: candidate.evidence.kind,
+          tick: safeInteger(
+            candidate.evidence.tick,
+            `Development knowledge ${index} evidence tick`,
+            0,
+            tick,
+          ),
+          prerequisiteIds,
+          requirements,
+        });
+      })();
+      if (
+        (status === 'unknown' &&
+          (discoveredTick !== null ||
+            lostTick !== null ||
+            recoveredTick !== null ||
+            evidence !== null)) ||
+        (status === 'lost' && (discoveredTick === null || lostTick === null)) ||
+        (status === 'known' && discoveredTick === null) ||
+        (discoveredTick !== null && lostTick !== null && discoveredTick > lostTick)
+      )
+        throw new Error('Development knowledge dates are invalid.');
+      return Object.freeze({
+        id: definition.id,
+        status,
+        progress: safeInteger(
+          candidate.progress,
+          `Development knowledge ${index} progress`,
+          0,
+          definition.discoveryThreshold,
+        ),
+        discoveredTick,
+        lostTick,
+        recoveredTick,
+        evidence,
+      });
+    }),
+  );
+  const parseCrisis = (candidate: unknown, name: string): ActiveCrisis => {
+    if (!isRecord(candidate)) throw new Error(`${name} must be an object.`);
+    assertExactKeys(
+      candidate,
+      [
+        'id',
+        'kind',
+        'severity',
+        'startedTick',
+        'triggerCondition',
+        'triggerThreshold',
+        'triggerValue',
+      ],
+      name,
+    );
+    if (!DISASTER_CONDITIONS.has(candidate.kind as ActiveCrisis['kind']))
+      throw new Error(`${name} kind is invalid.`);
+    const kind = candidate.kind as ActiveCrisis['kind'];
+    const triggerCondition = candidate.triggerCondition as ConditionId;
+    if (triggerCondition !== DISASTER_CONDITIONS.get(kind))
+      throw new Error(`${name} trigger condition is invalid.`);
+    return Object.freeze({
+      id: safeInteger(candidate.id, `${name} id`, 1),
+      kind,
+      triggerCondition,
+      triggerValue: safeInteger(candidate.triggerValue, `${name} trigger value`, 80, 100),
+      triggerThreshold: safeInteger(
+        candidate.triggerThreshold,
+        `${name} trigger threshold`,
+        80,
+        80,
+      ),
+      startedTick: safeInteger(candidate.startedTick, `${name} started tick`, 0, tick),
+      severity: safeInteger(candidate.severity, `${name} severity`, 1, 100),
+    });
+  };
+  if (!isUnknownArray(value.activeCrises))
+    throw new Error('Development active crises must be an array.');
+  const activeCrises = Object.freeze(
+    value.activeCrises.map((candidate, index) =>
+      parseCrisis(candidate, `Development crisis ${index}`),
+    ),
+  );
+  if (!isUnknownArray(value.crisisHistory))
+    throw new Error('Development crisis history must be an array.');
+  const crisisHistory = Object.freeze(
+    value.crisisHistory.map((candidate, index) => {
+      if (!isRecord(candidate))
+        throw new Error(`Development crisis history ${index} must be an object.`);
+      assertExactKeys(
+        candidate,
+        [
+          'endedTick',
+          'id',
+          'kind',
+          'outcome',
+          'startedTick',
+          'triggerCondition',
+          'triggerThreshold',
+          'triggerValue',
+        ],
+        `Development crisis history ${index}`,
+      );
+      const active = parseCrisis(
+        {
+          id: candidate.id,
+          kind: candidate.kind,
+          triggerCondition: candidate.triggerCondition,
+          triggerValue: candidate.triggerValue,
+          triggerThreshold: candidate.triggerThreshold,
+          startedTick: candidate.startedTick,
+          severity: 1,
+        },
+        `Development crisis history ${index}`,
+      );
+      const endedTick = safeInteger(
+        candidate.endedTick,
+        `Development crisis history ${index} ended tick`,
+        active.startedTick,
+        tick,
+      );
+      if (candidate.outcome !== 'recovered')
+        throw new Error('Development crisis history outcome is invalid.');
+      return Object.freeze({
+        id: active.id,
+        kind: active.kind,
+        triggerCondition: active.triggerCondition,
+        triggerValue: active.triggerValue,
+        triggerThreshold: active.triggerThreshold,
+        startedTick: active.startedTick,
+        endedTick,
+        outcome: 'recovered' as const,
+      });
+    }),
+  );
+  if (!isUnknownArray(value.pendingInterventions))
+    throw new Error('Development pending interventions must be an array.');
+  const pendingInterventions = Object.freeze(
+    value.pendingInterventions.map((candidate, index) => {
+      if (!isRecord(candidate))
+        throw new Error(`Development intervention ${index} must be an object.`);
+      assertExactKeys(
+        candidate,
+        ['id', 'intensity', 'kind', 'polarity', 'requestedTick', 'targetTileIndex'],
+        `Development intervention ${index}`,
+      );
+      if (!INTERVENTION_KINDS.has(candidate.kind as string))
+        throw new Error('Development intervention kind is invalid.');
+      if (candidate.polarity !== 'supportive' && candidate.polarity !== 'challenging')
+        throw new Error('Development intervention polarity is invalid.');
+      return Object.freeze({
+        kind: candidate.kind as DevelopmentIntervention['kind'],
+        intensity: safeInteger(
+          candidate.intensity,
+          `Development intervention ${index} intensity`,
+          1,
+          100,
+        ),
+        polarity: candidate.polarity,
+        targetTileIndex: safeInteger(
+          candidate.targetTileIndex,
+          `Development intervention ${index} tile`,
+          0,
+          tileCount - 1,
+        ),
+        requestedTick: safeInteger(
+          candidate.requestedTick,
+          `Development intervention ${index} requested tick`,
+          0,
+          worldTick,
+        ),
+        id: safeInteger(candidate.id, `Development intervention ${index} id`, 1),
+      });
+    }),
+  );
+  const researchFocusId = value.researchFocusId;
+  if (
+    researchFocusId !== null &&
+    !KNOWLEDGE_DEFINITIONS.some((entry) => entry.id === researchFocusId)
+  )
+    throw new Error('Development focus is invalid.');
+  const conditionValue = value.conditions;
+  if (!isRecord(conditionValue)) throw new Error('Development conditions must be an object.');
+  assertExactKeys(conditionValue, DEVELOPMENT_CONDITION_IDS, 'Development conditions');
+  const conditions = Object.freeze(
+    Object.fromEntries(
+      DEVELOPMENT_CONDITION_IDS.map((condition) => [
+        condition,
+        safeInteger(conditionValue[condition], `Development condition ${condition}`, 0, 100),
+      ]),
+    ) as Record<ConditionId, number>,
+  );
+  const state: DevelopmentState = Object.freeze({
+    tick,
+    nextCrisisId: safeInteger(value.nextCrisisId, 'Development next crisis id', 1),
+    nextInterventionId: safeInteger(
+      value.nextInterventionId,
+      'Development next intervention id',
+      1,
+    ),
+    disasterRng: parseRng(value.disasterRng, 'Development disaster rng'),
+    rng: parseRng(value.rng, 'Development rng'),
+    knowledge,
+    researchFocusId: researchFocusId as DevelopmentState['researchFocusId'],
+    conditions,
+    activeCrises,
+    crisisHistory,
+    pendingInterventions,
+    operationCount: safeInteger(value.operationCount, 'Development operation count'),
+  });
+  for (let index = 1; index < pendingInterventions.length; index += 1) {
+    const previous = pendingInterventions[index - 1]!;
+    const current = pendingInterventions[index]!;
+    if (
+      previous.requestedTick > current.requestedTick ||
+      (previous.requestedTick === current.requestedTick && previous.id >= current.id)
+    )
+      throw new Error('Development interventions must be canonically sorted.');
+  }
+  assertDevelopmentInvariants(state);
+  return state;
 }
 
 function parseTuple(value: unknown, name: string): readonly [number, number, number, number] {
@@ -2551,6 +2919,7 @@ function upgradeVersionTwo(state: VersionTwoWorldState): WorldState {
     config: convertLegacyConfig(state.config),
     eventLog,
     civilization,
+    development: createInitialDevelopment(state.seed, state.tick),
   });
   assertWorldInvariants(world);
   return world;
@@ -2741,12 +3110,18 @@ function parseVersionThreeWorldPayload(value: unknown): WorldState {
     society,
   });
   assertSocietyCrossWorldReferences(society, civilization, eventLog);
-  const world: WorldState = Object.freeze({ ...legacy, config, eventLog, civilization });
+  const world: WorldState = Object.freeze({
+    ...legacy,
+    config,
+    eventLog,
+    civilization,
+    development: createInitialDevelopment(legacy.seed, legacy.tick),
+  });
   assertWorldInvariants(world);
   return world;
 }
 
-/** Parses current v4 authority; M3's dense settlement graph is deliberately absent. */
+/** Parses v4 authority before its conservative v5 development-baseline migration. */
 function parseVersionFourWorldPayload(value: unknown): WorldState {
   if (!isRecord(value)) throw new Error('Snapshot payload must be an object.');
   assertExactKeys(value, [...LEGACY_PAYLOAD_KEYS, 'civilization'], 'Snapshot payload');
@@ -2859,9 +3234,35 @@ function parseVersionFourWorldPayload(value: unknown): WorldState {
     society,
   });
   assertSocietyCrossWorldReferences(society, civilization, eventLog);
-  const world: WorldState = Object.freeze({ ...legacy, config, eventLog, civilization });
+  const world: WorldState = Object.freeze({
+    ...legacy,
+    config,
+    eventLog,
+    civilization,
+    development: createInitialDevelopment(legacy.seed, legacy.tick),
+  });
   assertWorldInvariants(world);
   return world;
+}
+
+function parseVersionFiveWorldPayload(value: unknown): WorldState {
+  if (!isRecord(value)) throw new Error('Snapshot payload must be an object.');
+  assertExactKeys(
+    value,
+    [...LEGACY_PAYLOAD_KEYS, 'civilization', 'development'],
+    'Snapshot payload',
+  );
+  const versionFourPayload = { ...value };
+  delete versionFourPayload.development;
+  const world = parseVersionFourWorldPayload(versionFourPayload);
+  const development = parseDevelopment(
+    value.development,
+    world.tick,
+    world.config.width * world.config.height,
+  );
+  const current: WorldState = Object.freeze({ ...world, development });
+  assertWorldInvariants(current);
+  return current;
 }
 
 function parseEnvelope(snapshot: string): UnknownRecord {
@@ -2972,6 +3373,38 @@ function deserializeVersionFour(envelope: UnknownRecord): WorldState {
     'World snapshot envelope',
   );
   if (
+    envelope.formatVersion !== 4 ||
+    envelope.engineVersion !== 4 ||
+    envelope.contentVersion !== 4 ||
+    typeof envelope.checksum !== 'string'
+  ) {
+    throw new Error('World snapshot version metadata is invalid.');
+  }
+  const payloadJson = JSON.stringify(envelope.payload);
+  if (hashCanonicalJson(payloadJson) !== envelope.checksum)
+    throw new Error('World snapshot checksum does not match its payload.');
+  const world = parseVersionFourWorldPayload(envelope.payload);
+  const canonicalPayload = JSON.parse(canonicalWorldJson(world)) as UnknownRecord;
+  delete canonicalPayload.development;
+  const canonical = JSON.stringify(canonicalPayload);
+  if (canonical !== payloadJson) {
+    let difference = 0;
+    while (difference < canonical.length && canonical[difference] === payloadJson[difference])
+      difference += 1;
+    throw new Error(
+      `World snapshot payload is not canonical at byte ${difference}: ${payloadJson.slice(difference, difference + 80)} != ${canonical.slice(difference, difference + 80)}.`,
+    );
+  }
+  return world;
+}
+
+function deserializeVersionFive(envelope: UnknownRecord): WorldState {
+  assertExactKeys(
+    envelope,
+    ['checksum', 'contentVersion', 'engineVersion', 'format', 'formatVersion', 'payload'],
+    'World snapshot envelope',
+  );
+  if (
     envelope.formatVersion !== WORLD_SNAPSHOT_FORMAT_VERSION ||
     envelope.engineVersion !== WORLD_ENGINE_VERSION ||
     envelope.contentVersion !== WORLD_CONTENT_VERSION ||
@@ -2982,7 +3415,7 @@ function deserializeVersionFour(envelope: UnknownRecord): WorldState {
   const payloadJson = JSON.stringify(envelope.payload);
   if (hashCanonicalJson(payloadJson) !== envelope.checksum)
     throw new Error('World snapshot checksum does not match its payload.');
-  const world = parseVersionFourWorldPayload(envelope.payload);
+  const world = parseVersionFiveWorldPayload(envelope.payload);
   if (canonicalWorldJson(world) !== payloadJson) {
     const canonical = canonicalWorldJson(world);
     let difference = 0;
@@ -3097,6 +3530,9 @@ export function migrateWorldSnapshot(snapshot: string): string {
     throw new Error(`World snapshot version ${formatVersion} is newer than this application.`);
   }
   if (formatVersion === WORLD_SNAPSHOT_FORMAT_VERSION) {
+    return serializeWorldSnapshot(deserializeVersionFive(envelope));
+  }
+  if (formatVersion === 4) {
     return serializeWorldSnapshot(deserializeVersionFour(envelope));
   }
   if (formatVersion === 3) {
@@ -3140,5 +3576,5 @@ export function migrateWorldSnapshot(snapshot: string): string {
 /** Loads and validates a supported snapshot without mutating its input. */
 export function deserializeWorldSnapshot(snapshot: string): WorldState {
   const migrated = migrateWorldSnapshot(snapshot);
-  return deserializeVersionFour(parseEnvelope(migrated));
+  return deserializeVersionFive(parseEnvelope(migrated));
 }

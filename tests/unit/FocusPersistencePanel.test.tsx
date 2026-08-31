@@ -35,6 +35,7 @@ function createSimulation(): {
       frame: null,
       loadSnapshot,
       performOfflineCatchUp,
+      queueCommand: vi.fn().mockResolvedValue(undefined),
       requestSave: vi.fn<() => Promise<string>>().mockResolvedValue(snapshot),
       requestRelationshipEventPage: vi.fn(),
       requestRelationshipPage: vi.fn(),
@@ -76,6 +77,7 @@ function createStatefulSimulation(initialWorld?: WorldState): {
         await Promise.resolve();
       }),
       performOfflineCatchUp: vi.fn().mockResolvedValue(undefined),
+      queueCommand: vi.fn().mockResolvedValue(undefined),
       requestSave: vi.fn(async () => {
         await Promise.resolve();
         return serializeWorldSnapshot(world);
