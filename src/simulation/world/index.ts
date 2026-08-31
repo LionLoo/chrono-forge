@@ -1,10 +1,25 @@
 import { hashCanonicalJson } from '../canonical';
+import {
+  advanceDevelopment,
+  assertDevelopmentInvariants,
+  createInitialDevelopment,
+  developmentDto,
+  queueIntervention,
+  type DevelopmentContext,
+  type DevelopmentEvent,
+  type DevelopmentInterventionInput,
+  type DevelopmentResult,
+  type DevelopmentState,
+  type DisasterKind,
+} from '../development';
 import { deriveXoshiro128State, Xoshiro128StarStar } from '../random';
 import {
   childArrivalEligibilityEvidenceMatchesRecord,
   childArrivalEligibilityEventMatches,
+  synchronizeInterpersonalPeople,
   type ChildArrivalEligibilityEvidence,
 } from '../relationships';
+import { applyRelationshipExperience } from '../relationships/lifecycle';
 import {
   ACCELERATED_YEAR_TICKS,
   NORMAL_YEAR_TICKS,
@@ -101,6 +116,7 @@ export interface WorldState extends WorldTileFields {
   readonly eventLog: readonly WorldEvent[];
   readonly chunks: readonly WorldChunk[];
   readonly civilization: CivilizationState;
+  readonly development: DevelopmentState;
   /** Compatibility projection; it aliases the root-level authoritative fields. */
   readonly tiles: WorldTileFields;
 }
@@ -519,9 +535,454 @@ export function createInitialWorld(
     eventLog: initialEvents,
     chunks: makeChunks(config),
     civilization: foundedCivilization,
+    development: createInitialDevelopment(normalizedSeed, 0),
     ...tiles,
     tiles,
   });
+}
+
+const DEVELOPMENT_TERRAIN_SAMPLE_BUDGET = 256;
+
+function sampledTileIndexes(state: WorldState): readonly number[] {
+  const tileCount = state.config.width * state.config.height;
+  const count = Math.min(DEVELOPMENT_TERRAIN_SAMPLE_BUDGET, tileCount);
+  return Object.freeze(
+    Array.from({ length: count }, (_, index) => Math.floor((index * tileCount) / count)),
+  );
+}
+
+function percent(count: number, total: number): number {
+  return total === 0 ? 0 : Math.floor((count * 100) / total);
+}
+
+export function findResourceDepletionAt(
+  entries: WorldState['civilization']['resourceDepletion'],
+  tileIndex: number,
+): (typeof entries)[number] | undefined {
+  let low = 0;
+  let high = entries.length - 1;
+  while (low <= high) {
+    const middle = low + Math.floor((high - low) / 2);
+    const entry = entries[middle]!;
+    if (entry.tileIndex === tileIndex) return entry;
+    if (entry.tileIndex < tileIndex) low = middle + 1;
+    else high = middle - 1;
+  }
+  return undefined;
+}
+
+function developmentContext(state: WorldState, tick: number): DevelopmentContext {
+  const indexes = sampledTileIndexes(state);
+  const land = indexes.filter((index) => state.water[index] === 0);
+  const householdByPersonId = new Map(
+    state.civilization.society.people.map((person) => [person.id, person.householdId] as const),
+  );
+  const depletion = indexes.reduce((total, index) => {
+    const entry = findResourceDepletionAt(state.civilization.resourceDepletion, index);
+    return total + (entry?.food ?? 0) + (entry?.timber ?? 0) + (entry?.stone ?? 0);
+  }, 0);
+  const recentConflictEvents = state.eventLog
+    .slice(-256)
+    .filter(
+      (event) =>
+        event.tick > tick - state.config.societyYearTicks &&
+        ['conflict', 'theft', 'family-estranged'].includes(event.kind),
+    ).length;
+  const society = state.civilization.society;
+  return Object.freeze({
+    tick,
+    yearTicks: state.config.societyYearTicks,
+    worldWidth: state.config.width,
+    worldHeight: state.config.height,
+    centerTileIndex: state.civilization.centerTileIndex,
+    people: Object.freeze(
+      state.civilization.agents.map((agent) =>
+        Object.freeze({
+          id: agent.id,
+          alive: agent.alive,
+          health: agent.health,
+          tileIndex: agent.tileIndex,
+          householdId: householdByPersonId.get(agent.id) ?? 0,
+          traits: agent.traits,
+          skills: agent.skills,
+        }),
+      ),
+    ),
+    interpersonal: society.interpersonal,
+    stockpile: Object.freeze({
+      ...state.civilization.stockpile,
+      metal: Math.floor(
+        indexes.reduce((total, index) => total + (state.metal[index] ?? 0), 0) /
+          Math.max(1, indexes.length),
+      ),
+    }),
+    operationalStructures: state.civilization.structures.filter(
+      (structure) => structure.status === 'operational',
+    ).length,
+    damagedStructures: state.civilization.structures.filter(
+      (structure) => structure.status === 'damaged',
+    ).length,
+    tradeVolume: society.offers.reduce((total, offer) => total + offer.fulfilledAmount, 0),
+    institutionCount: 1 + society.groups.length,
+    stability: society.stability,
+    scarcity: society.scarcity,
+    inequality: society.inequality,
+    collapsed: society.collapsed,
+    conflictEvents: recentConflictEvents,
+    terrain: Object.freeze({
+      dryLandRatio: percent(
+        land.filter((index) => (state.moisture[index] ?? 0) < 100).length,
+        land.length,
+      ),
+      floodExposure: percent(
+        indexes.filter(
+          (index) => (state.freshWater[index] ?? 0) > 0 || (state.moisture[index] ?? 0) >= 75,
+        ).length,
+        indexes.length,
+      ),
+      forestRatio: percent(
+        land.filter((index) => state.biome[index] === Biome.Forest).length,
+        land.length,
+      ),
+      stormExposure: percent(
+        indexes.filter(
+          (index) => (state.moisture[index] ?? 0) >= 60 && (state.hazard[index] ?? 0) >= 60,
+        ).length,
+        indexes.length,
+      ),
+      seismicity: percent(
+        indexes.filter(
+          (index) => state.biome[index] === Biome.Mountain || (state.hazard[index] ?? 0) >= 160,
+        ).length,
+        indexes.length,
+      ),
+      resourceDepletion: Math.min(100, Math.floor(depletion / Math.max(1, indexes.length))),
+    }),
+  });
+}
+
+function developmentSummary(event: DevelopmentEvent, development: DevelopmentState): string {
+  if (event.kind === 'knowledge-discovered')
+    return `${event.knowledgeId ?? 'Knowledge'} was discovered through contextual experimentation.`;
+  if (event.kind === 'knowledge-recovered')
+    return `${event.knowledgeId ?? 'Knowledge'} was recovered through renewed practice.`;
+  if (event.kind === 'knowledge-lost')
+    return `${event.knowledgeId ?? 'Knowledge'} was lost during social or resource collapse.`;
+  if (event.kind.endsWith('-intervened'))
+    return `A ${event.kind.slice(0, -'-intervened'.length)} intervention altered conditions near tile ${event.targetTileIndex ?? -1}.`;
+  if (event.kind.endsWith('-started')) {
+    const crisis = development.activeCrises.find((candidate) => candidate.id === event.crisisId);
+    return crisis === undefined
+      ? `${event.kind.slice(0, -'-started'.length)} conditions became critical.`
+      : `A ${crisis.kind} began after ${crisis.triggerCondition} reached ${crisis.triggerValue}.`;
+  }
+  if (event.kind.endsWith('-recovered'))
+    return `The settlement recovered autonomously from the ${event.kind.slice(0, -'-recovered'.length)}.`;
+  return `Development conditions changed through ${event.kind}.`;
+}
+
+function crisisKindsStarted(
+  prior: DevelopmentState,
+  next: DevelopmentState,
+): readonly DisasterKind[] {
+  const priorIds = new Set(prior.activeCrises.map((crisis) => crisis.id));
+  return Object.freeze(
+    next.activeCrises.filter((crisis) => !priorIds.has(crisis.id)).map((crisis) => crisis.kind),
+  );
+}
+
+function applyDevelopmentResult(
+  state: WorldState,
+  result: DevelopmentResult,
+  tick: number,
+): { readonly state: WorldState; readonly events: readonly WorldEvent[] } {
+  const started = crisisKindsStarted(state.development, result.state);
+  const clampByte = (value: number): number => clamp(value, 0, 255);
+  const clampResource = (value: number): number => clamp(value, 0, 65_535);
+  const center = state.civilization.centerTileIndex;
+  const moisture = state.moisture.slice();
+  const hazard = state.hazard.slice();
+  const food = state.food.slice();
+  const timber = state.timber.slice();
+  const stone = state.stone.slice();
+  const metal = state.metal.slice();
+  const plants = state.plants.slice();
+  const animals = state.animals.slice();
+  let politicalLoss = 0;
+  for (const kind of started) {
+    const severity =
+      result.state.activeCrises.find((crisis) => crisis.kind === kind)?.severity ?? 1;
+    hazard[center] = clampByte((hazard[center] ?? 0) + severity * 2);
+    switch (kind) {
+      case 'drought':
+        moisture[center] = clampByte((moisture[center] ?? 0) - severity * 3);
+        food[center] = clampResource((food[center] ?? 0) - severity);
+        plants[center] = clampResource((plants[center] ?? 0) - severity * 2);
+        break;
+      case 'flood':
+        moisture[center] = clampByte((moisture[center] ?? 0) + severity * 3);
+        food[center] = clampResource((food[center] ?? 0) - severity);
+        break;
+      case 'fire':
+        timber[center] = clampResource((timber[center] ?? 0) - severity * 2);
+        plants[center] = clampResource((plants[center] ?? 0) - severity * 2);
+        animals[center] = clampResource((animals[center] ?? 0) - severity);
+        break;
+      case 'storm':
+        moisture[center] = clampByte((moisture[center] ?? 0) + severity);
+        break;
+      case 'earthquake':
+        stone[center] = clampResource((stone[center] ?? 0) - severity);
+        break;
+      case 'disease':
+        animals[center] = clampResource((animals[center] ?? 0) - severity);
+        break;
+      case 'famine':
+        food[center] = clampResource((food[center] ?? 0) - severity * 2);
+        break;
+      case 'resource-collapse':
+        food[center] = clampResource((food[center] ?? 0) - severity);
+        timber[center] = clampResource((timber[center] ?? 0) - severity);
+        stone[center] = clampResource((stone[center] ?? 0) - severity);
+        metal[center] = clampResource((metal[center] ?? 0) - severity);
+        break;
+      case 'political-crisis':
+        politicalLoss += severity;
+        break;
+      case 'technological-accident':
+        metal[center] = clampResource((metal[center] ?? 0) - severity);
+        break;
+      case 'meteor-impact':
+        food[center] = clampResource((food[center] ?? 0) - severity * 2);
+        timber[center] = clampResource((timber[center] ?? 0) - severity * 2);
+        plants[center] = clampResource((plants[center] ?? 0) - severity * 2);
+        animals[center] = clampResource((animals[center] ?? 0) - severity * 2);
+        break;
+    }
+  }
+  const losses = result.effects.stockpileLoss;
+  const stockpile = Object.freeze({
+    food: Math.max(0, state.civilization.stockpile.food - losses.food),
+    water: Math.max(0, state.civilization.stockpile.water - losses.water),
+    timber: Math.max(0, state.civilization.stockpile.timber - losses.timber),
+    stone: Math.max(0, state.civilization.stockpile.stone - losses.stone),
+  });
+  const healthDamage = new Map(
+    result.effects.personHealthDamage.map((patch) => [patch.personId, patch.amount] as const),
+  );
+  const lethalCrisis = started.includes('meteor-impact');
+  const agents = Object.freeze(
+    state.civilization.agents.map((agent) => {
+      const damage = healthDamage.get(agent.id) ?? 0;
+      if (!agent.alive || damage === 0) return agent;
+      const health = Math.max(lethalCrisis ? 0 : 1, agent.health - damage);
+      return Object.freeze({
+        ...agent,
+        alive: health > 0,
+        health,
+        action: health > 0 ? agent.action : ('idle' as const),
+        carryingKind: health > 0 ? agent.carryingKind : ('none' as const),
+        carryingAmount: health > 0 ? agent.carryingAmount : 0,
+        plan: health > 0 ? agent.plan : Object.freeze([]),
+        planIndex: health > 0 ? agent.planIndex : 0,
+        route: health > 0 ? agent.route : Object.freeze([]),
+        routeCursor: health > 0 ? agent.routeCursor : 0,
+      });
+    }),
+  );
+  const priorLivingIds = new Set(
+    state.civilization.agents.filter((agent) => agent.alive).map((agent) => agent.id),
+  );
+  const agentById = new Map(agents.map((agent) => [agent.id, agent] as const));
+  const killedIds = new Set(
+    agents.filter((agent) => !agent.alive && priorLivingIds.has(agent.id)).map((agent) => agent.id),
+  );
+  let remainingStructureDamage = result.effects.structureDamage * 10;
+  const structures = Object.freeze(
+    state.civilization.structures.map((structure) => {
+      if (remainingStructureDamage <= 0 || structure.status !== 'operational') return structure;
+      const applied = Math.min(remainingStructureDamage, structure.condition);
+      remainingStructureDamage -= applied;
+      const condition = structure.condition - applied;
+      return Object.freeze({
+        ...structure,
+        condition,
+        status: condition <= 150 ? ('damaged' as const) : structure.status,
+        changedTick: tick,
+      });
+    }),
+  );
+  const crisisPeople = Object.freeze(
+    state.civilization.society.people.map((person) => {
+      const agent = agentById.get(person.id);
+      if (agent === undefined || (person.alive === agent.alive && person.health === agent.health))
+        return person;
+      return Object.freeze({
+        ...person,
+        alive: agent.alive,
+        health: agent.health,
+        deathTick: agent.alive ? person.deathTick : tick,
+      });
+    }),
+  );
+  const relationshipPeople = crisisPeople.map((person) => ({
+    id: person.id,
+    alive: person.alive,
+    birthTick: person.birthTick,
+    parentIds: person.parentIds,
+    householdId: person.householdId,
+  }));
+  let interpersonal = state.civilization.society.interpersonal;
+  for (const experience of result.relationshipExperiences)
+    interpersonal = applyRelationshipExperience(interpersonal, relationshipPeople, experience);
+  interpersonal = synchronizeInterpersonalPeople(interpersonal, tick, relationshipPeople);
+  const responseFacts = result.responses.flatMap((response) => {
+    const helper = state.civilization.society.people.find(
+      (person) => person.id === response.helperPersonId,
+    );
+    const recipient = state.civilization.society.people.find(
+      (person) => person.id === response.recipientPersonId,
+    );
+    if (helper === undefined || recipient === undefined) return [];
+    const summary = `${helper.name} gave ${response.kind} to ${recipient.name} during the ${response.crisisKind}.`;
+    return [
+      Object.freeze({
+        personId: helper.id,
+        kind: 'crisis-assisted',
+        source: Object.freeze({ kind: 'person' as const, id: helper.id }),
+        target: Object.freeze({ kind: 'person' as const, id: recipient.id }),
+        summary,
+      }),
+      Object.freeze({
+        personId: recipient.id,
+        kind: 'crisis-assisted',
+        source: Object.freeze({ kind: 'person' as const, id: helper.id }),
+        target: Object.freeze({ kind: 'person' as const, id: recipient.id }),
+        summary,
+      }),
+    ];
+  });
+  const deathFacts = crisisPeople
+    .filter((person) => killedIds.has(person.id))
+    .map((person) =>
+      Object.freeze({
+        personId: person.id,
+        kind: 'person-died',
+        source: Object.freeze({ kind: 'person' as const, id: person.id }),
+        target: Object.freeze({ kind: 'household' as const, id: person.householdId }),
+        summary: `${person.name} died during modeled crisis conditions.`,
+      }),
+    );
+  const households = Object.freeze(
+    state.civilization.society.households.map((household) =>
+      Object.freeze({
+        ...household,
+        adultIds: Object.freeze(household.adultIds.filter((id) => !killedIds.has(id))),
+      }),
+    ),
+  );
+  const groups = Object.freeze(
+    state.civilization.society.groups.map((group) =>
+      Object.freeze({
+        ...group,
+        memberIds: Object.freeze(group.memberIds.filter((id) => !killedIds.has(id))),
+      }),
+    ),
+  );
+  const institution = killedIds.has(state.civilization.society.institution.leaderId)
+    ? Object.freeze({ ...state.civilization.society.institution, leaderId: 0, changedTick: tick })
+    : state.civilization.society.institution;
+  const society = Object.freeze({
+    ...state.civilization.society,
+    people: crisisPeople,
+    households,
+    groups,
+    institution,
+    interpersonal,
+    scarcity: clamp(state.civilization.society.scarcity + started.length * 3, 0, 100),
+    stability: clamp(state.civilization.society.stability - politicalLoss, 0, 100),
+    pendingBiographyFacts: Object.freeze([
+      ...state.civilization.society.pendingBiographyFacts,
+      ...responseFacts,
+      ...deathFacts,
+    ]),
+    operationCount:
+      state.civilization.society.operationCount +
+      result.relationshipExperiences.length +
+      result.responses.length +
+      killedIds.size,
+  });
+  const tileFields: WorldTileFields = Object.freeze({
+    elevation: state.elevation,
+    water: state.water,
+    temperature: state.temperature,
+    moisture,
+    biome: state.biome,
+    freshWater: state.freshWater,
+    food,
+    timber,
+    stone,
+    metal,
+    habitability: state.habitability,
+    hazard,
+    plants,
+    animals,
+  });
+  let next: WorldState = Object.freeze({
+    ...state,
+    tick,
+    development: result.state,
+    civilization: Object.freeze({
+      ...state.civilization,
+      stockpile,
+      agents,
+      structures,
+      society,
+      operationCount: state.civilization.operationCount + 1,
+    }),
+    ...tileFields,
+    tiles: tileFields,
+  });
+  const created: WorldEvent[] = [];
+  for (const event of result.events) {
+    next = appendWorldEvent(next, event.kind, tick, {
+      summary: developmentSummary(event, result.state),
+      subjectKind: event.subjectKind,
+      subjectId: event.subjectId,
+      targetKind: 'world',
+      targetId: 0,
+      tileIndex: event.targetTileIndex ?? center,
+      amount: event.amount,
+    });
+    created.push(next.eventLog.at(-1)!);
+  }
+  for (const response of result.responses) {
+    const helper = society.people.find((person) => person.id === response.helperPersonId)!;
+    const recipient = society.people.find((person) => person.id === response.recipientPersonId)!;
+    next = appendWorldEvent(next, 'crisis-assisted', tick, {
+      summary: `${helper.name} gave ${response.kind} to ${recipient.name} during the ${response.crisisKind}.`,
+      subjectKind: 'person',
+      subjectId: helper.id,
+      targetKind: 'person',
+      targetId: recipient.id,
+      tileIndex: recipient.tileIndex,
+      amount: response.amount,
+    });
+    created.push(next.eventLog.at(-1)!);
+  }
+  for (const person of crisisPeople.filter((candidate) => killedIds.has(candidate.id))) {
+    next = appendWorldEvent(next, 'person-died', tick, {
+      summary: `${person.name} died during modeled crisis conditions.`,
+      subjectKind: 'person',
+      subjectId: person.id,
+      targetKind: 'household',
+      targetId: person.householdId,
+      tileIndex: agentById.get(person.id)?.tileIndex ?? center,
+      amount: 0,
+    });
+    created.push(next.eventLog.at(-1)!);
+  }
+  return Object.freeze({ state: next, events: Object.freeze(created) });
 }
 
 function settlementTerrain(state: WorldState): SettlementTerrain {
@@ -607,6 +1068,23 @@ export function stepWorld(state: WorldState, ticks = 1): WorldState {
         ),
       }),
     });
+    if (pulseTick % next.config.societyYearTicks === 0 && next.development.tick < pulseTick) {
+      const development = advanceDevelopment(next.development, developmentContext(next, pulseTick));
+      const applied = applyDevelopmentResult(next, development, pulseTick);
+      next = applied.state;
+      const authoritative = applied.events.map(societyAuthoritativeEvent);
+      next = Object.freeze({
+        ...next,
+        civilization: Object.freeze({
+          ...attachFactualMemories(next.civilization, applied.events),
+          society: attachSocietyBiographyEventIds(
+            next.civilization.society,
+            authoritative,
+            biographyHistoricalSources(next, authoritative),
+          ),
+        }),
+      });
+    }
     assertWorldInvariants(next);
     pulseTick += SETTLEMENT_ACTION_PULSE_TICKS;
   }
@@ -684,6 +1162,31 @@ export function appendWorldEvent(
 }
 
 const SUPPLY_SHORTAGE_COLLAPSE_SEVERITY = 75;
+
+export type WorldInterventionInput = Omit<DevelopmentInterventionInput, 'requestedTick'>;
+
+/** Queues one closed M5 condition intervention at the current authoritative tick. */
+export function applyWorldIntervention(
+  state: WorldState,
+  intervention: WorldInterventionInput,
+): WorldState {
+  assertWorldInvariants(state);
+  if (
+    !Number.isSafeInteger(intervention.targetTileIndex) ||
+    intervention.targetTileIndex < 0 ||
+    intervention.targetTileIndex >= state.config.width * state.config.height
+  )
+    throw new RangeError('Intervention target tile is outside the world.');
+  const next = Object.freeze({
+    ...state,
+    development: queueIntervention(state.development, {
+      ...intervention,
+      requestedTick: state.tick,
+    }),
+  });
+  assertWorldInvariants(next);
+  return next;
+}
 
 function shortageRemainder(value: number, severity: number, protectedAmount = 0): number {
   const removed = Math.max(1, Math.ceil((value * severity) / 100));
@@ -839,6 +1342,9 @@ export function isWalkableTile(state: WorldState, index: number): boolean {
 
 export function assertWorldInvariants(state: WorldState): void {
   assertCivilizationInvariants(state.civilization, settlementTerrain(state));
+  assertDevelopmentInvariants(state.development);
+  if (state.development.tick > state.tick)
+    throw new Error('World invariant violation: development cannot be ahead of world time.');
   const agentIds = new Set(state.civilization.agents.map((agent) => agent.id));
   const structureIds = new Set(state.civilization.structures.map((structure) => structure.id));
   const householdIds = new Set(
@@ -981,6 +1487,7 @@ export function canonicalWorldJson(state: WorldState): string {
       societyYearTicks: state.config.societyYearTicks,
       width: state.config.width,
     },
+    development: developmentDto(state.development),
     elevation: arrayDto(state.elevation),
     eventLog,
     food: arrayDto(state.food),

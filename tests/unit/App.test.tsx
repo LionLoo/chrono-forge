@@ -104,6 +104,24 @@ describe('deterministic world lab', () => {
     ).toBeVisible();
   });
 
+  it('keeps indirect interventions optional and queues them through the Worker', async () => {
+    const user = userEvent.setup();
+    render(<App persistence={createPreviewPersistence()} workerFactory={createRuntimeWorker} />);
+    await screen.findByText('Worker projection ready · autonomous settlement active');
+
+    expect(screen.getByRole('heading', { name: 'Research and conditions' })).toBeVisible();
+    await user.click(screen.getByText('Optional intervention'));
+    await user.selectOptions(
+      screen.getByRole('combobox', { name: 'Intervention kind' }),
+      'protection',
+    );
+    await user.click(screen.getByRole('button', { name: 'Queue intervention' }));
+
+    expect(
+      await screen.findByText('Intervention queued for the next civil-year development pulse.'),
+    ).toBeVisible();
+  });
+
   it('reports a worker bootstrap fault without hiding the map controls', async () => {
     render(
       <App

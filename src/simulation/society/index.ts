@@ -1506,7 +1506,7 @@ export function advanceSociety(state: SocietyState, input: SocietyPulseInput): S
   const birthDrafts: SocietyPersonDraft[] = [];
   const migrationDrafts: SocietyPersonDraft[] = [];
   const childArrivals = [...interpersonal.childArrivals];
-  if (years > 0 && living().length < MAX_SOCIETY_RESIDENTS) {
+  if (years > 0 && people.length < MAX_SOCIETY_RESIDENTS) {
     const adults = living()
       .filter((person) => input.tick - person.birthTick >= 18 * state.yearTicks)
       .sort((left, right) => left.id - right.id);
@@ -1761,7 +1761,7 @@ export function advanceSociety(state: SocietyState, input: SocietyPulseInput): S
       for (const guardianId of guardianIds) addBiographyFact(facts, guardianId, eligibilityEvent);
     }
   }
-  if (years > 0 && living().length < 4 && living().length < MAX_SOCIETY_RESIDENTS) {
+  if (years > 0 && living().length < 4 && people.length < MAX_SOCIETY_RESIDENTS) {
     const id = Math.max(state.nextPersonId, ...people.map((person) => person.id + 1));
     const culture = state.cultures[rng.nextInt(state.cultures.length)]!;
     const householdId = nextHouseholdId++;

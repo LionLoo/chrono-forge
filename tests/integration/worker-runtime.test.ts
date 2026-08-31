@@ -181,9 +181,54 @@ describe('simulation worker runtime', () => {
 
     expect(responses).toMatchObject([
       { type: 'fault', code: 'not-initialized' },
-      { type: 'fault', code: 'unsupported-operation' },
+      { type: 'fault', code: 'invalid-request' },
       { type: 'fault', code: 'protocol-version-mismatch' },
     ]);
+  });
+
+  it('queues a condition-only intervention and applies it at the next civil-year boundary', () => {
+    const responses: WorkerToUiMessage[] = [];
+    const runtime = createSimulationRuntime((message) => responses.push(message));
+    runtime.handleMessage({
+      type: 'initialize',
+      protocolVersion: WORKER_PROTOCOL_VERSION,
+      requestId: 'm5-initialize',
+      seed: [53, 59, 61, 67],
+      config: { societyYearTicks: 5_000 },
+    });
+    runtime.handleMessage({
+      type: 'queueCommand',
+      protocolVersion: WORKER_PROTOCOL_VERSION,
+      requestId: 'm5-intervention',
+      command: {
+        kind: 'intervention',
+        payload: {
+          interventionKind: 'protection',
+          intensity: 30,
+          polarity: 'supportive',
+          targetTileIndex: 0,
+        },
+      },
+    });
+    expect(lastMessageOfType(responses, 'commandAccepted')).toMatchObject({
+      sequence: 1,
+      targetTick: 5_000,
+    });
+    expect(lastMessageOfType(responses, 'metrics').metrics.queuedCommandCount).toBe(1);
+
+    runtime.handleMessage({
+      type: 'advanceTicks',
+      protocolVersion: WORKER_PROTOCOL_VERSION,
+      requestId: 'm5-advance',
+      ticks: 5_000,
+    });
+    expect(lastMessageOfType(responses, 'frameDelta').frame.development.conditions.protection).toBe(
+      29,
+    );
+    expect(lastMessageOfType(responses, 'eventBatch').events).toContainEqual(
+      expect.objectContaining({ type: 'protection-intervened', tick: 5_000 }),
+    );
+    expect(lastMessageOfType(responses, 'metrics').metrics.queuedCommandCount).toBe(0);
   });
 
   it('restores the same authoritative M3 projection and factual events after a shelter becomes operational', () => {

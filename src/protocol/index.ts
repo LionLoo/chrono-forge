@@ -1,7 +1,14 @@
 import type { WorldConfig, WorldSeed } from '../simulation/world';
+import type {
+  ConditionId,
+  DisasterKind,
+  InterventionKind,
+  KnowledgeId,
+  KnowledgeStatus,
+} from '../simulation/development';
 import { ACCELERATED_YEAR_TICKS, NORMAL_YEAR_TICKS } from '../simulation/society';
 
-export const WORKER_PROTOCOL_VERSION = 4;
+export const WORKER_PROTOCOL_VERSION = 5;
 export const MAX_ADVANCE_TICKS_PER_REQUEST = 1_000_000;
 
 export type WorkerProtocolVersion = typeof WORKER_PROTOCOL_VERSION;
@@ -168,6 +175,30 @@ export interface SocietyProjection {
   readonly timelineTotal: number;
 }
 
+export interface DevelopmentKnowledgeProjection {
+  readonly id: KnowledgeId;
+  readonly status: KnowledgeStatus;
+  readonly progress: number;
+}
+
+export interface DevelopmentCrisisProjection {
+  readonly id: number;
+  readonly kind: DisasterKind;
+  readonly severity: number;
+  readonly startedTick: number;
+  readonly triggerCondition: ConditionId;
+  readonly triggerValue: number;
+}
+
+export interface DevelopmentProjection {
+  readonly researchFocusId: KnowledgeId | null;
+  readonly knowledge: readonly DevelopmentKnowledgeProjection[];
+  readonly conditions: Readonly<Record<ConditionId, number>>;
+  readonly activeCrises: readonly DevelopmentCrisisProjection[];
+  readonly recoveredCrisisCount: number;
+  readonly operationCount: number;
+}
+
 export interface WorldFrameProjection {
   readonly version: WorkerProtocolVersion;
   readonly width: number;
@@ -194,6 +225,7 @@ export interface WorldFrameProjection {
   readonly structureCondition: Uint16Array;
   readonly settlementSummary: SettlementSummary;
   readonly society: SocietyProjection;
+  readonly development: DevelopmentProjection;
 }
 
 interface RequestBase {
@@ -213,8 +245,13 @@ export interface LoadRequest extends RequestBase {
 }
 
 export interface QueuedCommand {
-  readonly kind: string;
-  readonly payload: Readonly<Record<string, boolean | number | string>>;
+  readonly kind: 'intervention';
+  readonly payload: Readonly<{
+    interventionKind: InterventionKind;
+    intensity: number;
+    polarity: 'supportive' | 'challenging';
+    targetTileIndex: number;
+  }>;
 }
 
 export interface QueueCommandRequest extends RequestBase {
@@ -290,7 +327,6 @@ export type WorkerRequestValidation =
       readonly receivedVersion: number;
     };
 
-type PrimitiveCommandValue = boolean | number | string;
 type UnknownRecord = Record<string, unknown>;
 
 function isRecord(value: unknown): value is UnknownRecord {
@@ -347,21 +383,45 @@ function optionalConfig(value: unknown): Partial<WorldConfig> | undefined | 'inv
 }
 
 function commandFrom(value: unknown): QueuedCommand | 'invalid' {
-  if (!isRecord(value) || typeof value.kind !== 'string' || !isRecord(value.payload)) {
+  if (
+    !isRecord(value) ||
+    Object.keys(value).sort().join(',') !== 'kind,payload' ||
+    value.kind !== 'intervention' ||
+    !isRecord(value.payload) ||
+    Object.keys(value.payload).sort().join(',') !==
+      'intensity,interventionKind,polarity,targetTileIndex'
+  ) {
     return 'invalid';
   }
-  const payload: Record<string, PrimitiveCommandValue> = {};
-  for (const [key, candidate] of Object.entries(value.payload)) {
-    if (
-      typeof candidate !== 'string' &&
-      typeof candidate !== 'boolean' &&
-      !isFiniteNumber(candidate)
-    ) {
-      return 'invalid';
-    }
-    payload[key] = candidate;
-  }
-  return Object.freeze({ kind: value.kind, payload: Object.freeze(payload) });
+  const kinds = new Set<InterventionKind>([
+    'weather',
+    'resource',
+    'organism',
+    'omen',
+    'artifact',
+    'protection',
+    'disaster',
+    'alien-signal',
+  ]);
+  if (
+    typeof value.payload.interventionKind !== 'string' ||
+    !kinds.has(value.payload.interventionKind as InterventionKind) ||
+    !isNonNegativeSafeInteger(value.payload.intensity) ||
+    value.payload.intensity < 1 ||
+    value.payload.intensity > 100 ||
+    (value.payload.polarity !== 'supportive' && value.payload.polarity !== 'challenging') ||
+    !isNonNegativeSafeInteger(value.payload.targetTileIndex)
+  )
+    return 'invalid';
+  return Object.freeze({
+    kind: 'intervention',
+    payload: Object.freeze({
+      interventionKind: value.payload.interventionKind as InterventionKind,
+      intensity: value.payload.intensity,
+      polarity: value.payload.polarity,
+      targetTileIndex: value.payload.targetTileIndex,
+    }),
+  });
 }
 
 /**
@@ -430,7 +490,7 @@ export function validateUiToWorkerMessage(input: unknown): WorkerRequestValidati
     case 'queueCommand': {
       const command = commandFrom(input.command);
       return command === 'invalid'
-        ? invalid(requestId, 'queueCommand.command must contain string kind and primitive payload.')
+        ? invalid(requestId, 'queueCommand.command must be one closed typed intervention.')
         : {
             kind: 'valid',
             message: {

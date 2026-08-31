@@ -3,6 +3,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   WORKER_PROTOCOL_VERSION,
   type UiToWorkerMessage,
+  type QueuedCommand,
   type SocietyRelationshipEventProjection,
   type SocietyRelationshipProjection,
   type SocietyTimelineProjection,
@@ -58,6 +59,7 @@ export interface WorldSimulationView {
   readonly frame: WorldFrameProjection | null;
   readonly loadSnapshot: (snapshot: string) => Promise<void>;
   readonly performOfflineCatchUp: (elapsedMilliseconds: number, rate: number) => Promise<void>;
+  readonly queueCommand: (command: QueuedCommand) => Promise<void>;
   readonly requestSave: () => Promise<string>;
   readonly requestTimelinePage: (offset: number) => void;
   readonly requestRelationshipPage: (personId: number, offset: number) => void;
@@ -120,6 +122,7 @@ export function useWorldSimulation(
   const pendingSavesRef = useRef(new Map<string, PendingSaveRequest>());
   const pendingLoadsRef = useRef(new Map<string, PendingVoidRequest>());
   const pendingOfflineRef = useRef(new Map<string, PendingVoidRequest>());
+  const pendingCommandsRef = useRef(new Map<string, PendingVoidRequest>());
 
   const nextRequestId = useCallback((kind: string) => {
     requestSequenceRef.current += 1;
@@ -143,6 +146,7 @@ export function useWorldSimulation(
     const pendingSaves = pendingSavesRef.current;
     const pendingLoads = pendingLoadsRef.current;
     const pendingOffline = pendingOfflineRef.current;
+    const pendingCommands = pendingCommandsRef.current;
     const rejectRequest = (requestId: string, reason: Error) => {
       const pendingSave = pendingSaves.get(requestId);
       if (pendingSave !== undefined) {
@@ -159,14 +163,21 @@ export function useWorldSimulation(
         pendingOffline.delete(requestId);
         offlineRequest.reject(reason);
       }
+      const pendingCommand = pendingCommands.get(requestId);
+      if (pendingCommand !== undefined) {
+        pendingCommands.delete(requestId);
+        pendingCommand.reject(reason);
+      }
     };
     const rejectAll = (reason: Error) => {
       for (const pending of pendingSaves.values()) pending.reject(reason);
       for (const pending of pendingLoads.values()) pending.reject(reason);
       for (const pending of pendingOffline.values()) pending.reject(reason);
+      for (const pending of pendingCommands.values()) pending.reject(reason);
       pendingSaves.clear();
       pendingLoads.clear();
       pendingOffline.clear();
+      pendingCommands.clear();
     };
     const applyFrame = (nextFrame: WorldFrameProjection, replaceEvents: boolean) => {
       setFrame(nextFrame);
@@ -279,8 +290,14 @@ export function useWorldSimulation(
           setError(message.message);
           return;
         }
-        case 'commandAccepted':
+        case 'commandAccepted': {
+          const pending = pendingCommands.get(message.requestId);
+          if (pending !== undefined) {
+            pendingCommands.delete(message.requestId);
+            pending.resolve();
+          }
           return;
+        }
       }
     };
     worker.onerror = (event) => {
@@ -438,6 +455,26 @@ export function useWorldSimulation(
     [nextRequestId],
   );
 
+  const queueCommand = useCallback(
+    (command: QueuedCommand): Promise<void> => {
+      const worker = workerRef.current;
+      if (worker === null)
+        return Promise.reject(new Error('The simulation worker is unavailable.'));
+      const requestId = nextRequestId('command');
+      const promise = new Promise<void>((resolve, reject) => {
+        pendingCommandsRef.current.set(requestId, { resolve, reject });
+      });
+      worker.postMessage({
+        type: 'queueCommand',
+        protocolVersion: WORKER_PROTOCOL_VERSION,
+        requestId,
+        command,
+      });
+      return promise;
+    },
+    [nextRequestId],
+  );
+
   return useMemo(
     () => ({
       advanceTicks,
@@ -446,6 +483,7 @@ export function useWorldSimulation(
       frame,
       loadSnapshot,
       performOfflineCatchUp,
+      queueCommand,
       requestSave,
       relationshipEventPage,
       relationshipPage,
@@ -462,6 +500,7 @@ export function useWorldSimulation(
       frame,
       loadSnapshot,
       performOfflineCatchUp,
+      queueCommand,
       requestSave,
       relationshipEventPage,
       relationshipPage,

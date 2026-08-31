@@ -86,6 +86,25 @@ function createLoadReadyOnlyWorker(): SimulationWorkerPort {
 }
 
 describe('world simulation UI gateway', () => {
+  it('queues a closed intervention and resolves only after Worker acceptance', async () => {
+    const { result } = renderHook(() => useWorldSimulation(createRuntimeWorker));
+    await waitFor(() => expect(result.current.status).toBe('ready'));
+
+    await expect(
+      act(async () =>
+        result.current.queueCommand({
+          kind: 'intervention',
+          payload: {
+            interventionKind: 'protection',
+            intensity: 20,
+            polarity: 'supportive',
+            targetTileIndex: 0,
+          },
+        }),
+      ),
+    ).resolves.toBeUndefined();
+  });
+
   it('loads and browses bounded factual history pages through the real Worker gateway', async () => {
     const { result } = renderHook(() => useWorldSimulation(createRuntimeWorker));
     await waitFor(() => expect(result.current.status).toBe('ready'));

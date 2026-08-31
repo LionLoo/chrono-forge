@@ -21,8 +21,8 @@ export const M45_SCENARIOS: readonly M45Scenario[] = Object.freeze([
     yearTicks: 5_000,
     horizonYears: 60,
     checkpointYears: Object.freeze([5, 25, 60] as const),
-    expectedHash: 'e844141c',
-    expectedOperations: 12_990,
+    expectedHash: '4059636c',
+    expectedOperations: 18_747,
   }),
   Object.freeze({
     name: 'ember-households',
@@ -30,8 +30,8 @@ export const M45_SCENARIOS: readonly M45Scenario[] = Object.freeze([
     yearTicks: 5_000,
     horizonYears: 60,
     checkpointYears: Object.freeze([5, 25, 60] as const),
-    expectedHash: '97d6d243',
-    expectedOperations: 10_356,
+    expectedHash: '3a0568df',
+    expectedOperations: 11_171,
   }),
   Object.freeze({
     name: 'cinder-memories',
@@ -39,8 +39,8 @@ export const M45_SCENARIOS: readonly M45Scenario[] = Object.freeze([
     yearTicks: 5_000,
     horizonYears: 60,
     checkpointYears: Object.freeze([5, 25, 60] as const),
-    expectedHash: 'f0976f34',
-    expectedOperations: 19_986,
+    expectedHash: '09ade2f4',
+    expectedOperations: 18_386,
   }),
 ]);
 

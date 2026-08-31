@@ -87,6 +87,17 @@ describe('versioned worker protocol', () => {
     ]);
     expect(frame.society.timelineOffset).toBe(0);
     expect(frame.society.timelineTotal).toBe(2);
+    expect(frame.development).toMatchObject({
+      researchFocusId: null,
+      recoveredCrisisCount: 0,
+      activeCrises: [],
+      operationCount: 0,
+    });
+    expect(
+      frame.development.knowledge
+        .filter((record) => record.status === 'known')
+        .map((record) => record.id),
+    ).toStrictEqual(['foraging-lore', 'shelter-craft', 'water-lore']);
     expect(projectionTransferables(frame)).toStrictEqual([
       frame.biome.buffer,
       frame.resource.buffer,
@@ -410,6 +421,54 @@ describe('versioned worker protocol', () => {
         offset: 0,
       }),
     ).toMatchObject({ kind: 'invalid' });
+  });
+
+  it('accepts only the closed typed M5 intervention command surface', () => {
+    const valid = validateUiToWorkerMessage({
+      type: 'queueCommand',
+      protocolVersion: WORKER_PROTOCOL_VERSION,
+      requestId: 'weather',
+      command: {
+        kind: 'intervention',
+        payload: {
+          interventionKind: 'weather',
+          intensity: 25,
+          polarity: 'challenging',
+          targetTileIndex: 3,
+        },
+      },
+    });
+    expect(valid).toMatchObject({ kind: 'valid' });
+
+    for (const command of [
+      { kind: 'focus-session', payload: {} },
+      {
+        kind: 'intervention',
+        payload: {
+          interventionKind: 'meteor-impact',
+          intensity: 25,
+          polarity: 'challenging',
+          targetTileIndex: 3,
+        },
+      },
+      {
+        kind: 'intervention',
+        payload: {
+          interventionKind: 'weather',
+          intensity: 0,
+          polarity: 'challenging',
+          targetTileIndex: 3,
+        },
+      },
+    ])
+      expect(
+        validateUiToWorkerMessage({
+          type: 'queueCommand',
+          protocolVersion: WORKER_PROTOCOL_VERSION,
+          requestId: 'invalid-command',
+          command,
+        }),
+      ).toMatchObject({ kind: 'invalid' });
   });
 
   it('uses family/salience/stable-id order and never places every relationship edge on a frame', () => {

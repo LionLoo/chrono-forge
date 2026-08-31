@@ -2,12 +2,13 @@ import { useMemo, useState } from 'react';
 
 import { getFocusAlerts, type FocusAlerts } from './adapters/focus-alerts';
 import { getRuntimePersistence, type RuntimePersistence } from './adapters/runtime-persistence';
-import { STRUCTURE_STATE_CODES } from './protocol';
+import { STRUCTURE_STATE_CODES, type QueuedCommand } from './protocol';
 import { INITIAL_WORLD_CAMERA, panCamera, zoomCamera } from './rendering/camera';
 import { WorldMapCanvas } from './rendering/WorldMapCanvas';
 import { WORLD_OVERLAYS, type WorldOverlay } from './rendering/world-palette';
 import { PROJECT_META } from './project-meta';
 import { FocusPersistencePanel } from './ui/FocusPersistencePanel';
+import { DevelopmentPanel } from './ui/DevelopmentPanel';
 import { SocietyPanel } from './ui/SocietyPanel';
 import type { FocusClock } from './ui/useFocusController';
 import {
@@ -57,6 +58,8 @@ export function App({ focusAlerts, focusClock, persistence, workerFactory }: App
   const runtimePersistence = persistence ?? getRuntimePersistence();
   const [camera, setCamera] = useState(INITIAL_WORLD_CAMERA);
   const [overlay, setOverlay] = useState<WorldOverlay>('terrain');
+  const [interventionPending, setInterventionPending] = useState(false);
+  const [interventionStatus, setInterventionStatus] = useState<string | null>(null);
   const worldSummary = useMemo(() => {
     const frame = simulation.frame;
     if (frame === null) return null;
@@ -117,6 +120,23 @@ export function App({ focusAlerts, focusClock, persistence, workerFactory }: App
     });
   }, [simulation.frame]);
   const recentEvents = useMemo(() => simulation.events.slice(-4).reverse(), [simulation.events]);
+  const queueIntervention = (command: QueuedCommand) => {
+    setInterventionPending(true);
+    setInterventionStatus(null);
+    void simulation
+      .queueCommand(command)
+      .then(() => {
+        setInterventionStatus('Intervention queued for the next civil-year development pulse.');
+      })
+      .catch((reason: unknown) => {
+        setInterventionStatus(
+          reason instanceof Error ? reason.message : 'The intervention request was rejected.',
+        );
+      })
+      .finally(() => {
+        setInterventionPending(false);
+      });
+  };
 
   const statusCopy =
     simulation.status === 'booting'
@@ -140,13 +160,14 @@ export function App({ focusAlerts, focusClock, persistence, workerFactory }: App
       <main id="main" className="world-lab" tabIndex={-1}>
         <section className="lab-intro" aria-labelledby="hero-title">
           <div>
-            <p className="eyebrow">Milestone 4 · A living society takes shape</p>
+            <p className="eyebrow">Milestone 5 · Knowledge and crises emerge</p>
             <h1 id="hero-title">{PROJECT_META.promise}</h1>
           </div>
           <p>
             Begin a calm session and accepted focus time advances a Worker-owned settlement. Named
-            people choose their own work and build culture across many sessions; every displayed
-            history claim comes from an authoritative event.
+            people choose their own work, build culture, discover contextual knowledge, and respond
+            to modeled crises across many sessions; every displayed history claim comes from an
+            authoritative event.
           </p>
         </section>
 
@@ -421,19 +442,33 @@ export function App({ focusAlerts, focusClock, persistence, workerFactory }: App
         </div>
 
         {simulation.frame === null ? null : (
-          <SocietyPanel
-            cultures={simulation.frame.society.cultures}
-            dashboard={simulation.frame.society.dashboard}
-            relationshipEventPage={simulation.relationshipEventPage}
-            relationshipPage={simulation.relationshipPage}
-            onRelationshipEventPageRequest={simulation.requestRelationshipEventPage}
-            onRelationshipPageRequest={simulation.requestRelationshipPage}
-            onTimelinePageRequest={simulation.requestTimelinePage}
-            people={simulation.frame.society.people}
-            timeline={simulation.timeline.entries}
-            timelineOffset={simulation.timeline.offset}
-            timelineTotal={simulation.timeline.total}
-          />
+          <>
+            <SocietyPanel
+              cultures={simulation.frame.society.cultures}
+              dashboard={simulation.frame.society.dashboard}
+              relationshipEventPage={simulation.relationshipEventPage}
+              relationshipPage={simulation.relationshipPage}
+              onRelationshipEventPageRequest={simulation.requestRelationshipEventPage}
+              onRelationshipPageRequest={simulation.requestRelationshipPage}
+              onTimelinePageRequest={simulation.requestTimelinePage}
+              people={simulation.frame.society.people}
+              timeline={simulation.timeline.entries}
+              timelineOffset={simulation.timeline.offset}
+              timelineTotal={simulation.timeline.total}
+            />
+            <DevelopmentPanel
+              development={simulation.frame.development}
+              disabled={simulation.status !== 'ready'}
+              isPending={interventionPending}
+              onQueueIntervention={queueIntervention}
+              targetTileIndex={simulation.frame.agentTiles[0] ?? 0}
+            />
+            {interventionStatus === null ? null : (
+              <p className="intervention-status" role="status">
+                {interventionStatus}
+              </p>
+            )}
+          </>
         )}
 
         <FocusPersistencePanel

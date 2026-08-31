@@ -808,6 +808,133 @@ textarea:focus-visible,
   box-shadow: 0 26px 70px rgba(0, 0, 0, 0.2);
 }
 
+.development-panel {
+  display: grid;
+  gap: 18px;
+  margin-top: 18px;
+  padding: 22px;
+  border: 1px solid rgba(238, 220, 181, 0.13);
+  background: rgba(14, 22, 17, 0.89);
+  box-shadow: 0 26px 70px rgba(0, 0, 0, 0.2);
+}
+
+.development-panel > section,
+.development-intervention-form {
+  padding: 16px;
+  border: 1px solid rgba(218, 202, 167, 0.12);
+  background: #0a120d;
+}
+
+.development-panel h3,
+.development-panel p,
+.development-panel ul {
+  margin: 0;
+}
+
+.development-panel h3 {
+  margin-bottom: 12px;
+  color: #e9d6a5;
+}
+
+.development-panel dl {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+  margin: 0;
+}
+
+.development-panel dl > div {
+  min-width: 0;
+  padding: 9px;
+  background: #101b14;
+}
+
+.development-panel dt {
+  color: #93a392;
+  font-size: 0.68rem;
+}
+
+.development-panel dd {
+  margin: 5px 0 0;
+  overflow-wrap: anywhere;
+  color: #f0e2b9;
+  font-size: 0.78rem;
+}
+
+.development-panel ul,
+.development-panel p,
+.development-intervention-form {
+  color: #bdcabb;
+  font-size: 0.78rem;
+  line-height: 1.6;
+}
+
+.development-intervention-form summary {
+  color: #e9d6a5;
+  cursor: pointer;
+  font-weight: 750;
+}
+
+.development-intervention-form form,
+.development-intervention-form > p,
+.development-intervention-form fieldset,
+.development-intervention-form label {
+  display: grid;
+  gap: 10px;
+}
+
+.development-intervention-form form,
+.development-intervention-form > p {
+  margin-top: 14px;
+}
+
+.development-intervention-form fieldset {
+  margin: 0;
+  padding: 0;
+  border: 0;
+}
+
+.development-intervention-form fieldset fieldset {
+  display: flex;
+  flex-wrap: wrap;
+}
+
+.development-intervention-form label {
+  color: #cbd8c9;
+}
+
+.development-intervention-form select,
+.development-intervention-form input[type='number'] {
+  min-height: 42px;
+  border: 1px solid #4f6452;
+  border-radius: 3px;
+  background: #0a110d;
+  color: #f0f5ee;
+  padding: 9px 11px;
+}
+
+.development-intervention-form button {
+  min-height: 42px;
+  border: 1px solid #d8a74e;
+  border-radius: 3px;
+  background: #91602b;
+  color: #fff4d7;
+  cursor: pointer;
+  padding: 9px 14px;
+  font-weight: 750;
+}
+
+.development-intervention-form button:disabled {
+  cursor: not-allowed;
+  opacity: 0.48;
+}
+
+.intervention-status {
+  margin: 8px 0 0;
+  color: #c7d5c4;
+  font-size: 0.76rem;
+}
+
 .society-panel > .card-heading {
   grid-column: 1 / -1;
 }
@@ -978,6 +1105,7 @@ textarea:focus-visible,
 .calm-mode .lab-intro,
 .calm-mode .telemetry-card,
 .calm-mode .society-panel,
+.calm-mode .development-panel,
 .calm-mode .world-card > .card-heading,
 .calm-mode .overlay-picker,
 .calm-mode .camera-toolbar {
@@ -1062,6 +1190,7 @@ textarea:focus-visible,
   }
 
   .society-dashboard,
+  .development-panel dl,
   .biography-panel dl,
   .culture-list dl,
   .relationship-detail dl,
