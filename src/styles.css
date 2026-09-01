@@ -808,6 +808,17 @@ textarea:focus-visible,
   box-shadow: 0 26px 70px rgba(0, 0, 0, 0.2);
 }
 
+.civilizations-panel {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 18px;
+  margin-top: 18px;
+  padding: 22px;
+  border: 1px solid rgba(238, 220, 181, 0.13);
+  background: rgba(14, 22, 17, 0.89);
+  box-shadow: 0 26px 70px rgba(0, 0, 0, 0.2);
+}
+
 .development-panel {
   display: grid;
   gap: 18px;
@@ -939,7 +950,18 @@ textarea:focus-visible,
   grid-column: 1 / -1;
 }
 
+.civilizations-panel > .card-heading {
+  grid-column: 1 / -1;
+}
+
 .society-panel > section {
+  min-width: 0;
+  padding: 16px;
+  border: 1px solid rgba(218, 202, 167, 0.12);
+  background: #0a120d;
+}
+
+.civilizations-panel > section {
   min-width: 0;
   padding: 16px;
   border: 1px solid rgba(218, 202, 167, 0.12);
@@ -953,10 +975,23 @@ textarea:focus-visible,
   color: #e9d6a5;
 }
 
+.civilizations-panel h3,
+.civilizations-panel h4 {
+  margin: 0 0 12px;
+  color: #e9d6a5;
+}
+
 .society-dashboard,
 .biography-panel dl,
 .culture-list dl,
 .relationship-detail dl {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+  margin: 0;
+}
+
+.civilization-facts {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 8px;
@@ -972,7 +1007,18 @@ textarea:focus-visible,
   background: #101b14;
 }
 
+.civilization-facts > div {
+  min-width: 0;
+  padding: 9px;
+  background: #101b14;
+}
+
 .society-panel dt {
+  color: #93a392;
+  font-size: 0.68rem;
+}
+
+.civilizations-panel dt {
   color: #93a392;
   font-size: 0.68rem;
 }
@@ -984,7 +1030,21 @@ textarea:focus-visible,
   font-size: 0.78rem;
 }
 
+.civilizations-panel dd {
+  margin: 5px 0 0;
+  overflow-wrap: anywhere;
+  color: #f0e2b9;
+  font-size: 0.78rem;
+}
+
 .society-panel label {
+  display: grid;
+  gap: 7px;
+  color: #cbd8c9;
+  font-size: 0.78rem;
+}
+
+.civilizations-panel label {
   display: grid;
   gap: 7px;
   color: #cbd8c9;
@@ -999,6 +1059,38 @@ textarea:focus-visible,
   background: #0a110d;
   color: #f0f5ee;
   padding: 9px 11px;
+}
+
+.civilizations-panel select {
+  width: 100%;
+  min-height: 42px;
+  border: 1px solid #4f6452;
+  border-radius: 3px;
+  background: #0a110d;
+  color: #f0f5ee;
+  padding: 9px 11px;
+}
+
+.civilization-detail {
+  display: grid;
+  gap: 12px;
+  margin-top: 14px;
+}
+
+.civilization-detail h4 {
+  margin-bottom: 0;
+}
+
+.civilization-list,
+.civilizations-panel p {
+  margin: 0;
+  color: #bdcabb;
+  font-size: 0.78rem;
+  line-height: 1.6;
+}
+
+.civilization-list {
+  padding-left: 20px;
 }
 
 .biography-panel {
@@ -1105,6 +1197,7 @@ textarea:focus-visible,
 .calm-mode .lab-intro,
 .calm-mode .telemetry-card,
 .calm-mode .society-panel,
+.calm-mode .civilizations-panel,
 .calm-mode .development-panel,
 .calm-mode .world-card > .card-heading,
 .calm-mode .overlay-picker,
@@ -1124,6 +1217,7 @@ textarea:focus-visible,
   .lab-intro,
   .lab-grid,
   .society-panel,
+  .civilizations-panel,
   .focus-layout,
   .focus-lower-grid {
     grid-template-columns: 1fr;
@@ -1190,6 +1284,7 @@ textarea:focus-visible,
   }
 
   .society-dashboard,
+  .civilization-facts,
   .development-panel dl,
   .biography-panel dl,
   .culture-list dl,

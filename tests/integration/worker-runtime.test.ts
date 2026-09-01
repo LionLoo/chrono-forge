@@ -6,13 +6,14 @@ import {
   type WorkerToUiMessage,
 } from '../../src/protocol';
 import { serializeWorldSnapshot } from '../../src/simulation/persistence';
-import { appendWorldEvent, createInitialWorld } from '../../src/simulation/world';
+import { appendWorldEvent, createInitialWorld, stepWorld } from '../../src/simulation/world';
 import {
   createSimulationRuntime,
   MAX_OFFLINE_CATCH_UP_MILLISECONDS,
   MAX_OFFLINE_CATCH_UP_TICKS,
   MAX_RECENT_WORKER_EVENTS,
   OFFLINE_CATCH_UP_POLICY_VERSION,
+  projectWorldFrame,
 } from '../../src/workers/simulation-runtime';
 
 function messageOfType<TType extends WorkerToUiMessage['type']>(
@@ -127,6 +128,36 @@ describe('simulation worker runtime', () => {
     expect(last.total).toBe(first.total);
     expect(last.offset).toBe(Math.floor((last.total - 1) / 8) * 8);
     expect(last.timeline.at(-1)?.id).toBe(society.timeline.at(-1)?.id);
+  });
+
+  it('matches the authoritative M6 read-only projection after Worker execution', () => {
+    const seed = [7, 11, 13, 17] as const;
+    const config = { societyYearTicks: 5_000 };
+    const expected = projectWorldFrame(stepWorld(createInitialWorld(seed, config), 25_000));
+    const responses: WorkerToUiMessage[] = [];
+    const runtime = createSimulationRuntime((message) => responses.push(message));
+    runtime.handleMessage({
+      type: 'initialize',
+      protocolVersion: WORKER_PROTOCOL_VERSION,
+      requestId: 'm6-initialize',
+      seed,
+      config,
+    });
+    runtime.handleMessage({
+      type: 'advanceTicks',
+      protocolVersion: WORKER_PROTOCOL_VERSION,
+      requestId: 'm6-advance',
+      ticks: 25_000,
+    });
+
+    const frame = lastMessageOfType(responses, 'frameDelta').frame;
+    expect(frame.civilizations).toStrictEqual(expected.civilizations);
+    expect(frame.civilizations.tileOwners).not.toBe(expected.civilizations.tileOwners);
+    expect(frame.civilizations.settlements.map((settlement) => settlement.id)).toStrictEqual(
+      [...frame.civilizations.settlements]
+        .sort((left, right) => left.id - right.id)
+        .map((settlement) => settlement.id),
+    );
   });
 
   it('bounds recent event batches while keeping older history Worker-browsable', () => {

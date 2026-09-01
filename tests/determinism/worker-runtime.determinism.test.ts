@@ -6,6 +6,37 @@ import {
 } from '../../src/workers/simulation-runtime';
 
 describe('worker runtime determinism', () => {
+  it('preserves the M6 projection across equivalent Worker tick partitions', () => {
+    const run = (partitions: readonly number[]) => {
+      const responses: WorkerToUiMessage[] = [];
+      const runtime = createSimulationRuntime((message) => responses.push(message));
+      runtime.handleMessage({
+        type: 'initialize',
+        protocolVersion: WORKER_PROTOCOL_VERSION,
+        requestId: 'm6-initialize',
+        seed: [37, 41, 43, 47],
+        config: { societyYearTicks: 5_000 },
+      });
+      for (const [index, ticks] of partitions.entries()) {
+        runtime.handleMessage({
+          type: 'advanceTicks',
+          protocolVersion: WORKER_PROTOCOL_VERSION,
+          requestId: `m6-advance-${index}`,
+          ticks,
+        });
+      }
+      const frame = responses.filter((message) => message.type === 'frameDelta').at(-1);
+      if (frame?.type !== 'frameDelta') throw new Error('Worker runtime did not emit an M6 frame.');
+      return frame.frame;
+    };
+
+    const direct = run([25_000]);
+    const partitioned = run([1_337, 2_411, 5_000, 7_252, 9_000]);
+    expect(partitioned.tick).toBe(direct.tick);
+    expect(partitioned.stateHash).toBe(direct.stateHash);
+    expect(partitioned.civilizations).toStrictEqual(direct.civilizations);
+  });
+
   it('matches the main-runtime world hash for the same seed and fixed tick count', () => {
     const seed = [101, 202, 303, 404] as const;
     const mainRuntimeHash = hashWorldState(stepWorld(createInitialWorld(seed), 250));

@@ -1,5 +1,20 @@
 import { hashCanonicalJson } from '../canonical';
 import {
+  advanceCivilizations,
+  assertCivilizationsInvariants,
+  civilizationsDto,
+  createInitialCivilizations,
+  selectCoMigrationPerson,
+  selectConflictTargetCivilization,
+  selectPoliticalSupportCivilization,
+  selectRefugeeSupportSettlement,
+  type CivilizationEventDraft,
+  type CivilizationsContext,
+  type CivilizationsInitialization,
+  type CivilizationsState,
+  type CommunityReserves,
+} from '../civilizations';
+import {
   advanceDevelopment,
   assertDevelopmentInvariants,
   createInitialDevelopment,
@@ -16,10 +31,14 @@ import { deriveXoshiro128State, Xoshiro128StarStar } from '../random';
 import {
   childArrivalEligibilityEvidenceMatchesRecord,
   childArrivalEligibilityEventMatches,
+  findActiveRelationship,
   synchronizeInterpersonalPeople,
   type ChildArrivalEligibilityEvidence,
 } from '../relationships';
-import { applyRelationshipExperience } from '../relationships/lifecycle';
+import {
+  applyRelationshipExperience,
+  relationshipDecisionInfluence,
+} from '../relationships/lifecycle';
 import {
   ACCELERATED_YEAR_TICKS,
   NORMAL_YEAR_TICKS,
@@ -116,6 +135,7 @@ export interface WorldState extends WorldTileFields {
   readonly eventLog: readonly WorldEvent[];
   readonly chunks: readonly WorldChunk[];
   readonly civilization: CivilizationState;
+  readonly civilizations: CivilizationsState;
   readonly development: DevelopmentState;
   /** Compatibility projection; it aliases the root-level authoritative fields. */
   readonly tiles: WorldTileFields;
@@ -128,6 +148,11 @@ const ENTITY_KINDS: readonly EntityKind[] = Object.freeze([
   'culture',
   'group',
   'institution',
+  'settlement',
+  'civilization',
+  'route',
+  'conflict',
+  'ruin',
   'world',
 ]);
 
@@ -151,6 +176,16 @@ function worldReferenceExists(state: WorldState, kind: EntityKind, id: number): 
       return state.civilization.society.groups.some((group) => group.id === id);
     case 'institution':
       return state.civilization.society.institution.id === id;
+    case 'settlement':
+      return state.civilizations.settlements.some((settlement) => settlement.id === id);
+    case 'civilization':
+      return state.civilizations.civilizations.some((civilization) => civilization.id === id);
+    case 'route':
+      return state.civilizations.routes.some((route) => route.id === id);
+    case 'conflict':
+      return state.civilizations.conflicts.some((conflict) => conflict.id === id);
+    case 'ruin':
+      return state.civilizations.ruins.some((ruin) => ruin.id === id);
   }
 }
 
@@ -340,6 +375,43 @@ function arrayDto(values: ArrayLike<number>): number[] {
   return Array.from(values);
 }
 
+export type CivilizationsWorldSource = Pick<
+  WorldState,
+  'seed' | 'config' | 'tick' | 'civilization'
+>;
+
+/** Canonical one-settlement baseline used by both new worlds and v5 migration. */
+export function civilizationsInitializationForWorld(
+  state: CivilizationsWorldSource,
+): CivilizationsInitialization {
+  const culture = [...state.civilization.society.cultures].sort(
+    (left, right) => left.id - right.id,
+  )[0];
+  if (culture === undefined) throw new Error('A founding culture is required.');
+  return Object.freeze({
+    worldWidth: state.config.width,
+    worldHeight: state.config.height,
+    settlementName: `${culture.name} Hearth`,
+    civilizationName: `${culture.name} People`,
+    centerTileIndex: state.civilization.centerTileIndex,
+    cultureId: culture.id,
+    personIds: Object.freeze(
+      state.civilization.society.people.map((person) => person.id).sort((a, b) => a - b),
+    ),
+    householdIds: Object.freeze(
+      state.civilization.society.households.map((household) => household.id).sort((a, b) => a - b),
+    ),
+    reserves: Object.freeze({
+      food: state.civilization.stockpile.food,
+      water: state.civilization.stockpile.water,
+      timber: state.civilization.stockpile.timber,
+      stone: state.civilization.stockpile.stone,
+      metal: 0,
+    }),
+    stability: state.civilization.society.stability,
+  });
+}
+
 /** Builds an immutable world snapshot from only a seed and integer configuration. */
 export function createInitialWorld(
   seed: WorldSeed,
@@ -526,6 +598,16 @@ export function createInitialWorld(
     }),
   ]);
   const foundedCivilization = attachFactualMemories(civilization, [initialEvents[1]!]);
+  const civilizations = createInitialCivilizations(
+    normalizedSeed,
+    0,
+    civilizationsInitializationForWorld({
+      seed: normalizedSeed,
+      config,
+      tick: 0,
+      civilization: foundedCivilization,
+    }),
+  );
 
   return Object.freeze({
     seed: Object.freeze(normalizedSeed),
@@ -535,6 +617,7 @@ export function createInitialWorld(
     eventLog: initialEvents,
     chunks: makeChunks(config),
     civilization: foundedCivilization,
+    civilizations,
     development: createInitialDevelopment(normalizedSeed, 0),
     ...tiles,
     tiles,
@@ -1034,6 +1117,770 @@ function biographyHistoricalSources(
   );
 }
 
+const M6_FOUNDING_SITE_SAMPLES = 64;
+
+function communityReservesFromFounding(state: WorldState): CommunityReserves {
+  return Object.freeze({
+    food: state.civilization.stockpile.food,
+    water: state.civilization.stockpile.water,
+    timber: state.civilization.stockpile.timber,
+    stone: state.civilization.stockpile.stone,
+    metal: 0,
+  });
+}
+
+function m6Profile(state: WorldState): 'cooperative' | 'coexistence' | 'expansionist' | 'volatile' {
+  const value = state.seed[0] % 64;
+  if (value < 16) return 'cooperative';
+  if (value < 32) return 'coexistence';
+  if (value < 48) return 'expansionist';
+  return 'volatile';
+}
+
+function nextFoundingSite(state: WorldState): number | null {
+  const tileCount = state.config.width * state.config.height;
+  const origin = state.civilization.centerTileIndex;
+  const originX = origin % state.config.width;
+  const originY = Math.trunc(origin / state.config.width);
+  let best: { index: number; score: number } | null = null;
+  const samples = Math.min(tileCount, M6_FOUNDING_SITE_SAMPLES);
+  for (let sample = 0; sample < samples; sample += 1) {
+    const index = Math.floor((sample * tileCount) / samples);
+    if (!isWalkableTile(state, index) || state.civilizations.tileOwners[index] !== 0) continue;
+    const x = index % state.config.width;
+    const y = Math.trunc(index / state.config.width);
+    const distance = Math.abs(x - originX) + Math.abs(y - originY);
+    if (distance < Math.max(4, Math.trunc(Math.min(state.config.width, state.config.height) / 5)))
+      continue;
+    const score =
+      (state.habitability[index] ?? 0) * 4 +
+      Math.trunc((state.freshWater[index] ?? 0) / 8) +
+      Math.trunc((state.food[index] ?? 0) / 5) +
+      Math.trunc((state.timber[index] ?? 0) / 10) +
+      Math.trunc((state.stone[index] ?? 0) / 12) -
+      (state.hazard[index] ?? 0) * 2 +
+      distance;
+    if (best === null || score > best.score || (score === best.score && index < best.index))
+      best = { index, score };
+  }
+  return best?.index ?? null;
+}
+
+function foundingHousehold(state: WorldState): {
+  readonly householdIds: readonly number[];
+  readonly personIds: readonly number[];
+  readonly cultureId: number;
+} | null {
+  const primarySettlementId = state.civilizations.settlements[0]?.id;
+  if (primarySettlementId === undefined) return null;
+  const primaryPeople = new Set(
+    state.civilizations.residencies
+      .filter(
+        (entry) =>
+          entry.subjectKind === 'person' &&
+          entry.settlementId === primarySettlementId &&
+          entry.endedTick === null,
+      )
+      .map((entry) => entry.subjectId),
+  );
+  const eligible = state.civilization.society.people
+    .filter((person) => person.alive && primaryPeople.has(person.id))
+    .sort((left, right) => left.id - right.id);
+  const lead = eligible[0];
+  if (lead === undefined) return null;
+  const companionId = selectCoMigrationPerson(
+    eligible.slice(1).map((person) => {
+      const edge = findActiveRelationship(
+        state.civilization.society.interpersonal,
+        lead.id,
+        person.id,
+      );
+      return Object.freeze({
+        id: person.id,
+        personId: person.id,
+        baseUtility: person.health,
+        relationshipDecisionInfluence:
+          edge === undefined ? 0 : relationshipDecisionInfluence(edge, lead.id, 'migration'),
+      });
+    }),
+  );
+  const householdIds = [
+    ...new Set(
+      [lead.id, companionId]
+        .filter((id): id is number => id !== null)
+        .map(
+          (id) => state.civilization.society.people.find((person) => person.id === id)!.householdId,
+        ),
+    ),
+  ].sort((left, right) => left - right);
+  const people = state.civilization.society.people
+    .filter(
+      (person) =>
+        person.alive && householdIds.includes(person.householdId) && primaryPeople.has(person.id),
+    )
+    .map((person) => person.id)
+    .sort((left, right) => left - right);
+  return Object.freeze({
+    householdIds: Object.freeze(householdIds),
+    personIds: Object.freeze(people),
+    cultureId: lead.cultureId,
+  });
+}
+
+function civilizationResidentIds(state: WorldState, civilizationId: number): readonly number[] {
+  const civilization = state.civilizations.civilizations.find(
+    (candidate) => candidate.id === civilizationId,
+  );
+  if (civilization === undefined) return Object.freeze([]);
+  const settlementIds = new Set(civilization.memberSettlementIds);
+  return Object.freeze(
+    state.civilizations.residencies
+      .filter(
+        (residency) =>
+          residency.subjectKind === 'person' &&
+          residency.endedTick === null &&
+          settlementIds.has(residency.settlementId),
+      )
+      .map((residency) => residency.subjectId)
+      .sort((left, right) => left - right),
+  );
+}
+
+/** Sparse-edge geopolitical input; work is proportional to retained bonds, never person pairs. */
+function civilizationRelationshipInfluence(
+  state: WorldState,
+  sourceCivilizationId: number,
+  targetCivilizationId: number,
+  domain: 'politics' | 'conflict',
+): number {
+  const sourceIds = new Set(civilizationResidentIds(state, sourceCivilizationId));
+  const targetIds = new Set(civilizationResidentIds(state, targetCivilizationId));
+  let influence = 0;
+  for (const edge of state.civilization.society.interpersonal.active) {
+    const sourcePersonId =
+      sourceIds.has(edge.firstPersonId) && targetIds.has(edge.secondPersonId)
+        ? edge.firstPersonId
+        : sourceIds.has(edge.secondPersonId) && targetIds.has(edge.firstPersonId)
+          ? edge.secondPersonId
+          : null;
+    if (sourcePersonId !== null)
+      influence += relationshipDecisionInfluence(edge, sourcePersonId, domain);
+  }
+  return Math.max(-1_000, Math.min(1_000, influence));
+}
+
+function civilizationMaterialStrength(state: WorldState, civilizationId: number): number {
+  const civilization = state.civilizations.civilizations.find(
+    (candidate) => candidate.id === civilizationId,
+  );
+  if (civilization === undefined) return 0;
+  const memberIds = new Set(civilization.memberSettlementIds);
+  return state.civilizations.settlements
+    .filter((settlement) => settlement.status === 'active' && memberIds.has(settlement.id))
+    .reduce(
+      (total, settlement) =>
+        total +
+        settlement.population * 4 +
+        settlement.stability +
+        settlement.reserves.food +
+        settlement.reserves.water +
+        settlement.reserves.timber +
+        settlement.reserves.stone +
+        settlement.reserves.metal,
+      0,
+    );
+}
+
+export function createCivilizationsContext(state: WorldState, tick: number): CivilizationsContext {
+  const year = Math.trunc(tick / state.config.societyYearTicks);
+  const profile = m6Profile(state);
+  const activeSettlements = state.civilizations.settlements.filter(
+    (settlement) => settlement.status === 'active',
+  );
+  const activeCivilizations = state.civilizations.civilizations.filter(
+    (civilization) => civilization.endedTick === null,
+  );
+  const inhabitedCivilizations = activeCivilizations.filter(
+    (civilization) => civilizationResidentIds(state, civilization.id).length > 0,
+  );
+  const site = nextFoundingSite(state);
+  const household = foundingHousehold(state);
+  const reserves = communityReservesFromFounding(state);
+  const canFound =
+    year >= 1 &&
+    year % 3 === 1 &&
+    activeSettlements.length < 4 &&
+    site !== null &&
+    household !== null &&
+    reserves.food >= 5 &&
+    reserves.water >= 5 &&
+    reserves.timber >= 2 &&
+    reserves.stone >= 1;
+  const orderedCultures = [...state.civilization.society.cultures].sort(
+    (left, right) => left.id - right.id,
+  );
+  const foundingCulture = orderedCultures[activeSettlements.length % orderedCultures.length];
+  const communityLabel = foundingCulture?.name ?? 'New';
+  const foundingCandidates = canFound
+    ? Object.freeze([
+        Object.freeze({
+          name: `${communityLabel} Hearth ${state.civilizations.settlements.length + 1}`,
+          civilizationName: `${communityLabel} Community ${state.civilizations.civilizations.length + 1}`,
+          cultureId: foundingCulture?.id ?? household.cultureId,
+          centerTileIndex: site,
+          siteScore: 100,
+          personIds: household.personIds,
+          householdIds: household.householdIds,
+          reserveTransfer: Object.freeze({ food: 5, water: 5, timber: 2, stone: 1, metal: 0 }),
+          stability: state.civilization.society.stability,
+        }),
+      ])
+    : Object.freeze([]);
+  const economies = Object.freeze(
+    activeSettlements.map((settlement, index) =>
+      Object.freeze({
+        settlementId: settlement.id,
+        production:
+          index === 0
+            ? Object.freeze({ food: 0, water: 0, timber: 0, stone: 0, metal: 0 })
+            : Object.freeze({
+                food: Math.max(1, Math.trunc((state.food[settlement.centerTileIndex] ?? 0) / 120)),
+                water: Math.max(
+                  1,
+                  Math.trunc((state.freshWater[settlement.centerTileIndex] ?? 0) / 180),
+                ),
+                timber: Math.trunc((state.timber[settlement.centerTileIndex] ?? 0) / 220),
+                stone: Math.trunc((state.stone[settlement.centerTileIndex] ?? 0) / 260),
+                metal: Math.trunc((state.metal[settlement.centerTileIndex] ?? 0) / 80),
+              }),
+        consumption:
+          index === 0
+            ? Object.freeze({ food: 0, water: 0, timber: 0, stone: 0, metal: 0 })
+            : Object.freeze({
+                food: Math.max(1, Math.ceil(settlement.population / 3)),
+                water: Math.max(1, Math.ceil(settlement.population / 3)),
+                timber: 0,
+                stone: 0,
+                metal: 0,
+              }),
+        stabilityDelta:
+          profile === 'volatile' && year >= 30
+            ? -3
+            : (state.hazard[settlement.centerTileIndex] ?? 0) > 120
+              ? -1
+              : 1,
+      }),
+    ),
+  );
+  const routeCandidates = Object.freeze(
+    activeSettlements.flatMap((left, leftIndex) =>
+      activeSettlements.slice(leftIndex + 1).map((right) =>
+        Object.freeze({
+          firstSettlementId: left.id,
+          secondSettlementId: right.id,
+          utility: profile === 'coexistence' && year >= 25 && year <= 27 ? -70 : 70,
+          volume: Math.max(1, Math.min(12, left.population + right.population)),
+        }),
+      ),
+    ),
+  );
+  const diplomaticScore =
+    profile === 'cooperative'
+      ? 80
+      : profile === 'coexistence'
+        ? 20
+        : profile === 'volatile' && year < 30
+          ? 70
+          : -80;
+  const diplomacyCandidates = Object.freeze(
+    activeCivilizations.flatMap((left, leftIndex) =>
+      activeCivilizations.slice(leftIndex + 1).map((right) =>
+        Object.freeze({
+          firstCivilizationId: left.id,
+          secondCivilizationId: right.id,
+          score: diplomaticScore,
+        }),
+      ),
+    ),
+  );
+  const conflictAttacker = [...inhabitedCivilizations].sort(
+    (left, right) =>
+      civilizationMaterialStrength(state, right.id) -
+        civilizationMaterialStrength(state, left.id) || left.id - right.id,
+  )[0];
+  const conflictDrive =
+    profile === 'expansionist' && year >= 8 ? 80 : profile === 'volatile' && year >= 35 ? 80 : 0;
+  const conflictTargetId =
+    conflictAttacker === undefined
+      ? null
+      : selectConflictTargetCivilization(
+          inhabitedCivilizations
+            .filter((candidate) => candidate.id !== conflictAttacker.id)
+            .map((candidate) => ({
+              id: candidate.id,
+              civilizationId: candidate.id,
+              baseUtility: Math.max(0, -diplomaticScore),
+              relationshipDecisionInfluence: civilizationRelationshipInfluence(
+                state,
+                conflictAttacker.id,
+                candidate.id,
+                'conflict',
+              ),
+            })),
+        );
+  const selectedConflictInfluence =
+    conflictAttacker === undefined || conflictTargetId === null
+      ? 0
+      : civilizationRelationshipInfluence(state, conflictAttacker.id, conflictTargetId, 'conflict');
+  const conflictUtility =
+    conflictDrive +
+    Math.max(0, -diplomaticScore) +
+    Math.max(-60, selectedConflictInfluence) +
+    Math.trunc(state.civilization.society.scarcity / 10);
+  const conflictCandidates =
+    conflictDrive > 0 &&
+    conflictAttacker !== undefined &&
+    conflictTargetId !== null &&
+    conflictUtility >= 100
+      ? Object.freeze([
+          Object.freeze({
+            attackerCivilizationId: conflictAttacker.id,
+            defenderCivilizationId: conflictTargetId,
+            pressure: Math.max(1, Math.min(1_000, conflictUtility)),
+          }),
+        ])
+      : Object.freeze([]);
+  const conflictResolutions = Object.freeze(
+    state.civilizations.conflicts
+      .filter(
+        (conflict) =>
+          conflict.status === 'active' &&
+          tick - conflict.startedTick >= state.config.societyYearTicks * 4,
+      )
+      .map((conflict) => {
+        const attackerStrength = civilizationMaterialStrength(
+          state,
+          conflict.attackerCivilizationId,
+        );
+        const defenderStrength = civilizationMaterialStrength(
+          state,
+          conflict.defenderCivilizationId,
+        );
+        return Object.freeze({
+          conflictId: conflict.id,
+          winnerCivilizationId:
+            attackerStrength > defenderStrength
+              ? conflict.attackerCivilizationId
+              : defenderStrength > attackerStrength
+                ? conflict.defenderCivilizationId
+                : Math.min(conflict.attackerCivilizationId, conflict.defenderCivilizationId),
+        });
+      }),
+  );
+  const ruinDrive = profile === 'volatile' && year >= 45 ? 70 : 0;
+  const ruinCandidate = activeSettlements
+    .filter((settlement) => settlement.id !== activeSettlements[0]?.id)
+    .map((settlement) => ({
+      settlement,
+      utility:
+        ruinDrive +
+        (100 - settlement.stability) +
+        Math.max(0, 5 - settlement.reserves.food) * 5 +
+        Math.max(0, 5 - settlement.reserves.water) * 5,
+    }))
+    .sort(
+      (left, right) => right.utility - left.utility || right.settlement.id - left.settlement.id,
+    )[0];
+  const ruinSettlementIds =
+    ruinCandidate !== undefined && ruinCandidate.utility >= 100
+      ? Object.freeze([ruinCandidate.settlement.id])
+      : Object.freeze([]);
+  const transferSources = [
+    ...conflictResolutions.flatMap((resolution) => {
+      const conflict = state.civilizations.conflicts.find(
+        (candidate) => candidate.id === resolution.conflictId,
+      );
+      if (conflict === undefined) return [];
+      const loserCivilizationId =
+        conflict.attackerCivilizationId === resolution.winnerCivilizationId
+          ? conflict.defenderCivilizationId
+          : conflict.attackerCivilizationId;
+      const loser = activeCivilizations.find(
+        (civilization) => civilization.id === loserCivilizationId,
+      );
+      return loser === undefined
+        ? []
+        : loser.memberSettlementIds.filter(
+            (settlementId) =>
+              activeSettlements.find((settlement) => settlement.id === settlementId)?.status ===
+              'active',
+          );
+    }),
+    ...ruinSettlementIds,
+  ].filter((settlementId, index, values) => values.indexOf(settlementId) === index);
+  const residencyTransfers = Object.freeze(
+    transferSources.flatMap((fromSettlementId) => {
+      const personIds = state.civilizations.residencies
+        .filter(
+          (entry) =>
+            entry.subjectKind === 'person' &&
+            entry.settlementId === fromSettlementId &&
+            entry.endedTick === null,
+        )
+        .map((entry) => entry.subjectId)
+        .sort((left, right) => left - right);
+      const householdIds = state.civilizations.residencies
+        .filter(
+          (entry) =>
+            entry.subjectKind === 'household' &&
+            entry.settlementId === fromSettlementId &&
+            entry.endedTick === null,
+        )
+        .map((entry) => entry.subjectId)
+        .sort((left, right) => left - right);
+      const refugeeId = personIds[0] ?? null;
+      const destinationIds = activeSettlements
+        .filter((settlement) => !transferSources.includes(settlement.id))
+        .map((settlement) => settlement.id);
+      const toSettlementId = selectRefugeeSupportSettlement(
+        destinationIds.map((settlementId) => {
+          const residentIds = state.civilizations.residencies
+            .filter(
+              (entry) =>
+                entry.subjectKind === 'person' &&
+                entry.settlementId === settlementId &&
+                entry.endedTick === null,
+            )
+            .map((entry) => entry.subjectId);
+          let influence = 0;
+          if (refugeeId !== null)
+            for (const residentId of residentIds) {
+              const edge = findActiveRelationship(
+                state.civilization.society.interpersonal,
+                refugeeId,
+                residentId,
+              );
+              if (edge !== undefined)
+                influence = Math.max(
+                  influence,
+                  relationshipDecisionInfluence(edge, refugeeId, 'help'),
+                );
+            }
+          const settlement = activeSettlements.find((entry) => entry.id === settlementId)!;
+          return Object.freeze({
+            id: settlementId,
+            settlementId,
+            baseUtility: settlement.stability,
+            relationshipDecisionInfluence: influence,
+          });
+        }),
+      );
+      return toSettlementId === null
+        ? []
+        : [
+            Object.freeze({
+              fromSettlementId,
+              toSettlementId,
+              personIds: Object.freeze(personIds),
+              householdIds: Object.freeze(householdIds),
+              reason: 'refugee' as const,
+            }),
+          ];
+    }),
+  );
+  const politicalSource = inhabitedCivilizations.find(
+    (civilization) => civilization.status !== 'federated',
+  );
+  const politicalSupportTargetId =
+    politicalSource === undefined
+      ? null
+      : selectPoliticalSupportCivilization(
+          inhabitedCivilizations
+            .filter((candidate) => candidate.id !== politicalSource.id)
+            .map((candidate) => ({
+              id: candidate.id,
+              civilizationId: candidate.id,
+              baseUtility: Math.max(0, diplomaticScore),
+              relationshipDecisionInfluence: civilizationRelationshipInfluence(
+                state,
+                politicalSource.id,
+                candidate.id,
+                'politics',
+              ),
+            })),
+        );
+  const politicalInfluence =
+    politicalSource === undefined || politicalSupportTargetId === null
+      ? 0
+      : civilizationRelationshipInfluence(
+          state,
+          politicalSource.id,
+          politicalSupportTargetId,
+          'politics',
+        );
+  const federationUtility =
+    (year >= 15 && (profile === 'cooperative' || (profile === 'volatile' && year < 30)) ? 40 : 0) +
+    Math.max(0, diplomaticScore) +
+    Math.max(-60, politicalInfluence);
+  const federationCivilizationIds =
+    politicalSource !== undefined && politicalSupportTargetId !== null && federationUtility >= 100
+      ? Object.freeze(
+          [politicalSource.id, politicalSupportTargetId].sort((left, right) => left - right),
+        )
+      : Object.freeze([]);
+  const fragmentationDrive = profile === 'volatile' && year >= 30 ? 70 : 0;
+  const fragmentationCivilizationIds =
+    fragmentationDrive + Math.max(0, -diplomaticScore) >= 100
+      ? Object.freeze(
+          activeCivilizations
+            .filter((civilization) => civilization.status === 'federated')
+            .map((civilization) => civilization.id),
+        )
+      : Object.freeze([]);
+  const territoryChanges = Object.freeze([
+    ...conflictResolutions.flatMap((resolution) => {
+      const conflict = state.civilizations.conflicts.find(
+        (candidate) => candidate.id === resolution.conflictId,
+      );
+      const winner = activeCivilizations.find(
+        (civilization) => civilization.id === resolution.winnerCivilizationId,
+      );
+      const loser = activeCivilizations.find(
+        (civilization) =>
+          conflict !== undefined &&
+          civilization.id ===
+            (conflict.attackerCivilizationId === resolution.winnerCivilizationId
+              ? conflict.defenderCivilizationId
+              : conflict.attackerCivilizationId),
+      );
+      const winnerSettlement = activeSettlements.find(
+        (settlement) => settlement.id === winner?.foundingSettlementId,
+      );
+      const loserSettlement = activeSettlements.find(
+        (settlement) => settlement.id === loser?.foundingSettlementId,
+      );
+      return winnerSettlement === undefined || loserSettlement === undefined
+        ? []
+        : [
+            Object.freeze({
+              tileIndex: loserSettlement.centerTileIndex,
+              nextSettlementId: winnerSettlement.id,
+            }),
+          ];
+    }),
+    ...ruinSettlementIds.flatMap((settlementId) => {
+      const settlement = activeSettlements.find((candidate) => candidate.id === settlementId);
+      return settlement === undefined
+        ? []
+        : [Object.freeze({ tileIndex: settlement.centerTileIndex, nextSettlementId: 0 })];
+    }),
+  ]);
+  return Object.freeze({
+    tick,
+    yearTicks: state.config.societyYearTicks,
+    foundingReserveAvailable: reserves,
+    foundingCandidates,
+    economies,
+    routeCandidates,
+    diplomacyCandidates,
+    conflictCandidates,
+    conflictResolutions,
+    residencyTransfers,
+    ruinSettlementIds,
+    federationCivilizationIds,
+    fragmentationCivilizationIds,
+    territoryChanges,
+  });
+}
+
+function civilizationEventDetails(
+  state: WorldState,
+  event: CivilizationEventDraft,
+): WorldEventDetails {
+  const pair = (kind: EntityKind): WorldEventDetails => ({
+    summary: event.summary,
+    subjectKind: kind,
+    subjectId: event.subjectId,
+    targetKind: kind,
+    targetId: event.targetId,
+    amount: Math.abs(event.amount),
+  });
+  switch (event.kind) {
+    case 'settlement-founded':
+      return {
+        ...pair('settlement'),
+        targetKind: 'civilization',
+        ...(state.civilizations.settlements.find((settlement) => settlement.id === event.subjectId)
+          ?.centerTileIndex === undefined
+          ? {}
+          : {
+              tileIndex: state.civilizations.settlements.find(
+                (settlement) => settlement.id === event.subjectId,
+              )!.centerTileIndex,
+            }),
+      };
+    case 'route-established':
+    case 'route-disrupted':
+    case 'route-restored':
+      return pair('settlement');
+    case 'diplomacy-changed':
+    case 'conflict-started':
+      return pair('civilization');
+    case 'conflict-resolved':
+      return { ...pair('conflict'), targetKind: 'civilization' };
+    case 'refugees-relocated':
+      return pair('settlement');
+    case 'settlement-ruined':
+      return { ...pair('settlement'), targetKind: 'world', targetId: 0 };
+    case 'federation-formed':
+    case 'civilization-fragmented':
+      return { ...pair('civilization'), targetKind: 'world', targetId: 0 };
+    case 'territory-changed':
+    case 'territory-history-summarized':
+      return {
+        ...pair('settlement'),
+        targetKind: event.targetId === 0 ? 'world' : 'settlement',
+      };
+  }
+}
+
+function reconcileCivilizationResidencies(state: WorldState): CivilizationsState {
+  const primarySettlementId = state.civilizations.settlements[0]!.id;
+  const residencyTick = state.civilizations.tick;
+  const peopleById = new Map(
+    state.civilization.society.people.map((person) => [person.id, person]),
+  );
+  const residencies = [...state.civilizations.residencies];
+  let nextEntityId = state.civilizations.nextEntityId;
+  let operations = 0;
+  for (let index = 0; index < residencies.length; index += 1) {
+    const residency = residencies[index]!;
+    if (
+      residency.subjectKind === 'person' &&
+      residency.endedTick === null &&
+      peopleById.get(residency.subjectId)?.alive !== true
+    ) {
+      residencies[index] = Object.freeze({ ...residency, endedTick: residencyTick });
+      operations += 1;
+    }
+  }
+  const activeHouseholdSettlement = new Map(
+    residencies
+      .filter((entry) => entry.subjectKind === 'household' && entry.endedTick === null)
+      .map((entry) => [entry.subjectId, entry.settlementId]),
+  );
+  for (const household of [...state.civilization.society.households].sort(
+    (left, right) => left.id - right.id,
+  )) {
+    if (activeHouseholdSettlement.has(household.id)) continue;
+    residencies.push(
+      Object.freeze({
+        id: nextEntityId,
+        subjectKind: 'household' as const,
+        subjectId: household.id,
+        settlementId: primarySettlementId,
+        startedTick: residencyTick,
+        endedTick: null,
+      }),
+    );
+    activeHouseholdSettlement.set(household.id, primarySettlementId);
+    nextEntityId += 1;
+    operations += 1;
+  }
+  const representedPeople = new Set(
+    residencies
+      .filter((entry) => entry.subjectKind === 'person' && entry.endedTick === null)
+      .map((entry) => entry.subjectId),
+  );
+  for (const person of [...state.civilization.society.people].sort(
+    (left, right) => left.id - right.id,
+  )) {
+    if (!person.alive || representedPeople.has(person.id)) continue;
+    residencies.push(
+      Object.freeze({
+        id: nextEntityId,
+        subjectKind: 'person' as const,
+        subjectId: person.id,
+        settlementId: activeHouseholdSettlement.get(person.householdId) ?? primarySettlementId,
+        startedTick: residencyTick,
+        endedTick: null,
+      }),
+    );
+    nextEntityId += 1;
+    operations += 1;
+  }
+  const namedPopulation = new Map<number, number>();
+  for (const residency of residencies)
+    if (residency.subjectKind === 'person' && residency.endedTick === null)
+      namedPopulation.set(
+        residency.settlementId,
+        (namedPopulation.get(residency.settlementId) ?? 0) + 1,
+      );
+  return Object.freeze({
+    ...state.civilizations,
+    nextEntityId,
+    residencies: Object.freeze(residencies),
+    settlements: Object.freeze(
+      state.civilizations.settlements.map((settlement) =>
+        Object.freeze({
+          ...settlement,
+          population: namedPopulation.get(settlement.id) ?? 0,
+        }),
+      ),
+    ),
+    operationCount: state.civilizations.operationCount + operations,
+  });
+}
+
+function applyCivilizationsYear(state: WorldState, tick: number): WorldState {
+  const reconciled = reconcileCivilizationResidencies(state);
+  const primarySettlementId = reconciled.settlements[0]!.id;
+  const synchronizedCivilizations = Object.freeze({
+    ...reconciled,
+    settlements: Object.freeze(
+      reconciled.settlements.map((settlement) =>
+        settlement.id === primarySettlementId
+          ? Object.freeze({
+              ...settlement,
+              stability: state.civilization.society.stability,
+              reserves: communityReservesFromFounding(state),
+            })
+          : settlement,
+      ),
+    ),
+  });
+  const source = Object.freeze({ ...state, civilizations: synchronizedCivilizations });
+  const result = advanceCivilizations(
+    synchronizedCivilizations,
+    createCivilizationsContext(source, tick),
+  );
+  const delta = result.foundingReserveDelta;
+  const stockpile = Object.freeze({
+    food: Math.max(0, state.civilization.stockpile.food + delta.food),
+    water: Math.max(0, state.civilization.stockpile.water + delta.water),
+    timber: Math.max(0, state.civilization.stockpile.timber + delta.timber),
+    stone: Math.max(0, state.civilization.stockpile.stone + delta.stone),
+  });
+  const primaryReserves = Object.freeze({ ...stockpile, metal: 0 });
+  let next: WorldState = Object.freeze({
+    ...state,
+    civilizations: Object.freeze({
+      ...result.state,
+      settlements: Object.freeze(
+        result.state.settlements.map((settlement) =>
+          settlement.id === primarySettlementId
+            ? Object.freeze({ ...settlement, reserves: primaryReserves })
+            : settlement,
+        ),
+      ),
+    }),
+    civilization: Object.freeze({ ...state.civilization, stockpile }),
+  });
+  for (const event of result.events)
+    next = appendWorldEvent(next, event.kind, tick, civilizationEventDetails(next, event));
+  return next;
+}
+
 /** Advances integer ticks and runs M3 systems only at deterministic action-pulse boundaries. */
 export function stepWorld(state: WorldState, ticks = 1): WorldState {
   if (!Number.isSafeInteger(ticks) || ticks < 0 || state.tick + ticks > Number.MAX_SAFE_INTEGER) {
@@ -1085,6 +1932,8 @@ export function stepWorld(state: WorldState, ticks = 1): WorldState {
         }),
       });
     }
+    if (pulseTick % next.config.societyYearTicks === 0 && next.civilizations.tick < pulseTick)
+      next = applyCivilizationsYear(next, pulseTick);
     assertWorldInvariants(next);
     pulseTick += SETTLEMENT_ACTION_PULSE_TICKS;
   }
@@ -1342,9 +2191,12 @@ export function isWalkableTile(state: WorldState, index: number): boolean {
 
 export function assertWorldInvariants(state: WorldState): void {
   assertCivilizationInvariants(state.civilization, settlementTerrain(state));
+  assertCivilizationsInvariants(state.civilizations);
   assertDevelopmentInvariants(state.development);
   if (state.development.tick > state.tick)
     throw new Error('World invariant violation: development cannot be ahead of world time.');
+  if (state.civilizations.tick > state.tick)
+    throw new Error('World invariant violation: civilizations cannot be ahead of world time.');
   const agentIds = new Set(state.civilization.agents.map((agent) => agent.id));
   const structureIds = new Set(state.civilization.structures.map((structure) => structure.id));
   const householdIds = new Set(
@@ -1353,6 +2205,13 @@ export function assertWorldInvariants(state: WorldState): void {
   const cultureIds = new Set(state.civilization.society.cultures.map((culture) => culture.id));
   const groupIds = new Set(state.civilization.society.groups.map((group) => group.id));
   const institutionIds = new Set([state.civilization.society.institution.id]);
+  const settlementIds = new Set(state.civilizations.settlements.map((settlement) => settlement.id));
+  const civilizationIds = new Set(
+    state.civilizations.civilizations.map((civilization) => civilization.id),
+  );
+  const routeIds = new Set(state.civilizations.routes.map((route) => route.id));
+  const conflictIds = new Set(state.civilizations.conflicts.map((conflict) => conflict.id));
+  const ruinIds = new Set(state.civilizations.ruins.map((ruin) => ruin.id));
   const referenceExists = (kind: EntityKind, id: number): boolean => {
     switch (kind) {
       case 'world':
@@ -1369,6 +2228,16 @@ export function assertWorldInvariants(state: WorldState): void {
         return groupIds.has(id);
       case 'institution':
         return institutionIds.has(id);
+      case 'settlement':
+        return settlementIds.has(id);
+      case 'civilization':
+        return civilizationIds.has(id);
+      case 'route':
+        return routeIds.has(id);
+      case 'conflict':
+        return conflictIds.has(id);
+      case 'ruin':
+        return ruinIds.has(id);
     }
   };
   const eventsById = new Map<number, WorldEvent>();
@@ -1481,6 +2350,7 @@ export function canonicalWorldJson(state: WorldState): string {
       y: chunk.y,
     })),
     civilization: civilizationDto(state.civilization),
+    civilizations: civilizationsDto(state.civilizations),
     config: {
       chunkSize: state.config.chunkSize,
       height: state.config.height,

@@ -8,7 +8,7 @@ import type {
 } from '../simulation/development';
 import { ACCELERATED_YEAR_TICKS, NORMAL_YEAR_TICKS } from '../simulation/society';
 
-export const WORKER_PROTOCOL_VERSION = 5;
+export const WORKER_PROTOCOL_VERSION = 6;
 export const MAX_ADVANCE_TICKS_PER_REQUEST = 1_000_000;
 
 export type WorkerProtocolVersion = typeof WORKER_PROTOCOL_VERSION;
@@ -199,6 +199,114 @@ export interface DevelopmentProjection {
   readonly operationCount: number;
 }
 
+/** Bounded read-only M6 inspection data; the Worker remains authoritative. */
+export interface CivilizationReservesProjection {
+  readonly food: number;
+  readonly water: number;
+  readonly timber: number;
+  readonly stone: number;
+  readonly metal: number;
+}
+
+export interface CivilizationTerritoryHistoryProjection {
+  readonly id: number;
+  readonly tick: number;
+  readonly tileIndex: number;
+  readonly previousSettlementId: number;
+  readonly nextSettlementId: number;
+}
+
+export interface CivilizationSettlementProjection {
+  readonly id: number;
+  readonly civilizationId: number;
+  readonly name: string;
+  readonly cultureId: number;
+  readonly centerTileIndex: number;
+  readonly status: 'active' | 'abandoned' | 'conquered';
+  readonly population: number;
+  readonly stability: number;
+  readonly reserves: CivilizationReservesProjection;
+  readonly territoryHistory: readonly CivilizationTerritoryHistoryProjection[];
+  readonly territoryHistorySummaryCount: number;
+  readonly foundedTick: number;
+  readonly endedTick: number | null;
+  readonly provenance: 'initial' | 'v5-migration' | 'm6-founding';
+}
+
+export interface CivilizationProjection {
+  readonly id: number;
+  readonly name: string;
+  readonly cultureId: number;
+  readonly status: 'independent' | 'federated' | 'fragmented' | 'collapsed';
+  readonly foundingSettlementId: number;
+  readonly memberSettlementIds: readonly number[];
+  readonly foundedTick: number;
+  readonly endedTick: number | null;
+  readonly provenance: 'initial' | 'v5-migration' | 'm6-founding';
+}
+
+export interface CivilizationResidencyProjection {
+  readonly id: number;
+  readonly subjectKind: 'person' | 'household';
+  readonly subjectId: number;
+  readonly settlementId: number;
+  readonly startedTick: number;
+  readonly endedTick: number | null;
+}
+
+export interface CivilizationDiplomacyProjection {
+  readonly id: number;
+  readonly firstCivilizationId: number;
+  readonly secondCivilizationId: number;
+  readonly status: 'neutral' | 'allied' | 'rival' | 'at-war';
+  readonly score: number;
+  readonly changedTick: number;
+}
+
+export interface CivilizationRouteProjection {
+  readonly id: number;
+  readonly firstSettlementId: number;
+  readonly secondSettlementId: number;
+  readonly status: 'active' | 'disrupted' | 'ended';
+  readonly volume: number;
+  readonly startedTick: number;
+  readonly endedTick: number | null;
+}
+
+export interface CivilizationConflictProjection {
+  readonly id: number;
+  readonly attackerCivilizationId: number;
+  readonly defenderCivilizationId: number;
+  readonly status: 'active' | 'resolved';
+  readonly pressure: number;
+  readonly startedTick: number;
+  readonly endedTick: number | null;
+  readonly winnerCivilizationId: number | null;
+}
+
+export interface CivilizationRuinProjection {
+  readonly id: number;
+  readonly settlementId: number;
+  readonly createdTick: number;
+  readonly cause: 'abandoned' | 'conquered' | 'collapse';
+}
+
+export interface CivilizationsProjection {
+  readonly operationCount: number;
+  readonly settlements: readonly CivilizationSettlementProjection[];
+  readonly civilizations: readonly CivilizationProjection[];
+  /** Active records are stable-ID sorted and capped; totals make omitted history explicit. */
+  readonly residencies: readonly CivilizationResidencyProjection[];
+  readonly activeResidencyCount: number;
+  readonly historicalResidencyCount: number;
+  readonly diplomacy: readonly CivilizationDiplomacyProjection[];
+  readonly routes: readonly CivilizationRouteProjection[];
+  readonly conflicts: readonly CivilizationConflictProjection[];
+  readonly ruins: readonly CivilizationRuinProjection[];
+  /** Copied current tile ownership; zero denotes unclaimed. */
+  readonly tileOwners: Uint32Array;
+}
+
 export interface WorldFrameProjection {
   readonly version: WorkerProtocolVersion;
   readonly width: number;
@@ -226,6 +334,7 @@ export interface WorldFrameProjection {
   readonly settlementSummary: SettlementSummary;
   readonly society: SocietyProjection;
   readonly development: DevelopmentProjection;
+  readonly civilizations: CivilizationsProjection;
 }
 
 interface RequestBase {
@@ -733,5 +842,6 @@ export function projectionTransferables(frame: WorldFrameProjection): readonly A
     frame.structureStates.buffer as ArrayBuffer,
     frame.structureProgress.buffer as ArrayBuffer,
     frame.structureCondition.buffer as ArrayBuffer,
+    frame.civilizations.tileOwners.buffer as ArrayBuffer,
   ];
 }

@@ -47,6 +47,16 @@ function referenceResolves(world: WorldState, kind: EntityKind, id: number): boo
       return society.institution.id === id;
     case 'structure':
       return world.civilization.structures.some((structure) => structure.id === id);
+    case 'settlement':
+      return world.civilizations.settlements.some((settlement) => settlement.id === id);
+    case 'civilization':
+      return world.civilizations.civilizations.some((civilization) => civilization.id === id);
+    case 'route':
+      return world.civilizations.routes.some((route) => route.id === id);
+    case 'conflict':
+      return world.civilizations.conflicts.some((conflict) => conflict.id === id);
+    case 'ruin':
+      return world.civilizations.ruins.some((ruin) => ruin.id === id);
     case 'world':
       return id === 0;
   }

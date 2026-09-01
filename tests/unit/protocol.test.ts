@@ -12,6 +12,17 @@ import {
   createInitialInterpersonalState,
   type ActiveRelationship,
 } from '../../src/simulation/relationships';
+import {
+  MAX_ACTIVE_CIVILIZATIONS,
+  MAX_ACTIVE_CONFLICTS,
+  MAX_ACTIVE_ROUTES,
+  MAX_ACTIVE_SETTLEMENTS,
+  MAX_DIPLOMACY_PAIRS,
+  MAX_HISTORICAL_COMMUNITIES,
+  MAX_PROJECTED_RESIDENCIES,
+  MAX_ROUTE_CONFLICT_SUMMARIES,
+  MAX_RUINS,
+} from '../../src/simulation/civilizations';
 import { appendWorldEvent, createInitialWorld, stepWorld } from '../../src/simulation/world';
 import {
   projectRelationshipEventPage,
@@ -98,6 +109,33 @@ describe('versioned worker protocol', () => {
         .filter((record) => record.status === 'known')
         .map((record) => record.id),
     ).toStrictEqual(['foraging-lore', 'shelter-craft', 'water-lore']);
+    expect(frame.civilizations.operationCount).toBe(state.civilizations.operationCount);
+    expect(frame.civilizations.settlements).toStrictEqual(
+      state.civilizations.settlements.map((settlement) => ({
+        ...settlement,
+        reserves: { ...settlement.reserves },
+        territoryHistory: settlement.territoryHistory.map((history) => ({ ...history })),
+      })),
+    );
+    expect(frame.civilizations.civilizations).toStrictEqual(
+      state.civilizations.civilizations.map((civilization) => ({
+        ...civilization,
+        memberSettlementIds: [...civilization.memberSettlementIds],
+      })),
+    );
+    expect(frame.civilizations.residencies).toStrictEqual(state.civilizations.residencies);
+    expect(frame.civilizations.activeResidencyCount).toBe(state.civilizations.residencies.length);
+    expect(frame.civilizations.historicalResidencyCount).toBe(0);
+    expect(frame.civilizations).toMatchObject({
+      diplomacy: [],
+      routes: [],
+      conflicts: [],
+      ruins: [],
+    });
+    expect(frame.civilizations.tileOwners).not.toBe(state.civilizations.tileOwners);
+    expect(frame.civilizations.tileOwners).toStrictEqual(
+      new Uint32Array(state.civilizations.tileOwners),
+    );
     expect(projectionTransferables(frame)).toStrictEqual([
       frame.biome.buffer,
       frame.resource.buffer,
@@ -113,7 +151,104 @@ describe('versioned worker protocol', () => {
       frame.structureStates.buffer,
       frame.structureProgress.buffer,
       frame.structureCondition.buffer,
+      frame.civilizations.tileOwners.buffer,
     ]);
+  });
+
+  it('copies a bounded, stable-ID-sorted M6 inspection projection', () => {
+    const state = stepWorld(
+      createInitialWorld([7, 11, 13, 17], { societyYearTicks: 5_000 }),
+      25_000,
+    );
+    const projection = projectWorldFrame(state).civilizations;
+    const ids = <T extends { readonly id: number }>(records: readonly T[]): readonly number[] =>
+      records.map((record) => record.id);
+    const expectStableIds = <T extends { readonly id: number }>(records: readonly T[]): void =>
+      expect(ids(records)).toStrictEqual([...ids(records)].sort((left, right) => left - right));
+
+    expectStableIds(projection.settlements);
+    expectStableIds(projection.civilizations);
+    expectStableIds(projection.residencies);
+    expectStableIds(projection.diplomacy);
+    expectStableIds(projection.routes);
+    expectStableIds(projection.conflicts);
+    expectStableIds(projection.ruins);
+    expect(
+      projection.settlements.filter((settlement) => settlement.status === 'active'),
+    ).toHaveLength(
+      Math.min(
+        MAX_ACTIVE_SETTLEMENTS,
+        state.civilizations.settlements.filter((settlement) => settlement.status === 'active')
+          .length,
+      ),
+    );
+    expect(
+      projection.civilizations.filter((civilization) => civilization.endedTick === null),
+    ).toHaveLength(
+      Math.min(
+        MAX_ACTIVE_CIVILIZATIONS,
+        state.civilizations.civilizations.filter((civilization) => civilization.endedTick === null)
+          .length,
+      ),
+    );
+    expect(
+      projection.settlements.filter((settlement) => settlement.status !== 'active').length +
+        projection.civilizations.filter((civilization) => civilization.endedTick !== null).length,
+    ).toBeLessThanOrEqual(MAX_HISTORICAL_COMMUNITIES);
+    expect(projection.diplomacy).toHaveLength(
+      Math.min(MAX_DIPLOMACY_PAIRS, state.civilizations.diplomacy.length),
+    );
+    expect(
+      projection.routes.filter((route) => route.status !== 'ended').length,
+    ).toBeLessThanOrEqual(MAX_ACTIVE_ROUTES);
+    expect(
+      projection.routes.filter((route) => route.status === 'ended').length +
+        projection.conflicts.filter((conflict) => conflict.status === 'resolved').length,
+    ).toBeLessThanOrEqual(MAX_ROUTE_CONFLICT_SUMMARIES);
+    expect(
+      projection.conflicts.filter((conflict) => conflict.status === 'active').length,
+    ).toBeLessThanOrEqual(MAX_ACTIVE_CONFLICTS);
+    expect(projection.ruins).toHaveLength(Math.min(MAX_RUINS, state.civilizations.ruins.length));
+    expect(projection.residencies).toHaveLength(
+      Math.min(
+        MAX_PROJECTED_RESIDENCIES,
+        state.civilizations.residencies.filter((residency) => residency.endedTick === null).length,
+      ),
+    );
+    expect(projection.residencies.every((residency) => residency.endedTick === null)).toBe(true);
+    expect(projection.activeResidencyCount).toBe(
+      state.civilizations.residencies.filter((residency) => residency.endedTick === null).length,
+    );
+    expect(projection.historicalResidencyCount).toBe(
+      state.civilizations.residencies.filter((residency) => residency.endedTick !== null).length,
+    );
+    expect(projection.tileOwners).toStrictEqual(new Uint32Array(state.civilizations.tileOwners));
+
+    const residency = state.civilizations.residencies.find(
+      (entry) => entry.subjectKind === 'household',
+    )!;
+    const capped = projectWorldFrame({
+      ...state,
+      civilizations: {
+        ...state.civilizations,
+        nextEntityId: 10_002,
+        residencies: [
+          { ...residency, id: 10_001, endedTick: 0 },
+          ...Array.from({ length: MAX_PROJECTED_RESIDENCIES + 1 }, (_, index) => ({
+            ...residency,
+            id: 10_000 - index,
+            subjectId: MAX_PROJECTED_RESIDENCIES + 1 - index,
+            endedTick: null,
+          })),
+        ],
+      },
+    }).civilizations;
+    expect(capped.residencies).toHaveLength(MAX_PROJECTED_RESIDENCIES);
+    expect(capped.residencies.map((entry) => entry.id)).toStrictEqual(
+      Array.from({ length: MAX_PROJECTED_RESIDENCIES }, (_, index) => 9_872 + index),
+    );
+    expect(capped.activeResidencyCount).toBe(MAX_PROJECTED_RESIDENCIES + 1);
+    expect(capped.historicalResidencyCount).toBe(1);
   });
 
   it('maps construction strings to stable codes and rejects out-of-range projection values', () => {

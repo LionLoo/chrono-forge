@@ -8,6 +8,7 @@ import { WorldMapCanvas } from './rendering/WorldMapCanvas';
 import { WORLD_OVERLAYS, type WorldOverlay } from './rendering/world-palette';
 import { PROJECT_META } from './project-meta';
 import { FocusPersistencePanel } from './ui/FocusPersistencePanel';
+import { CivilizationsPanel } from './ui/CivilizationsPanel';
 import { DevelopmentPanel } from './ui/DevelopmentPanel';
 import { SocietyPanel } from './ui/SocietyPanel';
 import type { FocusClock } from './ui/useFocusController';
@@ -143,7 +144,7 @@ export function App({ focusAlerts, focusClock, persistence, workerFactory }: App
       ? 'Forging deterministic world…'
       : simulation.status === 'faulted'
         ? `Simulation fault: ${simulation.error ?? 'unknown error'}`
-        : 'Worker projection ready · autonomous settlement active';
+        : 'Worker projection ready · autonomous world active';
 
   return (
     <div className="app-shell">
@@ -160,14 +161,14 @@ export function App({ focusAlerts, focusClock, persistence, workerFactory }: App
       <main id="main" className="world-lab" tabIndex={-1}>
         <section className="lab-intro" aria-labelledby="hero-title">
           <div>
-            <p className="eyebrow">Milestone 5 · Knowledge and crises emerge</p>
+            <p className="eyebrow">Milestone 6 · Civilizations meet</p>
             <h1 id="hero-title">{PROJECT_META.promise}</h1>
           </div>
           <p>
-            Begin a calm session and accepted focus time advances a Worker-owned settlement. Named
-            people choose their own work, build culture, discover contextual knowledge, and respond
-            to modeled crises across many sessions; every displayed history claim comes from an
-            authoritative event.
+            Begin a calm session and accepted focus time advances a Worker-owned world. Named people
+            choose their own work, form communities, discover contextual knowledge, and carry
+            relationships through migration, trade, diplomacy, and modeled crises; every displayed
+            history claim comes from an authoritative event.
           </p>
         </section>
 
@@ -455,6 +456,17 @@ export function App({ focusAlerts, focusClock, persistence, workerFactory }: App
               timeline={simulation.timeline.entries}
               timelineOffset={simulation.timeline.offset}
               timelineTotal={simulation.timeline.total}
+            />
+            <CivilizationsPanel
+              civilizations={simulation.frame.civilizations}
+              cultureNames={
+                new Map(
+                  simulation.frame.society.cultures.map((culture) => [culture.id, culture.name]),
+                )
+              }
+              personNames={
+                new Map(simulation.frame.society.people.map((person) => [person.id, person.name]))
+              }
             />
             <DevelopmentPanel
               development={simulation.frame.development}
