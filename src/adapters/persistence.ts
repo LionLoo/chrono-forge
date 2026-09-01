@@ -12,8 +12,17 @@ const MAX_IMPORT_BYTES = MAX_SNAPSHOT_BYTES + 1024 * 1024;
 const RETAINED_GENERATIONS = 3;
 const CHECKSUM_PATTERN = /^[0-9a-f]{64}$/;
 const IDENTIFIER_PATTERN = /^[A-Za-z0-9._-]{1,64}$/;
+const MAX_FACTUAL_RECAP_ENTRIES = 12;
+const MAX_FACTUAL_RECAP_SUMMARY_BYTES = 160;
 
 export type FocusSessionStatus = 'active' | 'paused' | 'completed' | 'cancelled';
+
+/** Immutable factual copy retained with a completed focus session. */
+export interface FocusRecapEntry {
+  readonly id: number;
+  readonly tick: number;
+  readonly summary: string;
+}
 
 export interface SaveSlotSummary {
   readonly slotId: string;
@@ -44,6 +53,8 @@ export interface FocusSession {
   readonly status: FocusSessionStatus;
   readonly stateJson: string;
   readonly recapEventIds: readonly number[];
+  /** Empty only for conservative migration of sessions stored before factual recap copy existed. */
+  readonly recapEntries: readonly FocusRecapEntry[];
 }
 
 export interface AppSettings {
@@ -54,6 +65,7 @@ export interface AppSettings {
   readonly offlineProgressionEnabled: boolean;
   readonly maxOfflineHours: number;
   readonly calmMode: boolean;
+  readonly reducedEffects: boolean;
   readonly notificationsEnabled: boolean;
   readonly soundEnabled: boolean;
   readonly breaksEnabled: boolean;
@@ -68,6 +80,7 @@ export const DEFAULT_APP_SETTINGS: AppSettings = {
   offlineProgressionEnabled: true,
   maxOfflineHours: 24,
   calmMode: false,
+  reducedEffects: false,
   notificationsEnabled: true,
   soundEnabled: true,
   breaksEnabled: false,
@@ -358,14 +371,13 @@ export function createInMemoryPersistenceGateway(
       }
       if (session.slotId !== null) {
         const sourceSave = load(session.slotId);
-        const savedEventIds = new Set(
-          sourceSave === null
-            ? []
-            : deserializeWorldSnapshot(sourceSave.snapshot).eventLog.map((event) => event.id),
-        );
+        const savedEvents =
+          sourceSave === null ? [] : deserializeWorldSnapshot(sourceSave.snapshot).eventLog;
+        const savedEventIds = new Set(savedEvents.map((event) => event.id));
         if (session.recapEventIds.some((eventId) => !savedEventIds.has(eventId))) {
           throw new Error('focus recap references an event absent from its source save');
         }
+        validateRecapCopiesAgainstSnapshot(session, savedEvents);
       }
       sessions.set(session.sessionId, cloneFocusSession(session));
     },
@@ -476,6 +488,7 @@ function parseFocusSession(value: unknown): FocusSession {
       'status',
       'stateJson',
       'recapEventIds',
+      'recapEntries',
     ],
     'focus session',
   );
@@ -498,6 +511,7 @@ function parseFocusSession(value: unknown): FocusSession {
       record.recapEventIds,
       'focus session recapEventIds',
     ),
+    recapEntries: expectFocusRecapEntries(record.recapEntries),
   };
   validateFocusSession(session);
   return session;
@@ -520,6 +534,7 @@ function parseAppSettings(value: unknown): AppSettings {
     ),
     maxOfflineHours: expectNonNegativeInteger(record.maxOfflineHours, 'maxOfflineHours'),
     calmMode: expectBoolean(record.calmMode, 'calmMode'),
+    reducedEffects: expectBoolean(record.reducedEffects, 'reducedEffects'),
     notificationsEnabled: expectBoolean(record.notificationsEnabled, 'notificationsEnabled'),
     soundEnabled: expectBoolean(record.soundEnabled, 'soundEnabled'),
     breaksEnabled: expectBoolean(record.breaksEnabled, 'breaksEnabled'),
@@ -637,7 +652,7 @@ function validateFocusSession(session: FocusSession): void {
     session.breakMs > session.plannedBreakMs ||
     !Number.isSafeInteger(session.issuedSimulationTicks) ||
     session.issuedSimulationTicks < 0 ||
-    session.recapEventIds.length > 10_000 ||
+    session.recapEventIds.length > MAX_FACTUAL_RECAP_ENTRIES ||
     session.recapEventIds.some((eventId) => !Number.isSafeInteger(eventId) || eventId <= 0) ||
     session.recapEventIds.some(
       (eventId, index) => index > 0 && eventId <= session.recapEventIds[index - 1]!,
@@ -645,6 +660,7 @@ function validateFocusSession(session: FocusSession): void {
   ) {
     throw new RangeError('focus session times, progress, status, or recap event IDs are invalid');
   }
+  validateFocusRecapEntries(session);
   validateFocusStateMatchesSession(session, focusState);
 }
 
@@ -707,6 +723,45 @@ function validateRecapReferences(session: FocusSession, sourceEventIds: readonly
   }
 }
 
+function validateRecapCopiesAgainstSnapshot(
+  session: FocusSession,
+  sourceEvents: readonly { readonly id: number; readonly summary: string; readonly tick: number }[],
+): void {
+  if (session.recapEntries.length === 0) return;
+  const sourceById = new Map(sourceEvents.map((event) => [event.id, event]));
+  if (
+    session.recapEntries.some((entry) => {
+      const source = sourceById.get(entry.id);
+      return source?.tick !== entry.tick || source?.summary !== entry.summary;
+    })
+  ) {
+    throw new TypeError('focus recap copies must exactly match authoritative saved-world events');
+  }
+}
+
+function validateFocusRecapEntries(session: FocusSession): void {
+  const { recapEntries, recapEventIds } = session;
+  if (recapEntries.length === 0) return;
+  if (
+    recapEntries.length !== recapEventIds.length ||
+    recapEntries.some((entry, index) => entry.id !== recapEventIds[index])
+  ) {
+    throw new TypeError('focus recap entries must exactly match recap event IDs');
+  }
+  for (const entry of recapEntries) {
+    if (
+      !Number.isSafeInteger(entry.id) ||
+      entry.id <= 0 ||
+      !Number.isSafeInteger(entry.tick) ||
+      entry.tick < 0 ||
+      entry.summary.trim().length === 0 ||
+      byteLength(entry.summary) > MAX_FACTUAL_RECAP_SUMMARY_BYTES
+    ) {
+      throw new RangeError('focus recap entries must contain bounded factual event copies');
+    }
+  }
+}
+
 function validateFocusCheckpoint(
   slotId: string,
   snapshot: string,
@@ -717,8 +772,10 @@ function validateFocusCheckpoint(
   if (session.slotId !== slotId) {
     throw new TypeError('focus checkpoint session must belong to its save slot');
   }
-  const snapshotEventIds = deserializeWorldSnapshot(snapshot).eventLog.map((event) => event.id);
+  const snapshotEvents = deserializeWorldSnapshot(snapshot).eventLog;
+  const snapshotEventIds = snapshotEvents.map((event) => event.id);
   validateRecapReferences(session, snapshotEventIds);
+  validateRecapCopiesAgainstSnapshot(session, snapshotEvents);
   if (sourceEventIds !== undefined) {
     validateRecapReferences(session, sourceEventIds);
   }
@@ -750,7 +807,24 @@ function validateAppSettings(settings: AppSettings): void {
 }
 
 function cloneFocusSession(session: FocusSession): FocusSession {
-  return { ...session, recapEventIds: [...session.recapEventIds] };
+  return {
+    ...session,
+    recapEventIds: [...session.recapEventIds],
+    recapEntries: session.recapEntries.map((entry) => ({ ...entry })),
+  };
+}
+
+function expectFocusRecapEntries(value: unknown): readonly FocusRecapEntry[] {
+  if (!Array.isArray(value)) throw new TypeError('focus session recapEntries must be an array');
+  return value.map((entry, index) => {
+    const record = expectRecord(entry, `focus recap entry ${index}`);
+    expectExactKeys(record, ['id', 'tick', 'summary'], `focus recap entry ${index}`);
+    return {
+      id: expectNonNegativeInteger(record.id, `focus recap entry ${index} id`),
+      tick: expectNonNegativeInteger(record.tick, `focus recap entry ${index} tick`),
+      summary: expectString(record.summary, `focus recap entry ${index} summary`),
+    };
+  });
 }
 
 function expectRecord(value: unknown, label: string): Readonly<Record<string, unknown>> {

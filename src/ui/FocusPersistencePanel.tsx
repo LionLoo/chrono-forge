@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 
 import type {
   AppSettings,
+  FocusRecapEntry,
   FocusSession,
   LoadedSave,
   SaveSlotSummary,
@@ -10,6 +11,7 @@ import type { FocusAlerts } from '../adapters/focus-alerts';
 import { type RuntimePersistence } from '../adapters/runtime-persistence';
 import { rehydrateFocusState } from '../focus';
 import type { WorkerEvent } from '../protocol';
+import { deserializeWorldSnapshot } from '../simulation/persistence';
 import { systemFocusClock, useFocusController, type FocusClock } from './useFocusController';
 import type { WorldSimulationView } from './useWorldSimulation';
 
@@ -22,6 +24,7 @@ const MAX_OFFLINE_CATCH_UP_RATE = 1_000;
 interface FocusPersistencePanelProps {
   readonly alerts: FocusAlerts;
   readonly clock?: FocusClock;
+  readonly onReducedEffectsChange?: (reduced: boolean) => void;
   readonly runtime: RuntimePersistence;
   readonly simulation: WorldSimulationView;
 }
@@ -31,6 +34,8 @@ interface WorkspaceData {
   readonly history: readonly FocusSession[];
   readonly initialSession: FocusSession | null;
   readonly offlineCatchUpApplied: boolean;
+  /** Latest event in the exact generation that restored the focus session. */
+  readonly recapBaselineEventId: number;
   readonly settings: AppSettings;
   readonly slots: readonly SaveSlotSummary[];
 }
@@ -127,6 +132,7 @@ async function loadWorkspace(
     history,
     initialSession: selectRestorableSession(activeSave),
     offlineCatchUpApplied,
+    recapBaselineEventId: deserializeWorldSnapshot(activeSave.snapshot).eventLog.at(-1)?.id ?? 0,
     settings,
     slots,
   };
@@ -162,8 +168,8 @@ function formatDuration(milliseconds: number): string {
   return `${minutes.toString().padStart(2, '0')}:${seconds.toString().padStart(2, '0')}`;
 }
 
-function eventCopy(event: WorkerEvent): string {
-  return event.summary;
+function recapEntry(event: WorkerEvent): FocusRecapEntry {
+  return { id: event.id, tick: event.tick, summary: event.summary };
 }
 
 function isTerminalSession(session: FocusSession): boolean {
@@ -177,6 +183,7 @@ function focusHasEnded(session: FocusSession): boolean {
 export function FocusPersistencePanel({
   alerts,
   clock = systemFocusClock,
+  onReducedEffectsChange,
   runtime,
   simulation,
 }: FocusPersistencePanelProps) {
@@ -250,6 +257,7 @@ export function FocusPersistencePanel({
       onReplaceWorkspace={replaceWorkspace}
       runtime={runtime}
       simulation={simulation}
+      {...(onReducedEffectsChange === undefined ? {} : { onReducedEffectsChange })}
     />
   );
 }
@@ -258,6 +266,7 @@ interface FocusWorkspaceProps {
   readonly alerts: FocusAlerts;
   readonly clock: FocusClock;
   readonly initial: WorkspaceData;
+  readonly onReducedEffectsChange?: (reduced: boolean) => void;
   readonly onReplaceWorkspace: (workspace: WorkspaceData) => void;
   readonly runtime: RuntimePersistence;
   readonly simulation: WorldSimulationView;
@@ -267,6 +276,7 @@ function FocusWorkspace({
   alerts,
   clock,
   initial,
+  onReducedEffectsChange,
   onReplaceWorkspace,
   runtime,
   simulation,
@@ -297,8 +307,13 @@ function FocusWorkspace({
   const activeSaveRef = useRef(activeSave);
   const latestSessionRef = useRef<FocusSession | null>(initial.initialSession);
   const recapSessionIdRef = useRef(initial.initialSession?.sessionId ?? null);
-  const recapBaselineEventIdRef = useRef<number | null>(null);
+  const recapBaselineEventIdRef = useRef<number | null>(
+    initial.initialSession === null ? null : initial.recapBaselineEventId,
+  );
   const recapEventIdsRef = useRef<readonly number[]>(initial.initialSession?.recapEventIds ?? []);
+  const recapEntriesRef = useRef<readonly FocusRecapEntry[]>(
+    initial.initialSession?.recapEntries ?? [],
+  );
   const autosaveTimerRef = useRef<number | null>(null);
   const alertedSessionIdsRef = useRef(
     new Set(
@@ -337,12 +352,14 @@ function FocusWorkspace({
     (session: FocusSession, reason: string): Promise<void> =>
       enqueue(async () => {
         try {
-          const visibleEventIds = simulation.events.map((event) => event.id);
+          const visibleEventsById = new Map(simulation.events.map((event) => [event.id, event]));
+          const visibleEventIds = [...visibleEventsById.keys()];
           const latestEventId = visibleEventIds.at(-1) ?? 0;
           if (recapSessionIdRef.current !== session.sessionId) {
             recapSessionIdRef.current = session.sessionId;
             recapBaselineEventIdRef.current = latestEventId;
             recapEventIdsRef.current = [];
+            recapEntriesRef.current = [];
           }
           recapBaselineEventIdRef.current ??= latestEventId;
           const newEventIds = visibleEventIds.filter(
@@ -352,7 +369,24 @@ function FocusWorkspace({
           recapEventIdsRef.current = [...new Set([...recapEventIdsRef.current, ...newEventIds])]
             .sort((left, right) => left - right)
             .slice(-MAX_FACTUAL_RECAP_EVENTS);
-          const persistedSession = { ...session, recapEventIds: recapEventIdsRef.current };
+          const storedEntriesById = new Map(
+            recapEntriesRef.current.map((entry) => [entry.id, entry]),
+          );
+          const candidateEntries = recapEventIdsRef.current.flatMap((eventId) => {
+            const visible = visibleEventsById.get(eventId);
+            if (visible !== undefined) return [recapEntry(visible)];
+            const stored = storedEntriesById.get(eventId);
+            return stored === undefined ? [] : [stored];
+          });
+          // A legacy session may have IDs without durable text. Keep that migration marker empty
+          // rather than inventing a partial recap; all new recap copies are paired one-for-one.
+          recapEntriesRef.current =
+            candidateEntries.length === recapEventIdsRef.current.length ? candidateEntries : [];
+          const persistedSession = {
+            ...session,
+            recapEventIds: recapEventIdsRef.current,
+            recapEntries: recapEntriesRef.current,
+          };
           const sourceEventIds = [
             ...new Set([...visibleEventIds, ...recapEventIdsRef.current]),
           ].sort((left, right) => left - right);
@@ -425,10 +459,14 @@ function FocusWorkspace({
 
   useEffect(() => {
     document.documentElement.classList.toggle('calm-mode', settings.calmMode);
+    document.documentElement.classList.toggle('reduced-effects', settings.reducedEffects);
+    onReducedEffectsChange?.(settings.reducedEffects);
     return () => {
       document.documentElement.classList.remove('calm-mode');
+      document.documentElement.classList.remove('reduced-effects');
+      onReducedEffectsChange?.(false);
     };
-  }, [settings.calmMode]);
+  }, [onReducedEffectsChange, settings.calmMode, settings.reducedEffects]);
 
   useEffect(() => {
     const checkpointBeforeSuspension = () => {
@@ -454,7 +492,13 @@ function FocusWorkspace({
       await operation();
       setOperationError(null);
     } catch (error) {
-      setOperationError(error instanceof Error ? error.message : 'The operation failed.');
+      setOperationError(
+        error instanceof Error
+          ? error.message
+          : typeof error === 'string' && error.length > 0
+            ? error
+            : 'The operation failed.',
+      );
     }
   }, []);
 
@@ -512,6 +556,7 @@ function FocusWorkspace({
         history: nextHistory,
         initialSession: selectRestorableSession(loaded),
         offlineCatchUpApplied: false,
+        recapBaselineEventId: deserializeWorldSnapshot(loaded.snapshot).eventLog.at(-1)?.id ?? 0,
         settings: nextSettings,
         slots: nextSlots,
       });
@@ -558,8 +603,7 @@ function FocusWorkspace({
   );
   const totalFocusedMs = completedSessions.reduce((total, session) => total + session.focusedMs, 0);
   const latestCompleted = completedSessions[0] ?? null;
-  const recapIds = new Set(latestCompleted?.recapEventIds ?? []);
-  const recapEvents = simulation.events.filter((event) => recapIds.has(event.id));
+  const recapEntries = latestCompleted?.recapEntries ?? [];
 
   return (
     <section className="focus-card" aria-labelledby="focus-title">
@@ -584,8 +628,8 @@ function FocusWorkspace({
               : formatDuration(timerValue)}
           </output>
           <p className="timer-ratio">
-            {settings.focusToSimRatio} simulation ticks per focused second · interruptions are
-            non-punitive
+            {settings.focusToSimRatio} simulation ticks per accepted focus second · interruptions
+            are non-punitive
           </p>
 
           {focus.state.phase === 'idle' ? (
@@ -776,8 +820,8 @@ function FocusWorkspace({
             </button>
           </details>
           <p className="local-data-note">
-            Core worlds, settings, and focus history stay on this device. No account or online
-            service is required.
+            Core worlds, focus history, and settings stay on this device. No account, cloud sync, or
+            online service is required.
           </p>
         </div>
       </div>
@@ -786,7 +830,7 @@ function FocusWorkspace({
         <details className="settings-panel">
           <summary>Focus and accessibility settings</summary>
           <label>
-            Focus-to-simulation ratio
+            Accepted-focus simulation pace
             <input
               aria-invalid={
                 !Number.isSafeInteger(settings.focusToSimRatio) ||
@@ -801,6 +845,7 @@ function FocusWorkspace({
               type="number"
               value={Number.isFinite(settings.focusToSimRatio) ? settings.focusToSimRatio : ''}
             />
+            <span>Applies only while accepted focus time is running.</span>
           </label>
           <label>
             Maximum offline hours
@@ -831,10 +876,12 @@ function FocusWorkspace({
               value={settings.volumePercent}
             />
             <output>{settings.volumePercent}%</output>
+            <span>Changes the completion tone only.</span>
           </label>
           {(
             [
               ['calmMode', 'Calm focus mode'],
+              ['reducedEffects', 'Reduce visual effects'],
               ['breaksEnabled', 'Optional breaks'],
               ['notificationsEnabled', 'Completion notifications'],
               ['soundEnabled', 'Completion sound'],
@@ -894,11 +941,17 @@ function FocusWorkspace({
             <div className="recap-panel">
               <h4>Latest factual recap</h4>
               <p>{formatDuration(latestCompleted.focusedMs)} of accepted focus time.</p>
-              <ul>
-                {recapEvents.map((event) => (
-                  <li key={event.id}>{eventCopy(event)}</li>
-                ))}
-              </ul>
+              {recapEntries.length === 0 ? (
+                <p>No factual event details were stored for this session.</p>
+              ) : (
+                <ul>
+                  {recapEntries.map((entry) => (
+                    <li aria-label={`Tick ${entry.tick}: ${entry.summary}`} key={entry.id}>
+                      Tick {entry.tick}: {entry.summary}
+                    </li>
+                  ))}
+                </ul>
+              )}
             </div>
           )}
         </section>

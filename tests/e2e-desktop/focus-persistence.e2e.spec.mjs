@@ -53,10 +53,17 @@ async function advanceControlledClock(milliseconds) {
   }, milliseconds);
 }
 
+async function openWorldInspection() {
+  const open = await $('button=Open world inspection');
+  if (await open.isExisting()) await open.click();
+  await $('h2=Settlement and society').waitForDisplayed();
+}
+
 describe('native focus persistence', () => {
   it('starts, pauses, saves, relaunches, resumes, and completes through real SQLite IPC', async () => {
     await $('#focus-title').waitForDisplayed();
     await $('span=SQLite archive').waitForDisplayed();
+    await openWorldInspection();
     expect(await (await $('h2=Settlement and society')).isDisplayed()).toBe(true);
     expect(await (await $('select[aria-label="Inspect person"]')).isDisplayed()).toBe(true);
     expect(await (await $('h3=Timeline')).isDisplayed()).toBe(true);
@@ -64,6 +71,12 @@ describe('native focus persistence', () => {
     await clearIsolatedNativeArchive();
     await browser.reloadSession();
     await $('button=Start focus').waitForDisplayed();
+    await $('button=Save now').click();
+    await browser.waitUntil(
+      async () => (await $('.persistence-status').getText()).includes('World saved manually.'),
+      { timeoutMsg: 'visible world was not recreated after isolated archive cleanup' },
+    );
+    await openWorldInspection();
 
     const hasReducedMotionRule = await browser.execute(() =>
       [...document.styleSheets].some((sheet) =>
@@ -87,6 +100,28 @@ describe('native focus persistence', () => {
     // clears only the isolated SQLite archive. Require the accessible non-color
     // condition label without assuming the structure was just founded.
     expect(await firstStructure.getText()).toMatch(/condition \d+% \((sound|worn|critical)\)/);
+    await $('summary=Focus and accessibility settings').click();
+    const reducedEffects = await $('//label[normalize-space() = "Reduce visual effects"]/input');
+    if (!(await reducedEffects.isSelected())) await reducedEffects.click();
+    expect(await reducedEffects.isSelected()).toBe(true);
+    expect(
+      await browser.execute(() => document.documentElement.classList.contains('reduced-effects')),
+    ).toBe(true);
+    const saveSettings = await $('button=Save settings');
+    expect(await saveSettings.isEnabled()).toBe(true);
+    await saveSettings.click();
+    await browser.waitUntil(
+      async () => {
+        const status = await $('.persistence-status').getText();
+        if (status.startsWith('Save fault:')) throw new Error(status);
+        return status.includes('Settings saved locally.');
+      },
+      { timeoutMsg: 'reduced-effects setting did not persist' },
+    );
+    const persistedSettings = await browser.tauri.execute(({ core }) =>
+      core.invoke('load_settings'),
+    );
+    expect(persistedSettings).toMatchObject({ reducedEffects: true });
 
     const startAtMs = 1_700_000_000_000;
     await setControlledClock(startAtMs);
@@ -121,6 +156,7 @@ describe('native focus persistence', () => {
 
     await browser.reloadSession();
     await $('button=Resume').waitForDisplayed();
+    await openWorldInspection();
     expect(await (await $('h2=Settlement and society')).isDisplayed()).toBe(true);
     expect(await (await $('select[aria-label="Inspect person"]')).isDisplayed()).toBe(true);
     expect(await (await $('p=focus paused')).isDisplayed()).toBe(true);
@@ -145,6 +181,7 @@ describe('native focus persistence', () => {
     // This short test session crosses no event boundary; the recap must not
     // borrow founding or pre-session history to manufacture activity.
     expect(completedSessions[0]?.recapEventIds).toEqual([]);
+    expect(completedSessions[0]?.recapEntries).toEqual([]);
     const completedCandidates = await browser.tauri.execute(({ core }) =>
       core.invoke('load_save_slot_candidates', { slotId: 'primary' }),
     );

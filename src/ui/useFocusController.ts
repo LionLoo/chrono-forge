@@ -97,6 +97,7 @@ export function focusSessionFromState(
     status: statusFromState(state),
     stateJson: JSON.stringify(state),
     recapEventIds: [...recapEventIds],
+    recapEntries: [],
   };
 }
 

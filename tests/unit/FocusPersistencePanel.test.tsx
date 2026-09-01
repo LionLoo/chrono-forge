@@ -9,7 +9,12 @@ import {
 } from '../../src/adapters/persistence';
 import { completeFocus, createIdleFocusState, startFocus } from '../../src/focus';
 import { deserializeWorldSnapshot, serializeWorldSnapshot } from '../../src/simulation/persistence';
-import { createInitialWorld, stepWorld, type WorldState } from '../../src/simulation/world';
+import {
+  appendWorldEvent,
+  createInitialWorld,
+  stepWorld,
+  type WorldState,
+} from '../../src/simulation/world';
 import { FocusPersistencePanel } from '../../src/ui/FocusPersistencePanel';
 import { focusSessionFromState } from '../../src/ui/useFocusController';
 import type { WorldSimulationView } from '../../src/ui/useWorldSimulation';
@@ -184,6 +189,7 @@ describe('FocusPersistencePanel offline progression', () => {
         status: 'active',
         stateJson: JSON.stringify(runningState),
         recapEventIds: [],
+        recapEntries: [],
       },
       [],
     );
@@ -201,6 +207,71 @@ describe('FocusPersistencePanel offline progression', () => {
 
     await screen.findByRole('button', { name: 'Pause' });
     expect(performOfflineCatchUp).not.toHaveBeenCalled();
+  });
+
+  it('captures events created after a restored running-session checkpoint', async () => {
+    const user = userEvent.setup();
+    const gateway = createInMemoryPersistenceGateway(() => 1_000);
+    const savedWorld = createInitialWorld([1, 2, 3, 4], {
+      width: 2,
+      height: 2,
+      chunkSize: 2,
+    });
+    const advancedWorld = appendWorldEvent(savedWorld, 'shared-work', savedWorld.tick, {
+      summary: 'Two inhabitants completed shared work.',
+    });
+    const runningState = startFocus(
+      createIdleFocusState(),
+      { focusDurationMs: 10_000, breakDurationMs: 0, simulationTicksPerFocusSecond: 10 },
+      1_000,
+    );
+    await gateway.commitFocusCheckpoint(
+      'primary',
+      'Founding world',
+      serializeWorldSnapshot(savedWorld),
+      focusSessionFromState('resumed-running', 'primary', runningState, []),
+      [],
+    );
+    await gateway.saveSettings({
+      ...DEFAULT_APP_SETTINGS,
+      activeSlotId: 'primary',
+      offlineProgressionEnabled: false,
+    });
+    const base = createSimulation().simulation;
+    const simulation: WorldSimulationView = {
+      ...base,
+      events: advancedWorld.eventLog.map((event) => ({
+        amount: event.amount,
+        id: event.id,
+        subjectId: event.subjectId,
+        subjectKind: event.subjectKind,
+        summary: event.summary,
+        targetId: event.targetId,
+        targetKind: event.targetKind,
+        tick: event.tick,
+        tileIndex: event.tileIndex,
+        type: event.kind,
+      })),
+      requestSave: vi.fn().mockResolvedValue(serializeWorldSnapshot(advancedWorld)),
+    };
+
+    render(
+      <FocusPersistencePanel
+        alerts={{ notifyCompletion: () => Promise.resolve() }}
+        clock={{ now: () => 1_000 }}
+        runtime={{ gateway, mode: 'browser-preview' }}
+        simulation={simulation}
+      />,
+    );
+
+    await user.click(await screen.findByRole('button', { name: 'Pause' }));
+    await waitFor(async () => {
+      const restored = (await gateway.loadSaveSlot('primary'))?.focusSession;
+      expect(restored?.recapEventIds).toEqual([3]);
+      expect(restored?.recapEntries).toEqual([
+        { id: 3, tick: 0, summary: 'Two inhabitants completed shared work.' },
+      ]);
+    });
   });
 
   it('commits caught-up state immediately so elapsed time is not replayed', async () => {
@@ -404,6 +475,91 @@ describe('FocusPersistencePanel offline progression', () => {
     expect(focused).not.toBeNull();
     expect(within(completed!).getByText('1')).toBeVisible();
     expect(within(focused!).getByText('2 min')).toBeVisible();
+  });
+
+  it('renders the latest persisted factual recap after the Worker event cache changes', async () => {
+    const gateway = createInMemoryPersistenceGateway(() => 1_000);
+    await gateway.commitSaveSlot('primary', 'Founding world', snapshot);
+    const completedState = completeFocus(
+      startFocus(
+        createIdleFocusState(),
+        { focusDurationMs: 60_000, breakDurationMs: 0, simulationTicksPerFocusSecond: 1 },
+        1_000,
+      ),
+      61_000,
+    );
+    await gateway.recordFocusSession(
+      {
+        ...focusSessionFromState('persisted-recap', 'primary', completedState, [1]),
+        recapEntries: [{ id: 1, tick: 0, summary: 'The founding world formed.' }],
+      },
+      [1],
+    );
+    await gateway.saveSettings({
+      ...DEFAULT_APP_SETTINGS,
+      offlineProgressionEnabled: false,
+    });
+
+    render(
+      <FocusPersistencePanel
+        alerts={{ notifyCompletion: () => Promise.resolve() }}
+        clock={{ now: () => 1_000 }}
+        runtime={{ gateway, mode: 'browser-preview' }}
+        simulation={createStatefulSimulation().simulation}
+      />,
+    );
+
+    const recap = await screen.findByRole('heading', { name: 'Latest factual recap' });
+    expect(recap.parentElement).toHaveTextContent('Tick 0: The founding world formed.');
+  });
+
+  it('persists reduced effects and exposes the integration root class', async () => {
+    const user = userEvent.setup();
+    const gateway = createInMemoryPersistenceGateway(() => 1_000);
+    render(
+      <FocusPersistencePanel
+        alerts={{ notifyCompletion: () => Promise.resolve() }}
+        clock={{ now: () => 1_000 }}
+        runtime={{ gateway, mode: 'browser-preview' }}
+        simulation={createStatefulSimulation().simulation}
+      />,
+    );
+
+    await user.click(await screen.findByText('Focus and accessibility settings'));
+    await user.click(screen.getByRole('checkbox', { name: 'Reduce visual effects' }));
+    expect(document.documentElement).toHaveClass('reduced-effects');
+    await user.click(screen.getByRole('button', { name: 'Save settings' }));
+    await expect(gateway.loadSettings()).resolves.toMatchObject({ reducedEffects: true });
+  });
+
+  it('surfaces native string failures without discarding their actionable message', async () => {
+    const user = userEvent.setup();
+    const base = createInMemoryPersistenceGateway(() => 1_000);
+    let rejectSettings = false;
+    const gateway: PersistenceGateway = {
+      ...base,
+      async saveSettings(settings) {
+        // Tauri can reject with a native string; this intentionally exercises that boundary.
+        // eslint-disable-next-line @typescript-eslint/prefer-promise-reject-errors
+        if (rejectSettings) return Promise.reject('native settings write failed');
+        return base.saveSettings(settings);
+      },
+    };
+    render(
+      <FocusPersistencePanel
+        alerts={{ notifyCompletion: () => Promise.resolve() }}
+        clock={{ now: () => 1_000 }}
+        runtime={{ gateway, mode: 'browser-preview' }}
+        simulation={createStatefulSimulation().simulation}
+      />,
+    );
+
+    await screen.findByRole('button', { name: 'Start focus' });
+    rejectSettings = true;
+    await user.click(screen.getByText('Focus and accessibility settings'));
+    await user.click(screen.getByRole('button', { name: 'Save settings' }));
+
+    expect(await screen.findByText('Save fault: native settings write failed')).toBeVisible();
   });
 
   it('keeps focus history distinct across remounts at the same clock value', async () => {

@@ -67,9 +67,11 @@ test('production frontend renders a Worker-owned autonomous settlement', async (
     }),
   ).toBeVisible();
   await expect(page.locator('.simulation-status')).toContainText('Worker projection ready');
-  await expect(page.getByRole('img', { name: /Autonomous settlement map/ })).toBeVisible();
+  await expect(page.getByRole('img', { name: /world map/ })).toBeVisible();
   await expect(page.getByText('Living people')).toBeVisible();
   await expect(page.getByLabel('Settlement stores')).toBeVisible();
+  await expect(page.getByRole('heading', { name: 'Settlement and society' })).toHaveCount(0);
+  await page.getByRole('button', { name: 'Open world inspection' }).click();
   const society = page.locator('.society-panel');
   await expect(society.getByRole('heading', { name: 'Settlement dashboard' })).toBeVisible();
   await expect(society.getByRole('combobox', { name: 'Inspect person' })).toBeVisible();
@@ -119,6 +121,7 @@ test('society controls remain readable with reduced motion and 200% text', async
     document.documentElement.style.fontSize = '200%';
   });
 
+  await page.getByRole('button', { name: 'Open world inspection' }).click();
   await expect(page.getByRole('heading', { name: 'Settlement and society' })).toBeVisible();
   await expect(page.getByRole('combobox', { name: 'Inspect person' })).toBeVisible();
   await expect(page.getByRole('button', { name: 'Observe 100 fixed ticks' })).toBeVisible();
@@ -129,6 +132,67 @@ test('society controls remain readable with reduced motion and 200% text', async
       .getByRole('button', { name: 'Observe 100 fixed ticks' })
       .evaluate((element) => getComputedStyle(element).transitionDuration),
   );
+});
+
+test('primary world controls remain keyboard operable and unclipped from 100% through 200%', async ({
+  page,
+}) => {
+  await page.goto(origin);
+  await expect(page.locator('.simulation-status')).toContainText('Worker projection ready');
+
+  const populationOverlay = page.getByRole('radio', { name: 'Population' });
+  await populationOverlay.focus();
+  await page.keyboard.press('Space');
+  await expect(page.locator('.world-map-canvas')).toHaveAttribute('data-overlay', 'population');
+  await expect(page.getByText(/Settlement population\. Pattern cue: rings\./)).toBeVisible();
+
+  const zoom = page.getByRole('button', { name: 'Zoom world in' });
+  await zoom.focus();
+  await page.keyboard.press('Enter');
+  await expect(page.getByLabel('Camera position')).toContainText('1.20×');
+
+  const mapObject = page.getByRole('combobox', { name: 'Inspect map object' });
+  await mapObject.focus();
+  await page.keyboard.press('ArrowDown');
+  await page.keyboard.press('Enter');
+  await expect(page.getByRole('article', { name: 'Selected map object' })).toBeVisible();
+
+  const inspection = page.getByRole('button', { name: 'Open world inspection' });
+  await inspection.focus();
+  await page.keyboard.press('Enter');
+  await expect(page.getByRole('heading', { name: 'Settlement and society' })).toBeVisible();
+  await page.getByRole('button', { name: 'Close world inspection' }).focus();
+  await page.keyboard.press('Enter');
+
+  const settings = page.getByText('Focus and accessibility settings', { exact: true });
+  await settings.focus();
+  await page.keyboard.press('Enter');
+  const reducedEffects = page.getByRole('checkbox', { name: 'Reduce visual effects' });
+  await reducedEffects.focus();
+  await page.keyboard.press('Space');
+  await expect(page.locator('.world-map-canvas')).toHaveAttribute('data-effects', 'reduced');
+  await expect(page.getByText('Applies only while accepted focus time is running.')).toBeVisible();
+  await expect(page.getByText('Changes the completion tone only.')).toBeVisible();
+
+  const calmMode = page.getByRole('checkbox', { name: 'Calm focus mode' });
+  await calmMode.focus();
+  await page.keyboard.press('Space');
+  await expect(page.getByRole('heading', { name: 'Settlement and society' })).toHaveCount(0);
+  await page.getByRole('button', { name: 'Open world inspection' }).focus();
+  await page.keyboard.press('Enter');
+  await expect(page.getByRole('heading', { name: 'Settlement and society' })).toBeVisible();
+
+  for (const scale of [100, 150, 200]) {
+    await page.evaluate((percent) => {
+      document.documentElement.style.fontSize = `${percent}%`;
+    }, scale);
+    await expect(page.getByRole('button', { name: 'Close world inspection' })).toBeVisible();
+    await expect(page.getByRole('combobox', { name: 'Inspect person' })).toBeVisible();
+    await expect(page.getByRole('button', { name: 'Start focus' })).toBeVisible();
+    expect(
+      await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth),
+    ).toBe(true);
+  }
 });
 
 test('imports, inspects, saves, and reloads a relationship-rich world', async ({ page }) => {
@@ -144,6 +208,7 @@ test('imports, inspects, saves, and reloads a relationship-rich world', async ({
   await expect(localSlots.locator('option')).toHaveCount(2);
   await expect(localSlots).toHaveValue('relationship-e2e');
 
+  await page.getByRole('button', { name: 'Open world inspection' }).click();
   const inspectPerson = page.getByRole('combobox', { name: 'Inspect person' });
   await inspectPerson.selectOption(String(fixture.personId));
   await expect(page.getByRole('heading', { name: fixture.personName })).toBeVisible();
@@ -159,6 +224,22 @@ test('imports, inspects, saves, and reloads a relationship-rich world', async ({
   await expect(
     page.getByRole('region', { name: /Parents|Guardians|Children|Siblings/ }).first(),
   ).toBeVisible();
+
+  for (const scale of [100, 150, 200]) {
+    await page.evaluate((percent) => {
+      document.documentElement.style.fontSize = `${percent}%`;
+    }, scale);
+    await expect(page.getByRole('article', { name: 'Relationship detail' })).toBeVisible();
+    await expect(
+      page.getByRole('region', { name: /Parents|Guardians|Children|Siblings/ }).first(),
+    ).toBeVisible();
+    expect(
+      await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth),
+    ).toBe(true);
+  }
+  await page.evaluate(() => {
+    document.documentElement.style.fontSize = '100%';
+  });
 
   await page.getByRole('button', { name: 'Save now' }).click();
   await expect(page.getByText('World saved manually.')).toBeVisible();

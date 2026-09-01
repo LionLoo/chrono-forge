@@ -4,7 +4,7 @@
 //! receives a SQL connection or a filesystem path.
 
 use std::{
-    collections::BTreeSet,
+    collections::BTreeMap,
     error::Error,
     fmt::{Display, Formatter, Write},
     fs,
@@ -19,11 +19,13 @@ use sha2::{Digest, Sha256};
 use tauri::State;
 
 const DATABASE_FILE: &str = "chrono-forge.sqlite3";
-const SCHEMA_VERSION: i64 = 3;
+const SCHEMA_VERSION: i64 = 4;
 const MAX_ID_BYTES: usize = 64;
 const MAX_NAME_BYTES: usize = 120;
 const MAX_SNAPSHOT_BYTES: usize = 50 * 1024 * 1024;
-const MAX_RECAP_EVENT_IDS: usize = 10_000;
+const MAX_RECAP_EVENT_IDS: usize = 12;
+const MAX_RECAP_ENTRY_SUMMARY_BYTES: usize = 160;
+const MAX_JSON_SAFE_INTEGER: u64 = 9_007_199_254_740_991;
 const MAX_FOCUS_STATE_BYTES: usize = 64 * 1024;
 const RETAINED_GENERATIONS: i64 = 3;
 
@@ -101,6 +103,16 @@ pub struct FocusSession {
     pub status: FocusSessionStatus,
     pub state_json: String,
     pub recap_event_ids: Vec<u64>,
+    #[serde(default)]
+    pub recap_entries: Vec<FocusRecapEntry>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct FocusRecapEntry {
+    pub id: u64,
+    pub tick: u64,
+    pub summary: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -122,6 +134,8 @@ pub struct AppSettings {
     pub offline_progression_enabled: bool,
     pub max_offline_hours: u32,
     pub calm_mode: bool,
+    #[serde(default)]
+    pub reduced_effects: bool,
     pub notifications_enabled: bool,
     pub sound_enabled: bool,
     pub breaks_enabled: bool,
@@ -138,6 +152,7 @@ impl Default for AppSettings {
             offline_progression_enabled: true,
             max_offline_hours: 24,
             calm_mode: false,
+            reduced_effects: false,
             notifications_enabled: true,
             sound_enabled: true,
             breaks_enabled: false,
@@ -314,6 +329,21 @@ impl PersistenceDatabase {
             )?;
             transaction.execute(
                 "INSERT INTO schema_migrations (version, applied_marker) VALUES (3, 1)",
+                [],
+            )?;
+            transaction.commit()?;
+        }
+        if newest_version < 4 {
+            let transaction = self
+                .connection
+                .transaction_with_behavior(TransactionBehavior::Immediate)?;
+            transaction.execute_batch(
+                "ALTER TABLE focus_sessions ADD COLUMN recap_entries_json TEXT NOT NULL DEFAULT '[]';
+                 ALTER TABLE app_settings ADD COLUMN reduced_effects INTEGER NOT NULL DEFAULT 0
+                     CHECK (reduced_effects IN (0, 1));",
+            )?;
+            transaction.execute(
+                "INSERT INTO schema_migrations (version, applied_marker) VALUES (4, 1)",
                 [],
             )?;
             transaction.commit()?;
@@ -762,7 +792,7 @@ impl PersistenceDatabase {
         let mut statement = self.connection.prepare(
             "SELECT session_id, slot_id, started_at_ms, ended_at_ms, planned_focus_ms, focused_ms,
                     planned_break_ms, break_ms, issued_simulation_ticks, status,
-                    state_json, recap_event_ids_json
+                    state_json, recap_event_ids_json, recap_entries_json
              FROM focus_sessions ORDER BY started_at_ms DESC, session_id ASC",
         )?;
         let rows = statement.query_map([], |row| {
@@ -771,6 +801,14 @@ impl PersistenceDatabase {
                 serde_json::from_str(&row.get::<_, String>(11)?).map_err(|error| {
                     rusqlite::Error::FromSqlConversionFailure(
                         11,
+                        rusqlite::types::Type::Text,
+                        Box::new(error),
+                    )
+                })?;
+            let recap_entries =
+                serde_json::from_str(&row.get::<_, String>(12)?).map_err(|error| {
+                    rusqlite::Error::FromSqlConversionFailure(
+                        12,
                         rusqlite::types::Type::Text,
                         Box::new(error),
                     )
@@ -788,6 +826,7 @@ impl PersistenceDatabase {
                 status,
                 state_json: row.get(10)?,
                 recap_event_ids,
+                recap_entries,
             })
         })?;
         Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
@@ -799,7 +838,8 @@ impl PersistenceDatabase {
             .query_row(
                 "SELECT focus_to_sim_ratio, default_focus_minutes, default_break_minutes,
                         volume_percent, offline_progression_enabled, max_offline_hours, calm_mode,
-                        notifications_enabled, sound_enabled, breaks_enabled, active_slot_id
+                        notifications_enabled, sound_enabled, breaks_enabled, active_slot_id,
+                        reduced_effects
                  FROM app_settings WHERE singleton = 1",
                 [],
                 |row| {
@@ -815,6 +855,7 @@ impl PersistenceDatabase {
                         sound_enabled: row.get::<_, i64>(8)? != 0,
                         breaks_enabled: row.get::<_, i64>(9)? != 0,
                         active_slot_id: row.get(10)?,
+                        reduced_effects: row.get::<_, i64>(11)? != 0,
                     })
                 },
             )
@@ -841,9 +882,9 @@ impl PersistenceDatabase {
         self.connection.execute(
             "INSERT INTO app_settings
              (singleton, focus_to_sim_ratio, default_focus_minutes, default_break_minutes,
-              volume_percent, offline_progression_enabled, max_offline_hours, calm_mode,
-              notifications_enabled, sound_enabled, breaks_enabled, active_slot_id)
-             VALUES (1, ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
+               volume_percent, offline_progression_enabled, max_offline_hours, calm_mode,
+               notifications_enabled, sound_enabled, breaks_enabled, active_slot_id, reduced_effects)
+              VALUES (1, ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
              ON CONFLICT(singleton) DO UPDATE SET
                  focus_to_sim_ratio = excluded.focus_to_sim_ratio,
                  default_focus_minutes = excluded.default_focus_minutes,
@@ -853,9 +894,10 @@ impl PersistenceDatabase {
                  max_offline_hours = excluded.max_offline_hours,
                  calm_mode = excluded.calm_mode,
                  notifications_enabled = excluded.notifications_enabled,
-                 sound_enabled = excluded.sound_enabled,
-                 breaks_enabled = excluded.breaks_enabled,
-                 active_slot_id = excluded.active_slot_id",
+                  sound_enabled = excluded.sound_enabled,
+                  breaks_enabled = excluded.breaks_enabled,
+                  active_slot_id = excluded.active_slot_id,
+                  reduced_effects = excluded.reduced_effects",
             params![
                 settings.focus_to_sim_ratio,
                 settings.default_focus_minutes,
@@ -868,6 +910,7 @@ impl PersistenceDatabase {
                 bool_to_db(settings.sound_enabled),
                 bool_to_db(settings.breaks_enabled),
                 settings.active_slot_id,
+                bool_to_db(settings.reduced_effects),
             ],
         )?;
         Ok(settings.clone())
@@ -879,12 +922,13 @@ fn upsert_focus_session(
     session: &FocusSession,
 ) -> Result<()> {
     let event_ids = serde_json::to_string(&session.recap_event_ids)?;
+    let entries = serde_json::to_string(&session.recap_entries)?;
     transaction.execute(
         "INSERT INTO focus_sessions
          (session_id, slot_id, started_at_ms, ended_at_ms, planned_focus_ms, focused_ms,
           planned_break_ms, break_ms, issued_simulation_ticks, status, state_json,
-          recap_event_ids_json)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
+           recap_event_ids_json, recap_entries_json)
+          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)
          ON CONFLICT(session_id) DO UPDATE SET
              slot_id = excluded.slot_id,
              started_at_ms = excluded.started_at_ms,
@@ -896,7 +940,8 @@ fn upsert_focus_session(
              issued_simulation_ticks = excluded.issued_simulation_ticks,
              status = excluded.status,
              state_json = excluded.state_json,
-             recap_event_ids_json = excluded.recap_event_ids_json",
+              recap_event_ids_json = excluded.recap_event_ids_json,
+              recap_entries_json = excluded.recap_entries_json",
         params![
             session.session_id,
             session.slot_id,
@@ -910,6 +955,7 @@ fn upsert_focus_session(
             focus_status_to_db(&session.status),
             session.state_json,
             event_ids,
+            entries,
         ],
     )?;
     Ok(())
@@ -941,14 +987,24 @@ fn validate_recap_event_references_in_snapshot(
     if session.recap_event_ids.is_empty() {
         return Ok(());
     }
-    let source_event_ids = world_event_ids(snapshot)?;
+    let source_events = world_events(snapshot)?;
     if session
         .recap_event_ids
         .iter()
-        .any(|event_id| !source_event_ids.contains(event_id))
+        .any(|event_id| !source_events.contains_key(event_id))
     {
         return Err(PersistenceError::new(
             "focus recap references an event absent from its source save",
+        ));
+    }
+    if session.recap_entries.iter().any(|entry| {
+        source_events.get(&entry.id).is_none_or(|source| {
+            source.tick != Some(entry.tick)
+                || source.summary.as_deref() != Some(entry.summary.as_str())
+        })
+    }) {
+        return Err(PersistenceError::new(
+            "focus recap copies do not match their authoritative source events",
         ));
     }
     Ok(())
@@ -1033,6 +1089,10 @@ fn validate_focus_session(session: &FocusSession) -> Result<()> {
         || session.recap_event_ids.contains(&0)
         || session
             .recap_event_ids
+            .iter()
+            .any(|event_id| *event_id > MAX_JSON_SAFE_INTEGER)
+        || session
+            .recap_event_ids
             .windows(2)
             .any(|event_ids| event_ids[0] >= event_ids[1])
     {
@@ -1040,7 +1100,33 @@ fn validate_focus_session(session: &FocusSession) -> Result<()> {
             "focus session times, progress, status, or recap event IDs are invalid",
         ));
     }
+    validate_recap_entries(session)?;
     validate_focus_state_summary(session)?;
+    Ok(())
+}
+
+fn validate_recap_entries(session: &FocusSession) -> Result<()> {
+    if session.recap_entries.is_empty() {
+        return Ok(());
+    }
+    if session.recap_entries.len() != session.recap_event_ids.len()
+        || session
+            .recap_entries
+            .iter()
+            .zip(&session.recap_event_ids)
+            .any(|(entry, event_id)| entry.id != *event_id)
+        || session.recap_entries.iter().any(|entry| {
+            entry.id == 0
+                || entry.id > MAX_JSON_SAFE_INTEGER
+                || entry.tick > MAX_JSON_SAFE_INTEGER
+                || entry.summary.trim().is_empty()
+                || entry.summary.len() > MAX_RECAP_ENTRY_SUMMARY_BYTES
+        })
+    {
+        return Err(PersistenceError::new(
+            "focus recap entries must exactly match bounded factual event IDs",
+        ));
+    }
     Ok(())
 }
 
@@ -1096,7 +1182,13 @@ fn json_nullable_i64(
     }
 }
 
-fn world_event_ids(snapshot: &str) -> Result<BTreeSet<u64>> {
+#[derive(Debug)]
+struct SnapshotEventFact {
+    tick: Option<u64>,
+    summary: Option<String>,
+}
+
+fn world_events(snapshot: &str) -> Result<BTreeMap<u64, SnapshotEventFact>> {
     let envelope: serde_json::Value = serde_json::from_str(snapshot)?;
     let format_version = envelope
         .get("formatVersion")
@@ -1119,20 +1211,32 @@ fn world_event_ids(snapshot: &str) -> Result<BTreeSet<u64>> {
         .get("eventLog")
         .and_then(serde_json::Value::as_array)
         .ok_or_else(|| PersistenceError::new("source save has no event log"))?;
-    let mut ids = BTreeSet::new();
+    let mut events_by_id = BTreeMap::new();
     for event in events {
         let id = event
             .get("id")
             .and_then(serde_json::Value::as_u64)
             .filter(|id| *id > 0)
             .ok_or_else(|| PersistenceError::new("source save contains an invalid event ID"))?;
-        if !ids.insert(id) {
+        if events_by_id
+            .insert(
+                id,
+                SnapshotEventFact {
+                    tick: event.get("tick").and_then(serde_json::Value::as_u64),
+                    summary: event
+                        .get("summary")
+                        .and_then(serde_json::Value::as_str)
+                        .map(str::to_owned),
+                },
+            )
+            .is_some()
+        {
             return Err(PersistenceError::new(
                 "source save contains duplicate event IDs",
             ));
         }
     }
-    Ok(ids)
+    Ok(events_by_id)
 }
 
 fn sha256_hex(value: &str) -> String {
@@ -1310,7 +1414,7 @@ mod tests {
 
     fn snapshot(value: &str) -> String {
         format!(
-            r#"{{"format":"chrono-forge-world","formatVersion":1,"payload":{{"eventLog":[{{"id":7}},{{"id":9}},{{"id":11}}],"test":"{value}"}}}}"#
+            r#"{{"format":"chrono-forge-world","formatVersion":1,"payload":{{"eventLog":[{{"id":7,"tick":0,"summary":"Recorded factual event 7."}},{{"id":9,"tick":0,"summary":"Recorded factual event 9."}},{{"id":11,"tick":0,"summary":"Recorded factual event 11."}}],"test":"{value}"}}}}"#
         )
     }
 
@@ -1331,6 +1435,14 @@ mod tests {
             issued_simulation_ticks: 1,
             status: FocusSessionStatus::Completed,
             state_json: completed_focus_state_json(),
+            recap_entries: recap_event_ids
+                .iter()
+                .map(|id| FocusRecapEntry {
+                    id: *id,
+                    tick: 0,
+                    summary: format!("Recorded factual event {id}."),
+                })
+                .collect(),
             recap_event_ids,
         }
     }
@@ -1632,6 +1744,23 @@ mod tests {
             status: FocusSessionStatus::Completed,
             state_json: completed_focus_state_json(),
             recap_event_ids: vec![7, 9, 11],
+            recap_entries: vec![
+                FocusRecapEntry {
+                    id: 7,
+                    tick: 0,
+                    summary: "Recorded factual event 7.".to_owned(),
+                },
+                FocusRecapEntry {
+                    id: 9,
+                    tick: 0,
+                    summary: "Recorded factual event 9.".to_owned(),
+                },
+                FocusRecapEntry {
+                    id: 11,
+                    tick: 0,
+                    summary: "Recorded factual event 11.".to_owned(),
+                },
+            ],
         };
         database.record_focus_session(&session).expect("record");
         assert_eq!(database.list_focus_sessions().expect("list"), vec![session]);
@@ -1656,12 +1785,24 @@ mod tests {
             status: FocusSessionStatus::Completed,
             state_json: completed_focus_state_json(),
             recap_event_ids: vec![7],
+            recap_entries: vec![FocusRecapEntry {
+                id: 7,
+                tick: 0,
+                summary: "Recorded factual event 7.".to_owned(),
+            }],
         };
         let mut mismatched = base.clone();
         mismatched.focused_ms = 99;
         assert!(database.record_focus_session(&mismatched).is_err());
+        let mut tampered_tick = base.clone();
+        tampered_tick.recap_entries[0].tick = 1;
+        assert!(database.record_focus_session(&tampered_tick).is_err());
+        let mut tampered_summary = base.clone();
+        tampered_summary.recap_entries[0].summary = "Invented recap.".to_owned();
+        assert!(database.record_focus_session(&tampered_summary).is_err());
         let mut absent_event = base;
         absent_event.recap_event_ids = vec![8];
+        absent_event.recap_entries[0].id = 8;
         assert!(database.record_focus_session(&absent_event).is_err());
     }
 
@@ -1681,6 +1822,18 @@ mod tests {
             status: FocusSessionStatus::Completed,
             state_json: completed_focus_state_json(),
             recap_event_ids: vec![9, 7],
+            recap_entries: vec![
+                FocusRecapEntry {
+                    id: 9,
+                    tick: 0,
+                    summary: "Recorded factual event 9.".to_owned(),
+                },
+                FocusRecapEntry {
+                    id: 7,
+                    tick: 0,
+                    summary: "Recorded factual event 7.".to_owned(),
+                },
+            ],
         };
         assert!(database.record_focus_session(&invalid).is_err());
     }
@@ -1703,6 +1856,7 @@ mod tests {
             offline_progression_enabled: false,
             max_offline_hours: 12,
             calm_mode: true,
+            reduced_effects: true,
             notifications_enabled: false,
             sound_enabled: false,
             breaks_enabled: true,
@@ -1751,7 +1905,71 @@ mod tests {
     }
 
     #[test]
-    fn v1_to_v3_migration_marks_existing_generations_and_defaults_new_fields() {
+    fn v3_to_v4_migration_preserves_legacy_recap_ids_without_inventing_entries() {
+        let connection = Connection::open_in_memory().expect("connection");
+        connection
+            .execute_batch(
+                "
+                PRAGMA foreign_keys = ON;
+                CREATE TABLE schema_migrations (
+                    version INTEGER PRIMARY KEY,
+                    applied_marker INTEGER NOT NULL
+                );
+                INSERT INTO schema_migrations (version, applied_marker) VALUES (1, 1), (2, 1), (3, 1);
+                CREATE TABLE focus_sessions (
+                    session_id TEXT PRIMARY KEY NOT NULL,
+                    slot_id TEXT,
+                    started_at_ms INTEGER NOT NULL,
+                    ended_at_ms INTEGER,
+                    planned_focus_ms INTEGER NOT NULL,
+                    focused_ms INTEGER NOT NULL,
+                    planned_break_ms INTEGER NOT NULL,
+                    break_ms INTEGER NOT NULL,
+                    issued_simulation_ticks INTEGER NOT NULL,
+                    status TEXT NOT NULL,
+                    state_json TEXT NOT NULL,
+                    recap_event_ids_json TEXT NOT NULL
+                );
+                CREATE TABLE app_settings (
+                    singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+                    focus_to_sim_ratio INTEGER NOT NULL,
+                    default_focus_minutes INTEGER NOT NULL,
+                    default_break_minutes INTEGER NOT NULL,
+                    volume_percent INTEGER NOT NULL,
+                    offline_progression_enabled INTEGER NOT NULL,
+                    max_offline_hours INTEGER NOT NULL,
+                    calm_mode INTEGER NOT NULL,
+                    notifications_enabled INTEGER NOT NULL,
+                    sound_enabled INTEGER NOT NULL,
+                    breaks_enabled INTEGER NOT NULL,
+                    active_slot_id TEXT
+                );
+                INSERT INTO app_settings VALUES (1, 10, 25, 5, 70, 1, 24, 0, 1, 1, 0, NULL);
+                ",
+            )
+            .expect("v3 schema");
+        connection
+            .execute(
+                "INSERT INTO focus_sessions
+                 (session_id, slot_id, started_at_ms, ended_at_ms, planned_focus_ms, focused_ms,
+                  planned_break_ms, break_ms, issued_simulation_ticks, status, state_json,
+                  recap_event_ids_json)
+                 VALUES ('legacy-session', NULL, 100, 220, 100, 100, 20, 20, 1, 'completed', ?1, '[7]')",
+                [completed_focus_state_json()],
+            )
+            .expect("legacy focus history");
+
+        let mut database = PersistenceDatabase { connection };
+        database.migrate().expect("v4 migration");
+        assert!(!database.load_settings().expect("settings").reduced_effects);
+        assert_eq!(
+            database.list_focus_sessions().expect("history")[0].recap_entries,
+            Vec::<FocusRecapEntry>::new()
+        );
+    }
+
+    #[test]
+    fn v1_to_v4_migration_marks_existing_generations_and_defaults_new_fields() {
         let connection = Connection::open_in_memory().expect("connection");
         connection
             .execute_batch(
@@ -1816,6 +2034,6 @@ mod tests {
             .expect("query")
             .collect::<std::result::Result<_, _>>()
             .expect("versions");
-        assert_eq!(versions, vec![1, 2, 3]);
+        assert_eq!(versions, vec![1, 2, 3, 4]);
     }
 }

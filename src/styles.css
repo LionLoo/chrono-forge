@@ -52,7 +52,7 @@ textarea:focus-visible,
 
 .app-shell {
   min-height: 100vh;
-  overflow: hidden;
+  overflow-x: clip;
   background:
     radial-gradient(circle at 78% -8%, rgba(179, 129, 64, 0.16), transparent 35rem),
     linear-gradient(155deg, #111a14 0%, #0b120e 55%, #080d0a 100%);
@@ -202,6 +202,7 @@ textarea:focus-visible,
 
 .overlay-picker {
   display: flex;
+  flex-wrap: wrap;
   gap: 6px;
   margin: 18px 0 12px;
   padding: 0;
@@ -289,6 +290,50 @@ textarea:focus-visible,
   display: block;
 }
 
+.overlay-legend {
+  display: flex;
+  gap: 9px;
+  align-items: center;
+  min-height: 34px;
+  margin-top: 9px;
+  color: #bdc9bb;
+  font-size: 0.76rem;
+  line-height: 1.4;
+}
+
+.overlay-pattern {
+  flex: 0 0 auto;
+  width: 24px;
+  height: 18px;
+  border: 1px solid #667967;
+  background-color: #17241b;
+}
+
+.overlay-pattern-speckle,
+.overlay-pattern-dots {
+  background-image: radial-gradient(circle, #edf5ea 1px, transparent 1.5px);
+  background-size: 6px 6px;
+}
+
+.overlay-pattern-rings {
+  border-radius: 50%;
+  box-shadow:
+    inset 0 0 0 3px #17241b,
+    inset 0 0 0 4px #edf5ea;
+}
+
+.overlay-pattern-hatch,
+.overlay-pattern-chevron {
+  background-image: repeating-linear-gradient(45deg, transparent 0 4px, #edf5ea 4px 5px);
+}
+
+.overlay-pattern-grid {
+  background-image:
+    linear-gradient(#edf5ea 1px, transparent 1px),
+    linear-gradient(90deg, #edf5ea 1px, transparent 1px);
+  background-size: 6px 6px;
+}
+
 .map-loading {
   position: absolute;
   inset: 0;
@@ -345,6 +390,66 @@ textarea:focus-visible,
 .camera-toolbar button:hover {
   border-color: #997d4b;
   color: #f8dfaa;
+}
+
+.map-inspector {
+  display: grid;
+  grid-template-columns: minmax(0, 0.8fr) minmax(220px, 1fr) minmax(0, 1.2fr);
+  gap: 14px;
+  align-items: start;
+  margin-top: 12px;
+  padding: 14px;
+  border: 1px solid rgba(238, 220, 181, 0.13);
+  background: #0e1611;
+}
+
+.map-inspector h3,
+.map-inspector h4,
+.map-inspector p,
+.map-inspector ul {
+  margin: 0;
+}
+
+.map-inspector h3,
+.map-inspector h4 {
+  color: #e9d6a5;
+}
+
+.map-inspector p,
+.map-inspector li {
+  color: #bdcabb;
+  font-size: 0.76rem;
+  line-height: 1.5;
+}
+
+.map-inspector label {
+  display: grid;
+  gap: 7px;
+  color: #cbd8c9;
+  font-size: 0.78rem;
+}
+
+.map-inspector select {
+  min-width: 0;
+  min-height: 40px;
+  padding: 8px 10px;
+  border: 1px solid #6f8b75;
+  border-radius: 3px;
+  background: #0a110d;
+  color: #f0f5ee;
+}
+
+.map-selection-detail,
+.map-selection-empty {
+  min-width: 0;
+  padding: 10px;
+  border-left: 3px solid #d8a74e;
+  background: #101a14;
+}
+
+.map-selection-detail ul {
+  margin-top: 7px;
+  padding-left: 18px;
 }
 
 .simulation-status {
@@ -1194,6 +1299,61 @@ textarea:focus-visible,
   opacity: 0.48;
 }
 
+.inspection-shell {
+  display: flex;
+  gap: 24px;
+  align-items: center;
+  justify-content: space-between;
+  margin-top: 18px;
+  padding: 18px 22px;
+  border: 1px solid rgba(238, 220, 181, 0.13);
+  background: #0e1611;
+}
+
+.inspection-shell > div {
+  max-width: 760px;
+}
+
+.inspection-shell h2,
+.inspection-shell p {
+  margin: 0;
+}
+
+.inspection-shell h2 {
+  color: #edf1e7;
+  font-family: Georgia, 'Times New Roman', serif;
+  font-size: 1.35rem;
+  font-weight: 500;
+}
+
+.inspection-shell p:not(.eyebrow) {
+  margin-top: 7px;
+  color: #bdcabb;
+  font-size: 0.82rem;
+  line-height: 1.55;
+}
+
+.inspection-shell button {
+  flex: 0 0 auto;
+  min-height: 42px;
+  padding: 9px 14px;
+  border: 1px solid #667967;
+  border-radius: 3px;
+  background: #17241b;
+  color: #edf5ea;
+  cursor: pointer;
+  font-weight: 750;
+}
+
+.inspection-shell button:disabled {
+  cursor: not-allowed;
+  opacity: 0.5;
+}
+
+.inspection-region {
+  display: contents;
+}
+
 .calm-mode .lab-intro,
 .calm-mode .telemetry-card,
 .calm-mode .society-panel,
@@ -1201,8 +1361,16 @@ textarea:focus-visible,
 .calm-mode .development-panel,
 .calm-mode .world-card > .card-heading,
 .calm-mode .overlay-picker,
-.calm-mode .camera-toolbar {
+.calm-mode .overlay-legend,
+.calm-mode .camera-toolbar,
+.calm-mode .map-inspector {
   display: none;
+}
+
+.calm-mode .inspection-region .society-panel,
+.calm-mode .inspection-region .civilizations-panel,
+.calm-mode .inspection-region .development-panel {
+  display: grid;
 }
 
 .calm-mode .lab-grid {
@@ -1267,6 +1435,15 @@ textarea:focus-visible,
     grid-template-columns: 1fr;
   }
 
+  .map-inspector {
+    grid-template-columns: 1fr;
+  }
+
+  .inspection-shell {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
   .camera-readout {
     order: -1;
   }
@@ -1303,4 +1480,13 @@ textarea:focus-visible,
     animation-duration: 0.01ms !important;
     animation-iteration-count: 1 !important;
   }
+}
+
+.reduced-effects *,
+.reduced-effects *::before,
+.reduced-effects *::after {
+  scroll-behavior: auto !important;
+  transition-duration: 0.01ms !important;
+  animation-duration: 0.01ms !important;
+  animation-iteration-count: 1 !important;
 }

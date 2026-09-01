@@ -5,7 +5,8 @@ import { getRuntimePersistence, type RuntimePersistence } from './adapters/runti
 import { STRUCTURE_STATE_CODES, type QueuedCommand } from './protocol';
 import { INITIAL_WORLD_CAMERA, panCamera, zoomCamera } from './rendering/camera';
 import { WorldMapCanvas } from './rendering/WorldMapCanvas';
-import { WORLD_OVERLAYS, type WorldOverlay } from './rendering/world-palette';
+import type { SelectableId } from './rendering/render-model';
+import { overlayDefinition, WORLD_OVERLAYS, type WorldOverlay } from './rendering/world-palette';
 import { PROJECT_META } from './project-meta';
 import { FocusPersistencePanel } from './ui/FocusPersistencePanel';
 import { CivilizationsPanel } from './ui/CivilizationsPanel';
@@ -31,6 +32,39 @@ const STRUCTURE_STATUS_LABELS: Readonly<Record<number, string>> = Object.freeze(
   [STRUCTURE_STATE_CODES.abandoned]: 'abandoned',
   [STRUCTURE_STATE_CODES.demolished]: 'demolished',
 });
+
+const AGENT_ACTION_LABELS: Readonly<Record<number, string>> = Object.freeze({
+  0: 'idle',
+  1: 'foraging',
+  2: 'collecting water',
+  3: 'gathering timber',
+  4: 'gathering stone',
+  5: 'transporting goods',
+  6: 'constructing',
+  7: 'repairing',
+  8: 'resting',
+});
+
+function selectionKey(selection: SelectableId): string {
+  return `${selection.kind}:${selection.id}`;
+}
+
+function parseSelectionKey(value: string): SelectableId | null {
+  const [kind, idText, extra] = value.split(':');
+  const id = Number(idText);
+  if (extra !== undefined || !Number.isSafeInteger(id) || id < 1) return null;
+  if (
+    kind !== 'agent' &&
+    kind !== 'structure' &&
+    kind !== 'settlement' &&
+    kind !== 'route' &&
+    kind !== 'ruin' &&
+    kind !== 'crisis'
+  ) {
+    return null;
+  }
+  return { id, kind };
+}
 
 interface AppProps {
   readonly focusAlerts?: FocusAlerts;
@@ -59,6 +93,9 @@ export function App({ focusAlerts, focusClock, persistence, workerFactory }: App
   const runtimePersistence = persistence ?? getRuntimePersistence();
   const [camera, setCamera] = useState(INITIAL_WORLD_CAMERA);
   const [overlay, setOverlay] = useState<WorldOverlay>('terrain');
+  const [inspectionOpen, setInspectionOpen] = useState(false);
+  const [mapSelection, setMapSelection] = useState<SelectableId | null>(null);
+  const [reducedEffects, setReducedEffects] = useState(false);
   const [interventionPending, setInterventionPending] = useState(false);
   const [interventionStatus, setInterventionStatus] = useState<string | null>(null);
   const worldSummary = useMemo(() => {
@@ -121,6 +158,139 @@ export function App({ focusAlerts, focusClock, persistence, workerFactory }: App
     });
   }, [simulation.frame]);
   const recentEvents = useMemo(() => simulation.events.slice(-4).reverse(), [simulation.events]);
+  const overlayInfo = overlayDefinition(overlay);
+  const selectableObjects = useMemo(() => {
+    const frame = simulation.frame;
+    if (frame === null) return [];
+    const people = new Map(frame.society.people.map((person) => [person.id, person.name]));
+    const settlements = new Map(
+      frame.civilizations.settlements.map((settlement) => [settlement.id, settlement.name]),
+    );
+    const choices: { readonly label: string; readonly selection: SelectableId }[] = [];
+    for (const id of frame.agentIds) {
+      choices.push({
+        label: `Person · ${people.get(id) ?? `Agent ${id}`}`,
+        selection: { id, kind: 'agent' },
+      });
+    }
+    for (const id of frame.structureIds) {
+      const index = frame.structureIds.indexOf(id);
+      choices.push({
+        label: `${STRUCTURE_KIND_LABELS[frame.structureKinds[index] ?? 0] ?? 'Structure'} · ${id}`,
+        selection: { id, kind: 'structure' },
+      });
+    }
+    for (const settlement of frame.civilizations.settlements) {
+      choices.push({
+        label: `Settlement · ${settlement.name}`,
+        selection: { id: settlement.id, kind: 'settlement' },
+      });
+    }
+    for (const route of frame.civilizations.routes) {
+      choices.push({
+        label: `Trade route · ${settlements.get(route.firstSettlementId) ?? route.firstSettlementId} to ${settlements.get(route.secondSettlementId) ?? route.secondSettlementId}`,
+        selection: { id: route.id, kind: 'route' },
+      });
+    }
+    for (const ruin of frame.civilizations.ruins) {
+      choices.push({
+        label: `Ruin · ${settlements.get(ruin.settlementId) ?? ruin.settlementId}`,
+        selection: { id: ruin.id, kind: 'ruin' },
+      });
+    }
+    for (const crisis of frame.development.activeCrises) {
+      choices.push({
+        label: `Crisis · ${crisis.kind.replaceAll('-', ' ')}`,
+        selection: { id: crisis.id, kind: 'crisis' },
+      });
+    }
+    return choices;
+  }, [simulation.frame]);
+  const selectedMapDetail = useMemo(() => {
+    const frame = simulation.frame;
+    if (frame === null || mapSelection === null) return null;
+    if (mapSelection.kind === 'agent') {
+      const index = frame.agentIds.indexOf(mapSelection.id);
+      const person = frame.society.people.find((candidate) => candidate.id === mapSelection.id);
+      if (index < 0) return null;
+      return {
+        heading: person?.name ?? `Agent ${mapSelection.id}`,
+        lines: [
+          `Person ${mapSelection.id}`,
+          `Tile ${frame.agentTiles[index] ?? 0}`,
+          `Health ${Math.round((frame.agentHealth[index] ?? 0) / 10)}%`,
+          `Current activity: ${AGENT_ACTION_LABELS[frame.agentActions[index] ?? 0] ?? 'unknown'}`,
+        ],
+      };
+    }
+    if (mapSelection.kind === 'structure') {
+      const index = frame.structureIds.indexOf(mapSelection.id);
+      if (index < 0) return null;
+      return {
+        heading: `${STRUCTURE_KIND_LABELS[frame.structureKinds[index] ?? 0] ?? 'Structure'} ${mapSelection.id}`,
+        lines: [
+          `Tile ${frame.structureTiles[index] ?? 0}`,
+          `Status: ${STRUCTURE_STATUS_LABELS[frame.structureStates[index] ?? 0] ?? 'unknown'}`,
+          `Condition ${Math.round((frame.structureCondition[index] ?? 0) / 10)}%`,
+          `Construction ${Math.round((frame.structureProgress[index] ?? 0) / 10)}%`,
+        ],
+      };
+    }
+    if (mapSelection.kind === 'settlement') {
+      const settlement = frame.civilizations.settlements.find(
+        (candidate) => candidate.id === mapSelection.id,
+      );
+      if (settlement === undefined) return null;
+      return {
+        heading: settlement.name,
+        lines: [
+          `Settlement ${settlement.id}`,
+          `Population ${settlement.population}`,
+          `Status: ${settlement.status}`,
+          `Stability ${settlement.stability}%`,
+        ],
+      };
+    }
+    if (mapSelection.kind === 'route') {
+      const route = frame.civilizations.routes.find(
+        (candidate) => candidate.id === mapSelection.id,
+      );
+      if (route === undefined) return null;
+      return {
+        heading: `Trade route ${route.id}`,
+        lines: [
+          `Settlement ${route.firstSettlementId} to ${route.secondSettlementId}`,
+          `Status: ${route.status}`,
+          `Volume ${route.volume}`,
+          `Began at tick ${route.startedTick}`,
+        ],
+      };
+    }
+    if (mapSelection.kind === 'ruin') {
+      const ruin = frame.civilizations.ruins.find((candidate) => candidate.id === mapSelection.id);
+      if (ruin === undefined) return null;
+      return {
+        heading: `Ruin ${ruin.id}`,
+        lines: [
+          `Former settlement ${ruin.settlementId}`,
+          `Cause: ${ruin.cause}`,
+          `Recorded at tick ${ruin.createdTick}`,
+        ],
+      };
+    }
+    const crisis = frame.development.activeCrises.find(
+      (candidate) => candidate.id === mapSelection.id,
+    );
+    if (crisis === undefined) return null;
+    return {
+      heading: crisis.kind.replaceAll('-', ' '),
+      lines: [
+        `Active crisis ${crisis.id}`,
+        `Severity ${crisis.severity}`,
+        `Triggered at tick ${crisis.startedTick}`,
+      ],
+    };
+  }, [mapSelection, simulation.frame]);
   const queueIntervention = (command: QueuedCommand) => {
     setInterventionPending(true);
     setInterventionStatus(null);
@@ -161,7 +331,7 @@ export function App({ focusAlerts, focusClock, persistence, workerFactory }: App
       <main id="main" className="world-lab" tabIndex={-1}>
         <section className="lab-intro" aria-labelledby="hero-title">
           <div>
-            <p className="eyebrow">Milestone 6 · Civilizations meet</p>
+            <p className="eyebrow">Milestone 7 · A living world at a glance</p>
             <h1 id="hero-title">{PROJECT_META.promise}</h1>
           </div>
           <p>
@@ -207,8 +377,11 @@ export function App({ focusAlerts, focusClock, persistence, workerFactory }: App
                 <WorldMapCanvas
                   camera={camera}
                   onCameraChange={setCamera}
+                  onSelectionChange={setMapSelection}
                   overlay={overlay}
                   projection={simulation.frame}
+                  reducedEffects={reducedEffects}
+                  selection={mapSelection}
                 />
               ) : (
                 <div className="map-loading" aria-live="polite">
@@ -216,6 +389,16 @@ export function App({ focusAlerts, focusClock, persistence, workerFactory }: App
                   Generating seeded terrain
                 </div>
               )}
+            </div>
+
+            <div className="overlay-legend" aria-live="polite">
+              <span
+                aria-hidden="true"
+                className={`overlay-pattern overlay-pattern-${overlayInfo.pattern}`}
+              />
+              <span>
+                {overlayInfo.legend}. Pattern cue: {overlayInfo.pattern}.
+              </span>
             </div>
 
             <div className="camera-toolbar" aria-label="World camera controls">
@@ -289,6 +472,46 @@ export function App({ focusAlerts, focusClock, persistence, workerFactory }: App
                 </button>
               </div>
             </div>
+
+            <section className="map-inspector" aria-labelledby="map-inspector-title">
+              <div>
+                <h3 id="map-inspector-title">Map selection</h3>
+                <p>Pointer selection and this keyboard navigator open the same factual object.</p>
+              </div>
+              <label>
+                Inspect map object
+                <select
+                  onChange={(event) => {
+                    setMapSelection(parseSelectionKey(event.currentTarget.value));
+                  }}
+                  value={mapSelection === null ? '' : selectionKey(mapSelection)}
+                >
+                  <option value="">No object selected</option>
+                  {selectableObjects.map((choice) => (
+                    <option
+                      key={selectionKey(choice.selection)}
+                      value={selectionKey(choice.selection)}
+                    >
+                      {choice.label}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              {selectedMapDetail === null ? (
+                <p className="map-selection-empty">
+                  Choose an object to inspect its current Worker-projected facts.
+                </p>
+              ) : (
+                <article aria-label="Selected map object" className="map-selection-detail">
+                  <h4>{selectedMapDetail.heading}</h4>
+                  <ul>
+                    {selectedMapDetail.lines.map((line) => (
+                      <li key={line}>{line}</li>
+                    ))}
+                  </ul>
+                </article>
+              )}
+            </section>
           </section>
 
           <aside className="telemetry-card" aria-labelledby="telemetry-title">
@@ -442,8 +665,31 @@ export function App({ focusAlerts, focusClock, persistence, workerFactory }: App
           </aside>
         </div>
 
-        {simulation.frame === null ? null : (
-          <>
+        <section className="inspection-shell" aria-labelledby="inspection-shell-title">
+          <div>
+            <p className="eyebrow">Optional world detail</p>
+            <h2 id="inspection-shell-title">World inspection</h2>
+            <p>
+              Open this only when you want to explore people, families, relationships,
+              civilizations, research, and factual history. It stays out of the calm focus surface
+              by default.
+            </p>
+          </div>
+          <button
+            aria-controls="world-inspection-region"
+            aria-expanded={inspectionOpen}
+            disabled={simulation.frame === null}
+            onClick={() => {
+              setInspectionOpen((current) => !current);
+            }}
+            type="button"
+          >
+            {inspectionOpen ? 'Close world inspection' : 'Open world inspection'}
+          </button>
+        </section>
+
+        {simulation.frame === null || !inspectionOpen ? null : (
+          <div className="inspection-region" id="world-inspection-region">
             <SocietyPanel
               cultures={simulation.frame.society.cultures}
               dashboard={simulation.frame.society.dashboard}
@@ -480,11 +726,12 @@ export function App({ focusAlerts, focusClock, persistence, workerFactory }: App
                 {interventionStatus}
               </p>
             )}
-          </>
+          </div>
         )}
 
         <FocusPersistencePanel
           alerts={completionAlerts}
+          onReducedEffectsChange={setReducedEffects}
           runtime={runtimePersistence}
           simulation={simulation}
           {...(focusClock === undefined ? {} : { clock: focusClock })}
