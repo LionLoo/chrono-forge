@@ -1,4 +1,21 @@
-export type WorldOverlay = 'terrain' | 'resources' | 'habitability' | 'hazards';
+export type WorldOverlay =
+  | 'terrain'
+  | 'resources'
+  | 'population'
+  | 'trade'
+  | 'technology'
+  | 'danger'
+  | 'habitability'
+  | 'hazards';
+
+export type OverlayPattern = 'none' | 'speckle' | 'rings' | 'hatch' | 'grid' | 'chevron' | 'dots';
+
+export interface WorldOverlayDefinition {
+  readonly label: string;
+  readonly legend: string;
+  readonly pattern: OverlayPattern;
+  readonly value: WorldOverlay;
+}
 
 const TERRAIN_COLORS = [
   0x2d6173, // water
@@ -14,6 +31,10 @@ const OVERLAY_LOW = 0x172019;
 const RESOURCE_DISPLAY_CEILING = 2_000;
 const OVERLAY_HIGH = {
   resources: 0xf0c667,
+  population: 0xb497e7,
+  trade: 0x79cbd1,
+  technology: 0x9fcb78,
+  danger: 0xd76d55,
   habitability: 0x62b99e,
   hazards: 0xd76d55,
 } as const;
@@ -44,6 +65,7 @@ export function colorForTile(
   resource: number,
   habitability: number,
   hazard: number,
+  derivedValue = 0,
 ): number {
   if (overlay === 'terrain') return TERRAIN_COLORS[biome] ?? 0x5a5650;
 
@@ -52,14 +74,26 @@ export function colorForTile(
       ? Math.round((Math.min(RESOURCE_DISPLAY_CEILING, resource) * 255) / RESOURCE_DISPLAY_CEILING)
       : overlay === 'habitability'
         ? habitability
-        : hazard;
+        : overlay === 'hazards' || overlay === 'danger'
+          ? hazard
+          : Math.round((Math.max(0, Math.min(1_000, derivedValue)) * 255) / 1_000);
 
   return mixColor(OVERLAY_LOW, OVERLAY_HIGH[overlay], value);
 }
 
-export const WORLD_OVERLAYS: readonly { label: string; value: WorldOverlay }[] = [
-  { label: 'Terrain', value: 'terrain' },
-  { label: 'Resources', value: 'resources' },
-  { label: 'Habitability', value: 'habitability' },
-  { label: 'Hazards', value: 'hazards' },
+export const WORLD_OVERLAYS: readonly WorldOverlayDefinition[] = [
+  { label: 'Terrain', legend: 'Biome and water', pattern: 'none', value: 'terrain' },
+  { label: 'Resources', legend: 'Material abundance', pattern: 'speckle', value: 'resources' },
+  { label: 'Population', legend: 'Settlement population', pattern: 'rings', value: 'population' },
+  { label: 'Trade', legend: 'Active exchange volume', pattern: 'hatch', value: 'trade' },
+  { label: 'Technology', legend: 'Known development tier', pattern: 'grid', value: 'technology' },
+  { label: 'Danger', legend: 'Hazards and active crises', pattern: 'chevron', value: 'danger' },
+  { label: 'Habitability', legend: 'Habitable terrain', pattern: 'dots', value: 'habitability' },
+  { label: 'Hazards', legend: 'Terrain hazard', pattern: 'chevron', value: 'hazards' },
 ];
+
+export function overlayDefinition(overlay: WorldOverlay): WorldOverlayDefinition {
+  const definition = WORLD_OVERLAYS.find((candidate) => candidate.value === overlay);
+  if (definition === undefined) throw new Error(`Unknown world overlay: ${overlay}`);
+  return definition;
+}

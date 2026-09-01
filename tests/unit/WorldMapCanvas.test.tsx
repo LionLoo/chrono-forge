@@ -4,6 +4,8 @@ import { vi } from 'vitest';
 import { INITIAL_WORLD_CAMERA } from '../../src/rendering/camera';
 import { STRUCTURE_KIND_CODES, STRUCTURE_STATE_CODES } from '../../src/protocol';
 import { WorldMapCanvas, type WorldMapProjection } from '../../src/rendering/WorldMapCanvas';
+import { createInitialWorld } from '../../src/simulation/world';
+import { projectWorldFrame } from '../../src/workers/simulation-runtime';
 
 const pixiMocks = vi.hoisted(() => {
   class MockContainer {
@@ -15,7 +17,10 @@ const pixiMocks = vi.hoisted(() => {
   class MockGraphics {
     readonly clear = vi.fn(() => this);
     readonly circle = vi.fn(() => this);
+    readonly closePath = vi.fn(() => this);
     readonly fill = vi.fn(() => this);
+    readonly lineTo = vi.fn(() => this);
+    readonly moveTo = vi.fn(() => this);
     readonly rect = vi.fn(() => this);
     readonly stroke = vi.fn(() => this);
   }
@@ -81,24 +86,9 @@ vi.mock('pixi.js', () => ({
   Graphics: pixiMocks.MockGraphics,
 }));
 
-const projection = {
-  width: 2,
-  height: 1,
-  biome: new Uint8Array([2, 3]),
-  resource: new Uint16Array([200, 500]),
-  habitability: new Uint8Array([160, 180]),
-  hazard: new Uint8Array([20, 40]),
-  agentIds: new Uint32Array(),
-  agentTiles: new Uint32Array(),
-  agentHealth: new Uint16Array(),
-  agentActions: new Uint8Array(),
-  structureIds: new Uint32Array(),
-  structureTiles: new Uint32Array(),
-  structureKinds: new Uint8Array(),
-  structureStates: new Uint8Array(),
-  structureProgress: new Uint16Array(),
-  structureCondition: new Uint16Array(),
-} satisfies WorldMapProjection;
+const projection = projectWorldFrame(
+  createInitialWorld([1, 2, 3, 4], { width: 2, height: 1, chunkSize: 1 }),
+) satisfies WorldMapProjection;
 
 describe('Pixi world projection', () => {
   beforeEach(() => {
@@ -117,7 +107,7 @@ describe('Pixi world projection', () => {
     );
 
     await waitFor(() => {
-      expect(view.getByRole('img', { name: /Autonomous settlement map/ })).toBeVisible();
+      expect(view.getByRole('img', { name: /founding world map/ })).toBeVisible();
     });
     const graphics = pixiMocks.graphics[0];
     const worldLayer = pixiMocks.containers[0];
@@ -183,35 +173,189 @@ describe('Pixi world projection', () => {
   });
 
   it('draws separate agent and construction layers with progress, condition outlines, and redundant condition marks', async () => {
+    const visualProjection = {
+      ...projection,
+      agentIds: new Uint32Array([1]),
+      agentTiles: new Uint32Array([0]),
+      agentHealth: new Uint16Array([700]),
+      agentActions: new Uint8Array([1]),
+      structureIds: new Uint32Array([1]),
+      structureTiles: new Uint32Array([1]),
+      structureKinds: new Uint8Array([STRUCTURE_KIND_CODES.shelter]),
+      structureStates: new Uint8Array([STRUCTURE_STATE_CODES.building]),
+      structureProgress: new Uint16Array([500]),
+      structureCondition: new Uint16Array([600]),
+    };
     const view = render(
       <WorldMapCanvas
         camera={INITIAL_WORLD_CAMERA}
         onCameraChange={vi.fn()}
         overlay="terrain"
-        projection={{
-          ...projection,
-          agentIds: new Uint32Array([1]),
-          agentTiles: new Uint32Array([0]),
-          agentHealth: new Uint16Array([700]),
-          agentActions: new Uint8Array([1]),
-          structureIds: new Uint32Array([1]),
-          structureTiles: new Uint32Array([1]),
-          structureKinds: new Uint8Array([STRUCTURE_KIND_CODES.shelter]),
-          structureStates: new Uint8Array([STRUCTURE_STATE_CODES.building]),
-          structureProgress: new Uint16Array([500]),
-          structureCondition: new Uint16Array([600]),
-        }}
+        projection={visualProjection}
       />,
     );
 
     await waitFor(() => {
-      expect(view.getByRole('img', { name: /1 visible agents and 1 structures/ })).toBeVisible();
+      expect(view.getByRole('img', { name: /1 visible agents, 1 structures/ })).toBeVisible();
     });
-    expect(pixiMocks.graphics[1]?.rect).toHaveBeenCalled();
-    expect(pixiMocks.graphics[1]?.stroke).toHaveBeenCalled();
-    expect(pixiMocks.graphics[1]?.rect).toHaveBeenCalledTimes(4);
-    expect(pixiMocks.graphics[2]?.circle).toHaveBeenCalled();
-    expect(pixiMocks.graphics[2]?.rect).toHaveBeenCalled();
+    expect(pixiMocks.graphics[3]?.rect).toHaveBeenCalled();
+    expect(pixiMocks.graphics[3]?.stroke).toHaveBeenCalled();
+    expect(pixiMocks.graphics[4]?.circle).toHaveBeenCalled();
+    expect(pixiMocks.graphics[4]?.rect).toHaveBeenCalled();
+
+    const structureClears = pixiMocks.graphics[3]?.clear.mock.calls.length;
+    const agentClears = pixiMocks.graphics[4]?.clear.mock.calls.length;
+    view.rerender(
+      <WorldMapCanvas
+        camera={INITIAL_WORLD_CAMERA}
+        onCameraChange={vi.fn()}
+        overlay="terrain"
+        projection={visualProjection}
+      />,
+    );
+    expect(pixiMocks.graphics[3]?.clear).toHaveBeenCalledTimes(structureClears ?? 0);
+    expect(pixiMocks.graphics[4]?.clear).toHaveBeenCalledTimes(agentClears ?? 0);
+
+    view.rerender(
+      <WorldMapCanvas
+        camera={INITIAL_WORLD_CAMERA}
+        onCameraChange={vi.fn()}
+        overlay="terrain"
+        projection={{
+          ...visualProjection,
+          agentActions: new Uint8Array([2]),
+          structureProgress: new Uint16Array([750]),
+        }}
+      />,
+    );
+    expect(pixiMocks.graphics[3]?.clear).toHaveBeenCalledTimes((structureClears ?? 0) + 1);
+    expect(pixiMocks.graphics[4]?.clear).toHaveBeenCalledTimes((agentClears ?? 0) + 1);
+  });
+
+  it('offers equivalent pointer and keyboard selection while keyboard camera input stays presentational', async () => {
+    const onCameraChange = vi.fn();
+    const onSelectionChange = vi.fn();
+    const view = render(
+      <WorldMapCanvas
+        camera={INITIAL_WORLD_CAMERA}
+        onCameraChange={onCameraChange}
+        onSelectionChange={onSelectionChange}
+        overlay="terrain"
+        projection={projection}
+        reducedEffects
+      />,
+    );
+
+    const canvas = await view.findByRole('img', { name: /founding world map/ });
+    const host = view.container.querySelector<HTMLElement>('.world-map-canvas');
+    expect(host).not.toBeNull();
+    if (host === null) return;
+    host.setPointerCapture = vi.fn();
+    host.hasPointerCapture = vi.fn(() => true);
+    host.releasePointerCapture = vi.fn();
+
+    fireEvent.keyDown(canvas, { key: 'ArrowLeft' });
+    expect(onCameraChange).toHaveBeenCalledWith({ x: -12, y: 24, zoom: 1 });
+    fireEvent.keyDown(canvas, { key: '+' });
+    expect(onCameraChange).toHaveBeenLastCalledWith({ x: 24, y: 24, zoom: 1.15 });
+    fireEvent.keyDown(canvas, { key: 'Enter' });
+    expect(onSelectionChange).toHaveBeenCalledWith({
+      id: projection.agentIds[0],
+      kind: 'agent',
+    });
+
+    const tile = projection.agentTiles[0] ?? 0;
+    const pointerX = INITIAL_WORLD_CAMERA.x + (tile % projection.width) * 6 + 3;
+    const pointerY = INITIAL_WORLD_CAMERA.y + Math.floor(tile / projection.width) * 6 + 3;
+    fireEvent.pointerDown(host, { clientX: pointerX, clientY: pointerY, pointerId: 4 });
+    fireEvent.pointerUp(host, { clientX: pointerX, clientY: pointerY, pointerId: 4 });
+    expect(onSelectionChange).toHaveBeenLastCalledWith({
+      id: projection.agentIds[0],
+      kind: 'agent',
+    });
+    expect(host).toHaveAttribute('data-effects', 'reduced');
+  });
+
+  it('pointer-picks route lines and the static reduced-effects crisis marker', async () => {
+    const onSelectionChange = vi.fn();
+    const base = projectWorldFrame(
+      createInitialWorld([5, 6, 7, 8], { width: 6, height: 2, chunkSize: 1 }),
+    );
+    const founding = base.civilizations.settlements[0];
+    if (founding === undefined) throw new Error('Expected an initial settlement projection.');
+    const routeProjection: WorldMapProjection = {
+      ...base,
+      agentActions: new Uint8Array(),
+      agentHealth: new Uint16Array(),
+      agentIds: new Uint32Array(),
+      agentTiles: new Uint32Array(),
+      civilizations: {
+        ...base.civilizations,
+        routes: [
+          {
+            endedTick: null,
+            firstSettlementId: 101,
+            id: 77,
+            secondSettlementId: 102,
+            startedTick: 0,
+            status: 'active',
+            volume: 10,
+          },
+        ],
+        settlements: [
+          { ...founding, centerTileIndex: 1, id: 101 },
+          { ...founding, centerTileIndex: 5, id: 102 },
+        ],
+      },
+      development: {
+        ...base.development,
+        activeCrises: [
+          {
+            id: 9,
+            kind: 'storm',
+            severity: 70,
+            startedTick: 0,
+            triggerCondition: 'stormPressure',
+            triggerValue: 90,
+          },
+        ],
+      },
+      structureCondition: new Uint16Array(),
+      structureIds: new Uint32Array(),
+      structureKinds: new Uint8Array(),
+      structureProgress: new Uint16Array(),
+      structureStates: new Uint8Array(),
+      structureTiles: new Uint32Array(),
+    };
+    const view = render(
+      <WorldMapCanvas
+        camera={INITIAL_WORLD_CAMERA}
+        onCameraChange={vi.fn()}
+        onSelectionChange={onSelectionChange}
+        overlay="danger"
+        projection={routeProjection}
+        reducedEffects
+      />,
+    );
+    await view.findByRole('img', { name: /founding world map/ });
+    const host = view.container.querySelector<HTMLElement>('.world-map-canvas');
+    if (host === null) throw new Error('World map host is missing.');
+    host.setPointerCapture = vi.fn();
+    host.hasPointerCapture = vi.fn(() => true);
+    host.releasePointerCapture = vi.fn();
+    const clickTile = (tileIndex: number, pointerId: number) => {
+      const clientX = INITIAL_WORLD_CAMERA.x + (tileIndex % routeProjection.width) * 6 + 3;
+      const clientY =
+        INITIAL_WORLD_CAMERA.y + Math.floor(tileIndex / routeProjection.width) * 6 + 3;
+      fireEvent.pointerDown(host, { clientX, clientY, pointerId });
+      fireEvent.pointerUp(host, { clientX, clientY, pointerId });
+    };
+
+    clickTile(3, 11);
+    expect(onSelectionChange).toHaveBeenLastCalledWith({ id: 77, kind: 'route' });
+    clickTile(0, 12);
+    expect(onSelectionChange).toHaveBeenLastCalledWith({ id: 9, kind: 'crisis' });
+    expect(pixiMocks.graphics[5]?.closePath).toHaveBeenCalled();
   });
 
   it('destroys an application whose async initialization finishes after unmount', async () => {

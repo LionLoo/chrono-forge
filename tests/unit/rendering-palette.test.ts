@@ -1,12 +1,21 @@
 import { describe, expect, it } from 'vitest';
 
-import { colorForTile, mixColor, WORLD_OVERLAYS } from '../../src/rendering/world-palette';
+import {
+  colorForTile,
+  mixColor,
+  overlayDefinition,
+  WORLD_OVERLAYS,
+} from '../../src/rendering/world-palette';
 
 describe('world palette', () => {
   it('defines every interactive overlay once', () => {
     expect(WORLD_OVERLAYS.map(({ value }) => value)).toEqual([
       'terrain',
       'resources',
+      'population',
+      'trade',
+      'technology',
+      'danger',
       'habitability',
       'hazards',
     ]);
@@ -28,5 +37,19 @@ describe('world palette', () => {
     expect(colorForTile('habitability', 0, 0, 255, 0)).not.toBe(
       colorForTile('hazards', 0, 0, 0, 255),
     );
+    expect(colorForTile('population', 0, 2_000, 0, 0, 1_000)).not.toBe(
+      colorForTile('technology', 0, 2_000, 0, 0, 1_000),
+    );
+    expect(colorForTile('population', 0, 500, 0, 0, 0)).not.toBe(
+      colorForTile('population', 0, 500, 0, 0, 1_000),
+    );
+  });
+
+  it('pairs every scalar overlay with a text legend and redundant pattern cue', () => {
+    for (const overlay of WORLD_OVERLAYS) {
+      const definition = overlayDefinition(overlay.value);
+      expect(definition.legend.length).toBeGreaterThan(0);
+      expect(definition.pattern.length).toBeGreaterThan(0);
+    }
   });
 });

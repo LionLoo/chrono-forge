@@ -50,6 +50,7 @@ const completedSession: FocusSession = {
   status: 'completed',
   stateJson: JSON.stringify(completedFocusState),
   recapEventIds: [1],
+  recapEntries: [{ id: 1, tick: 0, summary: 'The founding world formed.' }],
 };
 
 describe('persistence adapter', () => {
@@ -347,10 +348,38 @@ describe('persistence adapter', () => {
         'alpha',
         'Alpha',
         snapshot('one'),
-        { ...completedSession, recapEventIds: [999] },
+        {
+          ...completedSession,
+          recapEventIds: [999],
+          recapEntries: [{ id: 999, tick: 0, summary: 'Absent factual event.' }],
+        },
         [2],
       ),
     ).rejects.toThrow('authoritative world');
+    await expect(
+      gateway.commitFocusCheckpoint(
+        'alpha',
+        'Alpha',
+        snapshot('one'),
+        {
+          ...completedSession,
+          recapEntries: [{ ...completedSession.recapEntries[0]!, tick: 1 }],
+        },
+        [1],
+      ),
+    ).rejects.toThrow('exactly match authoritative saved-world events');
+    await expect(
+      gateway.commitFocusCheckpoint(
+        'alpha',
+        'Alpha',
+        snapshot('one'),
+        {
+          ...completedSession,
+          recapEntries: [{ ...completedSession.recapEntries[0]!, summary: 'Invented recap.' }],
+        },
+        [1],
+      ),
+    ).rejects.toThrow('exactly match authoritative saved-world events');
     expect(calls).toEqual(['commit_focus_checkpoint']);
   });
 
@@ -405,6 +434,15 @@ describe('persistence adapter', () => {
     );
     await gateway.commitSaveSlot('alpha', 'Alpha', snapshot('one'));
     await gateway.recordFocusSession(completedSession, [1]);
+    await expect(
+      gateway.recordFocusSession(
+        {
+          ...completedSession,
+          recapEntries: [{ ...completedSession.recapEntries[0]!, summary: 'Invented recap.' }],
+        },
+        [1],
+      ),
+    ).rejects.toThrow('exactly match authoritative saved-world events');
     expect(await gateway.deleteSaveSlot('alpha')).toBe(true);
     expect(await gateway.deleteSaveSlot('alpha')).toBe(false);
     expect(await gateway.listFocusSessions()).toEqual([{ ...completedSession, slotId: null }]);
@@ -415,6 +453,15 @@ describe('persistence adapter', () => {
     await expect(
       gateway.recordFocusSession({ ...completedSession, recapEventIds: [0] }, [1]),
     ).rejects.toThrow('recap');
+    await expect(
+      gateway.recordFocusSession(
+        {
+          ...completedSession,
+          recapEntries: [{ id: 2, tick: 0, summary: 'Mismatched factual event.' }],
+        },
+        [1],
+      ),
+    ).rejects.toThrow('exactly match');
     await expect(
       gateway.saveSettings({ ...DEFAULT_APP_SETTINGS, focusToSimRatio: 0 }),
     ).rejects.toThrow('outside its supported range');

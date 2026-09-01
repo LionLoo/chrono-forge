@@ -6,6 +6,7 @@ import {
 import {
   assertWorldInvariants,
   createInitialWorld,
+  hashWorldState,
   stepWorld,
   type WorldEvent,
   type WorldState,
@@ -91,26 +92,41 @@ describe('M4 society world integration', () => {
     expect(() => assertWorldInvariants(world)).not.toThrow();
   });
 
-  it('keeps the normal focus window founding-scale and records only concise factual M4 summaries', () => {
-    const atFifteenThousand = stepWorld(createInitialWorld(seed), 15_000);
-    const atThirtySixThousand = stepWorld(atFifteenThousand, 21_000);
-    const windowEvents = m4Events(atThirtySixThousand).filter(
-      (event) => event.tick > atFifteenThousand.tick,
-    );
+  it('keeps deterministic 30- and 60-minute focus windows rewarding but founding-scale', () => {
+    const initial = createInitialWorld(seed);
+    const atThirtyMinutes = stepWorld(initial, 18_000);
+    const atSixtyMinutes = stepWorld(atThirtyMinutes, 18_000);
+    const thirtyMinuteRecap = atThirtyMinutes.eventLog
+      .filter((event) => event.tick > initial.tick)
+      .slice(-12);
+    const sixtyMinuteRecap = atSixtyMinutes.eventLog
+      .filter((event) => event.tick > atThirtyMinutes.tick)
+      .slice(-12);
 
-    expect(atThirtySixThousand.config.societyYearTicks).toBe(NORMAL_YEAR_TICKS);
-    expect(atThirtySixThousand.civilization.society.people).toHaveLength(6);
+    expect(atSixtyMinutes.config.societyYearTicks).toBe(NORMAL_YEAR_TICKS);
+    expect([
+      hashWorldState(initial),
+      hashWorldState(atThirtyMinutes),
+      hashWorldState(atSixtyMinutes),
+    ]).toEqual(['7d7e3e85', '5338a428', '4481a024']);
+    expect(atThirtyMinutes.civilization.structures).not.toEqual(initial.civilization.structures);
+    expect(atSixtyMinutes.civilization.stockpile).not.toEqual(
+      atThirtyMinutes.civilization.stockpile,
+    );
+    expect(atSixtyMinutes.civilization.society.people).toHaveLength(6);
     expect(
-      atThirtySixThousand.civilization.society.people.every((person) => person.generation === 0),
+      atSixtyMinutes.civilization.society.people.every((person) => person.generation === 0),
     ).toBe(true);
-    expect(windowEvents.length).toBeGreaterThanOrEqual(1);
-    expect(windowEvents.length).toBeLessThanOrEqual(4);
-    for (const event of windowEvents) {
+    expect(thirtyMinuteRecap.length).toBeGreaterThanOrEqual(1);
+    expect(sixtyMinuteRecap.length).toBeGreaterThanOrEqual(1);
+    expect(thirtyMinuteRecap.length).toBeLessThanOrEqual(12);
+    expect(sixtyMinuteRecap.length).toBeLessThanOrEqual(12);
+    for (const event of [...thirtyMinuteRecap, ...sixtyMinuteRecap]) {
       expect(event.summary.length).toBeGreaterThan(0);
       expect(event.summary.length).toBeLessThanOrEqual(160);
       expect(Object.isFrozen(event)).toBe(true);
     }
-    expect(() => assertWorldInvariants(atThirtySixThousand)).not.toThrow();
+    expect(() => assertWorldInvariants(atSixtyMinutes)).not.toThrow();
   });
 
   it('reaches aligned child and later-generation cohorts in the accelerated deterministic calendar', () => {

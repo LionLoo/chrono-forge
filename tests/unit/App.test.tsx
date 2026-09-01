@@ -16,8 +16,19 @@ import type { SimulationWorkerPort } from '../../src/ui/useWorldSimulation';
 import { createSimulationRuntime } from '../../src/workers/simulation-runtime';
 
 vi.mock('../../src/rendering/WorldMapCanvas', () => ({
-  WorldMapCanvas: ({ overlay }: { readonly overlay: WorldOverlay }) => (
-    <div aria-label="Generated Chrono Forge world" data-overlay={overlay} role="img" />
+  WorldMapCanvas: ({
+    overlay,
+    reducedEffects,
+  }: {
+    readonly overlay: WorldOverlay;
+    readonly reducedEffects?: boolean;
+  }) => (
+    <div
+      aria-label="Generated Chrono Forge world"
+      data-effects={reducedEffects ? 'reduced' : 'full'}
+      data-overlay={overlay}
+      role="img"
+    />
   ),
 }));
 
@@ -48,6 +59,7 @@ function createPreviewPersistence(): RuntimePersistence {
 
 describe('deterministic world lab', () => {
   it('shows an independently reproduced seeded worker world', async () => {
+    const user = userEvent.setup();
     render(<App persistence={createPreviewPersistence()} workerFactory={createRuntimeWorker} />);
 
     expect(screen.getByRole('heading', { name: PROJECT_META.promise })).toBeVisible();
@@ -59,6 +71,10 @@ describe('deterministic world lab', () => {
       'data-overlay',
       'terrain',
     );
+    expect(
+      screen.queryByRole('heading', { name: 'Settlement and society' }),
+    ).not.toBeInTheDocument();
+    await user.click(screen.getByRole('button', { name: 'Open world inspection' }));
     const society = screen
       .getByRole('heading', { name: 'Settlement and society' })
       .closest('section');
@@ -78,6 +94,15 @@ describe('deterministic world lab', () => {
     expect(screen.getByRole('img', { name: 'Generated Chrono Forge world' })).toHaveAttribute(
       'data-overlay',
       'resources',
+    );
+    expect(screen.getByText(/Material abundance\. Pattern cue: speckle\./)).toBeVisible();
+
+    await user.selectOptions(
+      screen.getByRole('combobox', { name: 'Inspect map object' }),
+      'agent:1',
+    );
+    expect(screen.getByRole('article', { name: 'Selected map object' })).toHaveTextContent(
+      'Person 1',
     );
 
     await user.click(screen.getByRole('button', { name: 'Zoom world in' }));
@@ -107,6 +132,7 @@ describe('deterministic world lab', () => {
     render(<App persistence={createPreviewPersistence()} workerFactory={createRuntimeWorker} />);
     await screen.findByText('Worker projection ready · autonomous world active');
 
+    await user.click(screen.getByRole('button', { name: 'Open world inspection' }));
     expect(screen.getByRole('heading', { name: 'Research and conditions' })).toBeVisible();
     await user.click(screen.getByText('Optional intervention'));
     await user.selectOptions(
@@ -182,7 +208,9 @@ describe('deterministic world lab', () => {
     expect(await screen.findByText('Session recorded with a factual recap.')).toBeVisible();
     const recap = screen.getByRole('heading', { name: 'Latest factual recap' }).parentElement;
     expect(recap).not.toBeNull();
-    expect(within(recap!).getByText('Shelter 1 was planned.')).toBeVisible();
+    expect(
+      within(recap!).getByRole('listitem', { name: 'Tick 100: Shelter 1 was planned.' }),
+    ).toBeVisible();
     expect(within(recap!).queryByText('The founding world formed.')).not.toBeInTheDocument();
     const completed = screen.getByText('Completed sessions').closest('div');
     expect(completed).not.toBeNull();
@@ -214,10 +242,19 @@ describe('deterministic world lab', () => {
 
     await user.click(screen.getByText('Focus and accessibility settings'));
     await user.click(screen.getByRole('checkbox', { name: 'Calm focus mode' }));
+    await user.click(screen.getByRole('checkbox', { name: 'Reduce visual effects' }));
     expect(document.documentElement).toHaveClass('calm-mode');
+    expect(document.documentElement).toHaveClass('reduced-effects');
+    expect(screen.getByRole('img', { name: 'Generated Chrono Forge world' })).toHaveAttribute(
+      'data-effects',
+      'reduced',
+    );
     await user.click(screen.getByRole('button', { name: 'Save settings' }));
     expect(await screen.findByText('Settings saved locally.')).toBeVisible();
-    await expect(persistence.gateway.loadSettings()).resolves.toMatchObject({ calmMode: true });
+    await expect(persistence.gateway.loadSettings()).resolves.toMatchObject({
+      calmMode: true,
+      reducedEffects: true,
+    });
   });
 
   it('supports an optional paused break, reset, and non-punitive cancellation', async () => {
