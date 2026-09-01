@@ -28,6 +28,7 @@ describe('world snapshot properties', () => {
           expect(canonicalWorldJson(loaded)).toBe(canonicalWorldJson(world));
           expect(hashWorldState(loaded)).toBe(hashWorldState(world));
           expect(loaded.civilization.pathDemand).not.toBe(world.civilization.pathDemand);
+          expect(loaded.civilizations.tileOwners).not.toBe(world.civilizations.tileOwners);
           expect(loaded.civilization.agents).toHaveLength(world.civilization.agents.length);
 
           const partitioned = stepWorld(

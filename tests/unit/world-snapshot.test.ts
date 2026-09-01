@@ -48,6 +48,7 @@ function versionTwoSnapshot(ticks = 15_000): {
     payload: Record<string, unknown>;
   };
   const payload = { ...envelope.payload };
+  delete payload.civilizations;
   delete payload.development;
   const config = payload.config as Record<string, unknown>;
   payload.config = { chunkSize: config.chunkSize, height: config.height, width: config.width };
@@ -119,7 +120,17 @@ function versionThreeSnapshot(): string {
     payload: Record<string, unknown>;
   };
   const payload = { ...envelope.payload };
+  delete payload.civilizations;
   delete payload.development;
+  payload.eventLog = (payload.eventLog as Record<string, unknown>[]).filter(
+    (event) =>
+      !['settlement', 'civilization', 'route', 'conflict', 'ruin'].includes(
+        event.subjectKind as string,
+      ) &&
+      !['settlement', 'civilization', 'route', 'conflict', 'ruin'].includes(
+        event.targetKind as string,
+      ),
+  );
   const civilization = payload.civilization as Record<string, unknown>;
   const society = civilization.society as Record<string, unknown>;
   const { interpersonal: _interpersonal, ...legacySocietyBase } = society;
@@ -177,6 +188,7 @@ function versionFourSnapshot(ticks = 4321): {
     payload: Record<string, unknown>;
   };
   const payload = { ...current.payload };
+  delete payload.civilizations;
   delete payload.development;
   const payloadJson = JSON.stringify(payload);
   return {
@@ -187,6 +199,33 @@ function versionFourSnapshot(ticks = 4321): {
       engineVersion: 4,
       format: WORLD_SNAPSHOT_FORMAT,
       formatVersion: 4,
+      payload,
+    }),
+  };
+}
+
+function versionFiveSnapshot(ticks = 4321): {
+  readonly snapshot: string;
+  readonly source: ReturnType<typeof stepWorld>;
+} {
+  const source = stepWorld(
+    createInitialWorld([41, 43, 47, 53], { societyYearTicks: ACCELERATED_YEAR_TICKS }),
+    ticks,
+  );
+  const current = JSON.parse(serializeWorldSnapshot(source)) as {
+    payload: Record<string, unknown>;
+  };
+  const payload = { ...current.payload };
+  delete payload.civilizations;
+  const payloadJson = JSON.stringify(payload);
+  return {
+    source,
+    snapshot: JSON.stringify({
+      checksum: hashCanonicalJson(payloadJson),
+      contentVersion: 5,
+      engineVersion: 5,
+      format: WORLD_SNAPSHOT_FORMAT,
+      formatVersion: 5,
       payload,
     }),
   };
@@ -208,7 +247,7 @@ describe('versioned world snapshots', () => {
     expect(loaded.tiles.elevation).toBe(loaded.elevation);
   });
 
-  it('round-trips v5 development authority, including evidence and queued interventions', () => {
+  it('round-trips v6 development and civilization authority, including evidence and queued interventions', () => {
     const original = applyWorldIntervention(
       stepWorld(
         createInitialWorld([7, 11, 13, 17], { societyYearTicks: ACCELERATED_YEAR_TICKS }),
@@ -220,16 +259,16 @@ describe('versioned world snapshots', () => {
     const loaded = deserializeWorldSnapshot(snapshot);
 
     expect(JSON.parse(snapshot)).toMatchObject({
-      contentVersion: 5,
-      engineVersion: 5,
-      formatVersion: 5,
+      contentVersion: 6,
+      engineVersion: 6,
+      formatVersion: 6,
     });
     expect(developmentDto(loaded.development)).toStrictEqual(developmentDto(original.development));
     expect(canonicalWorldJson(loaded)).toBe(canonicalWorldJson(original));
     expect(serializeWorldSnapshot(loaded)).toBe(snapshot);
   });
 
-  it('rejects checksummed malformed v5 development authority', () => {
+  it('rejects checksummed malformed v6 development authority', () => {
     const envelope = JSON.parse(serializeWorldSnapshot(createInitialWorld([3, 5, 7, 11]))) as {
       checksum: string;
       payload: { development: { knowledge: Record<string, unknown>[] } };
@@ -242,20 +281,56 @@ describe('versioned world snapshots', () => {
     );
   });
 
-  it('migrates v4 to the saved-tick founding baseline without inventing M5 history', () => {
+  it('migrates v4 to the saved-tick M5/M6 founding baselines without inventing history', () => {
     const { snapshot, source } = versionFourSnapshot();
     const migrated = migrateWorldSnapshot(snapshot);
     const loaded = deserializeWorldSnapshot(migrated);
 
     expect(JSON.parse(migrated)).toMatchObject({
-      contentVersion: 5,
-      engineVersion: 5,
-      formatVersion: 5,
+      contentVersion: 6,
+      engineVersion: 6,
+      formatVersion: 6,
     });
     expect(developmentDto(loaded.development)).toStrictEqual(
       developmentDto(createInitialDevelopment(source.seed, source.tick)),
     );
     expect(loaded.eventLog).toStrictEqual(source.eventLog);
+    expect(loaded.civilizations.settlements[0]).toMatchObject({
+      foundedTick: source.tick,
+      provenance: 'v5-migration',
+    });
+    expect(loaded.civilizations.routes).toStrictEqual([]);
+    expect(loaded.civilizations.conflicts).toStrictEqual([]);
+    expect(serializeWorldSnapshot(loaded)).toBe(migrated);
+  });
+
+  it('migrates v5 to one saved-tick M6 baseline without inventing events or M6 history', () => {
+    const { snapshot, source } = versionFiveSnapshot();
+    const migrated = migrateWorldSnapshot(snapshot);
+    const loaded = deserializeWorldSnapshot(migrated);
+
+    expect(JSON.parse(migrated)).toMatchObject({
+      contentVersion: 6,
+      engineVersion: 6,
+      formatVersion: 6,
+    });
+    expect(loaded.eventLog).toStrictEqual(source.eventLog);
+    expect(loaded.civilizations).toMatchObject({ tick: source.tick, operationCount: 0 });
+    expect(loaded.civilizations.settlements).toHaveLength(1);
+    expect(loaded.civilizations.civilizations).toHaveLength(1);
+    expect(loaded.civilizations.settlements[0]).toMatchObject({
+      foundedTick: source.tick,
+      provenance: 'v5-migration',
+      territoryHistory: [],
+    });
+    expect(loaded.civilizations.civilizations[0]).toMatchObject({
+      foundedTick: source.tick,
+      provenance: 'v5-migration',
+    });
+    expect(loaded.civilizations.diplomacy).toStrictEqual([]);
+    expect(loaded.civilizations.routes).toStrictEqual([]);
+    expect(loaded.civilizations.conflicts).toStrictEqual([]);
+    expect(loaded.civilizations.ruins).toStrictEqual([]);
     expect(serializeWorldSnapshot(loaded)).toBe(migrated);
   });
 
@@ -382,7 +457,7 @@ describe('versioned world snapshots', () => {
     const loaded = deserializeWorldSnapshot(migratedSnapshot);
     const interpersonal = loaded.civilization.society.interpersonal;
 
-    expect(JSON.parse(migratedSnapshot)).toMatchObject({ formatVersion: 5 });
+    expect(JSON.parse(migratedSnapshot)).toMatchObject({ formatVersion: 6 });
     expect(interpersonal.active).toHaveLength(1);
     expect(interpersonal.active[0]).toMatchObject({
       firstPersonId: 1,
@@ -498,7 +573,7 @@ describe('versioned world snapshots', () => {
     const { snapshot, source } = versionTwoSnapshot();
     const loaded = deserializeWorldSnapshot(migrateWorldSnapshot(snapshot));
 
-    expect(JSON.parse(migrateWorldSnapshot(snapshot))).toMatchObject({ formatVersion: 5 });
+    expect(JSON.parse(migrateWorldSnapshot(snapshot))).toMatchObject({ formatVersion: 6 });
     expect(loaded.eventLog.map((event) => [event.id, event.kind])).toStrictEqual(
       source.eventLog.map((event) => [event.id, event.kind]),
     );
@@ -714,6 +789,16 @@ describe('versioned world snapshots', () => {
     invalidPathDemand.checksum = hashCanonicalJson(JSON.stringify(invalidPathDemand.payload));
     expect(() => deserializeWorldSnapshot(JSON.stringify(invalidPathDemand))).toThrow(
       /pathDemand/i,
+    );
+
+    const invalidCivilizations = JSON.parse(snapshot) as {
+      checksum: string;
+      payload: { civilizations: { settlements: Record<string, unknown>[] } };
+    };
+    delete invalidCivilizations.payload.civilizations.settlements[0]!.provenance;
+    invalidCivilizations.checksum = hashCanonicalJson(JSON.stringify(invalidCivilizations.payload));
+    expect(() => deserializeWorldSnapshot(JSON.stringify(invalidCivilizations))).toThrow(
+      /snapshot settlement 0.*(?:fields|keys)/i,
     );
   });
 

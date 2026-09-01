@@ -2,7 +2,7 @@
 
 `PRODUCT_SPEC.md` is the product contract and `PLAN.md` contains the decision-complete acceptance criteria, branches, and validation for each item. Milestones run in this order:
 
-Current checkpoint: M0-M5 are merged and verified on `main`; M5 product merge `2d16064` passed reviewed PR and integrated main CI. M6-M12 and release remain blocking.
+Current checkpoint: M0-M5 are merged and verified on `main`; M6 implementation and independent corrective review are acceptance-complete on `feature/multiple-civilizations`, with the final local gate and private PR/main integration pending. M6-M12 and release remain blocking until that integration is durable.
 
 | Order | Milestone                                                    | Outcome                                                                                       |
 | ----- | ------------------------------------------------------------ | --------------------------------------------------------------------------------------------- |

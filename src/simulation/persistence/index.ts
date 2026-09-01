@@ -1,4 +1,18 @@
 import { hashCanonicalJson } from '../canonical';
+import {
+  assertCivilizationsInvariants,
+  migrateSingleSettlementCivilizations,
+  type Civilization,
+  type CivilizationsState,
+  type CommunityReserves,
+  type Conflict,
+  type DiplomacyRelation,
+  type Residency,
+  type Ruin,
+  type Settlement,
+  type TerritoryHistoryRecord,
+  type TradeRoute,
+} from '../civilizations';
 import type { Xoshiro128State } from '../random';
 import {
   DISASTER_KINDS,
@@ -60,6 +74,7 @@ import {
   Biome,
   assertWorldInvariants,
   canonicalWorldJson,
+  civilizationsInitializationForWorld,
   type WorldChunk,
   type WorldConfig,
   type WorldEvent,
@@ -69,9 +84,9 @@ import {
 } from '../world';
 
 export const WORLD_SNAPSHOT_FORMAT = 'chrono-forge-world';
-export const WORLD_SNAPSHOT_FORMAT_VERSION = 5;
-export const WORLD_ENGINE_VERSION = 5;
-export const WORLD_CONTENT_VERSION = 5;
+export const WORLD_SNAPSHOT_FORMAT_VERSION = 6;
+export const WORLD_ENGINE_VERSION = 6;
+export const WORLD_CONTENT_VERSION = 6;
 
 const MAX_WORLD_TILES = 1_000_000;
 const MAX_WORLD_SNAPSHOT_BYTES = 50 * 1024 * 1024;
@@ -147,6 +162,19 @@ interface LegacyCivilizationState {
 interface VersionTwoWorldState extends Omit<LegacyWorldState, 'eventLog'> {
   readonly eventLog: readonly LegacyM3Event[];
   readonly civilization: LegacyCivilizationState;
+}
+
+type PreM6WorldState = Omit<WorldState, 'civilizations'>;
+
+function migratePreM6World(state: PreM6WorldState, validate = true): WorldState {
+  const civilizations = migrateSingleSettlementCivilizations(
+    state.seed,
+    state.tick,
+    civilizationsInitializationForWorld(state),
+  );
+  const world: WorldState = Object.freeze({ ...state, civilizations });
+  if (validate) assertWorldInvariants(world);
+  return world;
 }
 
 const LEGACY_PAYLOAD_KEYS = [
@@ -270,11 +298,24 @@ const ENTITY_KINDS = new Set<EntityKind>([
   'culture',
   'group',
   'institution',
+  'settlement',
+  'civilization',
+  'route',
+  'conflict',
+  'ruin',
   'world',
 ]);
 const ECONOMIC_ROLES = new Set<EconomicRole>(['grower', 'maker', 'trader', 'caretaker']);
 const GOVERNMENTS = new Set<GovernmentKind>(['council', 'stewardship']);
 const OFFER_KINDS = new Set<OfferKind>(['meal', 'tool']);
+const SETTLEMENT_STATUSES = new Set(['active', 'abandoned', 'conquered']);
+const CIVILIZATION_STATUSES = new Set(['independent', 'federated', 'fragmented', 'collapsed']);
+const DIPLOMACY_STATUSES = new Set(['neutral', 'allied', 'rival', 'at-war']);
+const ROUTE_STATUSES = new Set(['active', 'disrupted', 'ended']);
+const CONFLICT_STATUSES = new Set(['active', 'resolved']);
+const RESIDENCY_SUBJECT_KINDS = new Set(['person', 'household']);
+const RUIN_CAUSES = new Set(['abandoned', 'conquered', 'collapse']);
+const CIVILIZATION_PROVENANCE = new Set(['initial', 'v5-migration', 'm6-founding']);
 
 function isRecord(value: unknown): value is UnknownRecord {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
@@ -810,6 +851,385 @@ function parseDevelopment(value: unknown, worldTick: number, tileCount: number):
       throw new Error('Development interventions must be canonically sorted.');
   }
   assertDevelopmentInvariants(state);
+  return state;
+}
+
+function parseCivilizations(
+  value: unknown,
+  worldTick: number,
+  tileCount: number,
+): CivilizationsState {
+  if (!isRecord(value)) throw new Error('Snapshot civilizations must be an object.');
+  assertExactKeys(
+    value,
+    [
+      'civilizations',
+      'conflicts',
+      'diplomacy',
+      'nextEntityId',
+      'operationCount',
+      'residencies',
+      'rng',
+      'routes',
+      'ruins',
+      'settlements',
+      'tick',
+      'tileOwners',
+    ],
+    'Snapshot civilizations',
+  );
+  const tick = safeInteger(value.tick, 'Civilizations tick', 0, worldTick);
+  const exactArray = (candidate: unknown, name: string): unknown[] => {
+    if (!isUnknownArray(candidate)) throw new Error(`${name} must be an array.`);
+    return candidate;
+  };
+  const nullableInteger = (candidate: unknown, name: string): number | null =>
+    candidate === null ? null : safeInteger(candidate, name, 0, tick);
+  const parseReserves = (candidate: unknown, name: string): CommunityReserves => {
+    if (!isRecord(candidate)) throw new Error(`${name} must be an object.`);
+    assertExactKeys(candidate, ['food', 'metal', 'stone', 'timber', 'water'], name);
+    return Object.freeze({
+      food: safeInteger(candidate.food, `${name} food`),
+      water: safeInteger(candidate.water, `${name} water`),
+      timber: safeInteger(candidate.timber, `${name} timber`),
+      stone: safeInteger(candidate.stone, `${name} stone`),
+      metal: safeInteger(candidate.metal, `${name} metal`),
+    });
+  };
+  const parseHistory = (candidate: unknown, name: string): TerritoryHistoryRecord => {
+    if (!isRecord(candidate)) throw new Error(`${name} must be an object.`);
+    assertExactKeys(
+      candidate,
+      ['id', 'nextSettlementId', 'previousSettlementId', 'tick', 'tileIndex'],
+      name,
+    );
+    return Object.freeze({
+      id: safeInteger(candidate.id, `${name} id`, 1),
+      tick: safeInteger(candidate.tick, `${name} tick`, 0, tick),
+      tileIndex: safeInteger(candidate.tileIndex, `${name} tile`, 0, tileCount - 1),
+      previousSettlementId: safeInteger(
+        candidate.previousSettlementId,
+        `${name} previous settlement`,
+      ),
+      nextSettlementId: safeInteger(candidate.nextSettlementId, `${name} next settlement`),
+    });
+  };
+  const settlements = Object.freeze(
+    exactArray(value.settlements, 'Snapshot settlements').map((candidate, index): Settlement => {
+      const name = `Snapshot settlement ${index}`;
+      if (!isRecord(candidate)) throw new Error(`${name} must be an object.`);
+      assertExactKeys(
+        candidate,
+        [
+          'centerTileIndex',
+          'civilizationId',
+          'cultureId',
+          'endedTick',
+          'foundedTick',
+          'id',
+          'name',
+          'population',
+          'provenance',
+          'reserves',
+          'stability',
+          'status',
+          'territoryHistory',
+          'territoryHistorySummaryCount',
+        ],
+        name,
+      );
+      return Object.freeze({
+        id: safeInteger(candidate.id, `${name} id`, 1),
+        civilizationId: safeInteger(candidate.civilizationId, `${name} civilization`, 1),
+        name: finiteString(candidate.name, `${name} name`, 80),
+        cultureId: safeInteger(candidate.cultureId, `${name} culture`, 1),
+        centerTileIndex: safeInteger(
+          candidate.centerTileIndex,
+          `${name} center tile`,
+          0,
+          tileCount - 1,
+        ),
+        status: enumValue(
+          candidate.status,
+          SETTLEMENT_STATUSES,
+          `${name} status`,
+        ) as Settlement['status'],
+        population: safeInteger(candidate.population, `${name} population`),
+        stability: safeInteger(candidate.stability, `${name} stability`, 0, 100),
+        reserves: parseReserves(candidate.reserves, `${name} reserves`),
+        territoryHistory: Object.freeze(
+          exactArray(candidate.territoryHistory, `${name} territory history`).map(
+            (entry, historyIndex) =>
+              parseHistory(entry, `${name} territory history ${historyIndex}`),
+          ),
+        ),
+        territoryHistorySummaryCount: safeInteger(
+          candidate.territoryHistorySummaryCount,
+          `${name} territory history summary count`,
+        ),
+        foundedTick: safeInteger(candidate.foundedTick, `${name} founded tick`, 0, tick),
+        endedTick: nullableInteger(candidate.endedTick, `${name} ended tick`),
+        provenance: enumValue(
+          candidate.provenance,
+          CIVILIZATION_PROVENANCE,
+          `${name} provenance`,
+        ) as Settlement['provenance'],
+      });
+    }),
+  );
+  const civilizations = Object.freeze(
+    exactArray(value.civilizations, 'Snapshot civilizations list').map(
+      (candidate, index): Civilization => {
+        const name = `Snapshot civilization ${index}`;
+        if (!isRecord(candidate)) throw new Error(`${name} must be an object.`);
+        assertExactKeys(
+          candidate,
+          [
+            'cultureId',
+            'endedTick',
+            'foundedTick',
+            'foundingSettlementId',
+            'id',
+            'memberSettlementIds',
+            'name',
+            'provenance',
+            'status',
+          ],
+          name,
+        );
+        return Object.freeze({
+          id: safeInteger(candidate.id, `${name} id`, 1),
+          name: finiteString(candidate.name, `${name} name`, 80),
+          cultureId: safeInteger(candidate.cultureId, `${name} culture`, 1),
+          status: enumValue(
+            candidate.status,
+            CIVILIZATION_STATUSES,
+            `${name} status`,
+          ) as Civilization['status'],
+          foundingSettlementId: safeInteger(
+            candidate.foundingSettlementId,
+            `${name} founding settlement`,
+            1,
+          ),
+          memberSettlementIds: Object.freeze(
+            exactArray(candidate.memberSettlementIds, `${name} members`).map((id, memberIndex) =>
+              safeInteger(id, `${name} member ${memberIndex}`, 1),
+            ),
+          ),
+          foundedTick: safeInteger(candidate.foundedTick, `${name} founded tick`, 0, tick),
+          endedTick: nullableInteger(candidate.endedTick, `${name} ended tick`),
+          provenance: enumValue(
+            candidate.provenance,
+            CIVILIZATION_PROVENANCE,
+            `${name} provenance`,
+          ) as Civilization['provenance'],
+        });
+      },
+    ),
+  );
+  const residencies = Object.freeze(
+    exactArray(value.residencies, 'Snapshot residencies').map((candidate, index): Residency => {
+      const name = `Snapshot residency ${index}`;
+      if (!isRecord(candidate)) throw new Error(`${name} must be an object.`);
+      assertExactKeys(
+        candidate,
+        ['endedTick', 'id', 'settlementId', 'startedTick', 'subjectId', 'subjectKind'],
+        name,
+      );
+      return Object.freeze({
+        id: safeInteger(candidate.id, `${name} id`, 1),
+        subjectKind: enumValue(
+          candidate.subjectKind,
+          RESIDENCY_SUBJECT_KINDS,
+          `${name} subject kind`,
+        ) as Residency['subjectKind'],
+        subjectId: safeInteger(candidate.subjectId, `${name} subject`, 1),
+        settlementId: safeInteger(candidate.settlementId, `${name} settlement`, 1),
+        startedTick: safeInteger(candidate.startedTick, `${name} started tick`, 0, tick),
+        endedTick: nullableInteger(candidate.endedTick, `${name} ended tick`),
+      });
+    }),
+  );
+  const diplomacy = Object.freeze(
+    exactArray(value.diplomacy, 'Snapshot diplomacy').map((candidate, index): DiplomacyRelation => {
+      const name = `Snapshot diplomacy ${index}`;
+      if (!isRecord(candidate)) throw new Error(`${name} must be an object.`);
+      assertExactKeys(
+        candidate,
+        ['changedTick', 'firstCivilizationId', 'id', 'score', 'secondCivilizationId', 'status'],
+        name,
+      );
+      return Object.freeze({
+        id: safeInteger(candidate.id, `${name} id`, 1),
+        firstCivilizationId: safeInteger(
+          candidate.firstCivilizationId,
+          `${name} first civilization`,
+          1,
+        ),
+        secondCivilizationId: safeInteger(
+          candidate.secondCivilizationId,
+          `${name} second civilization`,
+          1,
+        ),
+        status: enumValue(
+          candidate.status,
+          DIPLOMACY_STATUSES,
+          `${name} status`,
+        ) as DiplomacyRelation['status'],
+        score: safeInteger(candidate.score, `${name} score`, -1000, 1000),
+        changedTick: safeInteger(candidate.changedTick, `${name} changed tick`, 0, tick),
+      });
+    }),
+  );
+  const routes = Object.freeze(
+    exactArray(value.routes, 'Snapshot routes').map((candidate, index): TradeRoute => {
+      const name = `Snapshot route ${index}`;
+      if (!isRecord(candidate)) throw new Error(`${name} must be an object.`);
+      assertExactKeys(
+        candidate,
+        [
+          'endedTick',
+          'firstSettlementId',
+          'id',
+          'secondSettlementId',
+          'startedTick',
+          'status',
+          'volume',
+        ],
+        name,
+      );
+      return Object.freeze({
+        id: safeInteger(candidate.id, `${name} id`, 1),
+        firstSettlementId: safeInteger(candidate.firstSettlementId, `${name} first settlement`, 1),
+        secondSettlementId: safeInteger(
+          candidate.secondSettlementId,
+          `${name} second settlement`,
+          1,
+        ),
+        status: enumValue(
+          candidate.status,
+          ROUTE_STATUSES,
+          `${name} status`,
+        ) as TradeRoute['status'],
+        volume: safeInteger(candidate.volume, `${name} volume`),
+        startedTick: safeInteger(candidate.startedTick, `${name} started tick`, 0, tick),
+        endedTick: nullableInteger(candidate.endedTick, `${name} ended tick`),
+      });
+    }),
+  );
+  const conflicts = Object.freeze(
+    exactArray(value.conflicts, 'Snapshot conflicts').map((candidate, index): Conflict => {
+      const name = `Snapshot conflict ${index}`;
+      if (!isRecord(candidate)) throw new Error(`${name} must be an object.`);
+      assertExactKeys(
+        candidate,
+        [
+          'attackerCivilizationId',
+          'defenderCivilizationId',
+          'endedTick',
+          'id',
+          'pressure',
+          'startedTick',
+          'status',
+          'winnerCivilizationId',
+        ],
+        name,
+      );
+      return Object.freeze({
+        id: safeInteger(candidate.id, `${name} id`, 1),
+        attackerCivilizationId: safeInteger(
+          candidate.attackerCivilizationId,
+          `${name} attacker`,
+          1,
+        ),
+        defenderCivilizationId: safeInteger(
+          candidate.defenderCivilizationId,
+          `${name} defender`,
+          1,
+        ),
+        status: enumValue(
+          candidate.status,
+          CONFLICT_STATUSES,
+          `${name} status`,
+        ) as Conflict['status'],
+        pressure: safeInteger(candidate.pressure, `${name} pressure`, 0, 1000),
+        startedTick: safeInteger(candidate.startedTick, `${name} started tick`, 0, tick),
+        endedTick: nullableInteger(candidate.endedTick, `${name} ended tick`),
+        winnerCivilizationId:
+          candidate.winnerCivilizationId === null
+            ? null
+            : safeInteger(candidate.winnerCivilizationId, `${name} winner`, 1),
+      });
+    }),
+  );
+  const ruins = Object.freeze(
+    exactArray(value.ruins, 'Snapshot ruins').map((candidate, index): Ruin => {
+      const name = `Snapshot ruin ${index}`;
+      if (!isRecord(candidate)) throw new Error(`${name} must be an object.`);
+      assertExactKeys(candidate, ['cause', 'createdTick', 'id', 'settlementId'], name);
+      return Object.freeze({
+        id: safeInteger(candidate.id, `${name} id`, 1),
+        settlementId: safeInteger(candidate.settlementId, `${name} settlement`, 1),
+        createdTick: safeInteger(candidate.createdTick, `${name} created tick`, 0, tick),
+        cause: enumValue(candidate.cause, RUIN_CAUSES, `${name} cause`) as Ruin['cause'],
+      });
+    }),
+  );
+  const tileOwners = Object.freeze(
+    exactArray(value.tileOwners, 'Snapshot civilization tile owners').map((owner, index) =>
+      safeInteger(owner, `Snapshot civilization tile owner ${index}`),
+    ),
+  );
+  if (tileOwners.length !== tileCount)
+    throw new Error('Snapshot civilization tile ownership length is invalid.');
+  const assertStableIdOrder = (entries: readonly { readonly id: number }[], name: string): void => {
+    for (let index = 1; index < entries.length; index += 1)
+      if (entries[index - 1]!.id >= entries[index]!.id)
+        throw new Error(`${name} must be stable-ID sorted.`);
+  };
+  const assertEndpointPairOrder = (
+    entries: readonly {
+      readonly firstCivilizationId?: number;
+      readonly secondCivilizationId?: number;
+      readonly firstSettlementId?: number;
+      readonly secondSettlementId?: number;
+    }[],
+    name: string,
+  ): void => {
+    for (let index = 1; index < entries.length; index += 1) {
+      const previous = entries[index - 1]!;
+      const current = entries[index]!;
+      const previousFirst = previous.firstCivilizationId ?? previous.firstSettlementId!;
+      const previousSecond = previous.secondCivilizationId ?? previous.secondSettlementId!;
+      const currentFirst = current.firstCivilizationId ?? current.firstSettlementId!;
+      const currentSecond = current.secondCivilizationId ?? current.secondSettlementId!;
+      if (
+        previousFirst > currentFirst ||
+        (previousFirst === currentFirst && previousSecond >= currentSecond)
+      )
+        throw new Error(`${name} must be endpoint-pair sorted.`);
+    }
+  };
+  assertStableIdOrder(residencies, 'Snapshot residencies');
+  assertStableIdOrder(conflicts, 'Snapshot conflicts');
+  assertStableIdOrder(ruins, 'Snapshot ruins');
+  assertEndpointPairOrder(diplomacy, 'Snapshot diplomacy');
+  assertEndpointPairOrder(routes, 'Snapshot routes');
+  const state: CivilizationsState = Object.freeze({
+    tick,
+    nextEntityId: safeInteger(value.nextEntityId, 'Civilizations next entity id', 1),
+    rng: parseRng(value.rng, 'Civilizations rng'),
+    settlements,
+    civilizations,
+    residencies,
+    diplomacy,
+    routes,
+    conflicts,
+    ruins,
+    tileOwners,
+    operationCount: safeInteger(value.operationCount, 'Civilizations operation count'),
+  });
+  assertCivilizationsInvariants(state);
   return state;
 }
 
@@ -2914,15 +3334,14 @@ function upgradeVersionTwo(state: VersionTwoWorldState): WorldState {
     ),
     society: societyForLegacy(state),
   });
-  const world: WorldState = Object.freeze({
+  const world: PreM6WorldState = Object.freeze({
     ...state,
     config: convertLegacyConfig(state.config),
     eventLog,
     civilization,
     development: createInitialDevelopment(state.seed, state.tick),
   });
-  assertWorldInvariants(world);
-  return world;
+  return migratePreM6World(world);
 }
 
 /** Applies the M3 founding migration, then the pure v2-to-v3 society migration. */
@@ -3110,19 +3529,18 @@ function parseVersionThreeWorldPayload(value: unknown): WorldState {
     society,
   });
   assertSocietyCrossWorldReferences(society, civilization, eventLog);
-  const world: WorldState = Object.freeze({
+  const world: PreM6WorldState = Object.freeze({
     ...legacy,
     config,
     eventLog,
     civilization,
     development: createInitialDevelopment(legacy.seed, legacy.tick),
   });
-  assertWorldInvariants(world);
-  return world;
+  return migratePreM6World(world);
 }
 
 /** Parses v4 authority before its conservative v5 development-baseline migration. */
-function parseVersionFourWorldPayload(value: unknown): WorldState {
+function parseVersionFourWorldPayload(value: unknown, validate = true): WorldState {
   if (!isRecord(value)) throw new Error('Snapshot payload must be an object.');
   assertExactKeys(value, [...LEGACY_PAYLOAD_KEYS, 'civilization'], 'Snapshot payload');
   if (!isRecord(value.civilization)) throw new Error('Snapshot civilization must be an object.');
@@ -3234,18 +3652,17 @@ function parseVersionFourWorldPayload(value: unknown): WorldState {
     society,
   });
   assertSocietyCrossWorldReferences(society, civilization, eventLog);
-  const world: WorldState = Object.freeze({
+  const world: PreM6WorldState = Object.freeze({
     ...legacy,
     config,
     eventLog,
     civilization,
     development: createInitialDevelopment(legacy.seed, legacy.tick),
   });
-  assertWorldInvariants(world);
-  return world;
+  return migratePreM6World(world, validate);
 }
 
-function parseVersionFiveWorldPayload(value: unknown): WorldState {
+function parseVersionFiveWorldPayload(value: unknown, validate = true): WorldState {
   if (!isRecord(value)) throw new Error('Snapshot payload must be an object.');
   assertExactKeys(
     value,
@@ -3254,13 +3671,33 @@ function parseVersionFiveWorldPayload(value: unknown): WorldState {
   );
   const versionFourPayload = { ...value };
   delete versionFourPayload.development;
-  const world = parseVersionFourWorldPayload(versionFourPayload);
+  const world = parseVersionFourWorldPayload(versionFourPayload, false);
   const development = parseDevelopment(
     value.development,
     world.tick,
     world.config.width * world.config.height,
   );
   const current: WorldState = Object.freeze({ ...world, development });
+  if (validate) assertWorldInvariants(current);
+  return current;
+}
+
+function parseVersionSixWorldPayload(value: unknown): WorldState {
+  if (!isRecord(value)) throw new Error('Snapshot payload must be an object.');
+  assertExactKeys(
+    value,
+    [...LEGACY_PAYLOAD_KEYS, 'civilization', 'civilizations', 'development'],
+    'Snapshot payload',
+  );
+  const versionFivePayload = { ...value };
+  delete versionFivePayload.civilizations;
+  const world = parseVersionFiveWorldPayload(versionFivePayload, false);
+  const civilizations = parseCivilizations(
+    value.civilizations,
+    world.tick,
+    world.config.width * world.config.height,
+  );
+  const current: WorldState = Object.freeze({ ...world, civilizations });
   assertWorldInvariants(current);
   return current;
 }
@@ -3386,6 +3823,7 @@ function deserializeVersionFour(envelope: UnknownRecord): WorldState {
   const world = parseVersionFourWorldPayload(envelope.payload);
   const canonicalPayload = JSON.parse(canonicalWorldJson(world)) as UnknownRecord;
   delete canonicalPayload.development;
+  delete canonicalPayload.civilizations;
   const canonical = JSON.stringify(canonicalPayload);
   if (canonical !== payloadJson) {
     let difference = 0;
@@ -3405,6 +3843,38 @@ function deserializeVersionFive(envelope: UnknownRecord): WorldState {
     'World snapshot envelope',
   );
   if (
+    envelope.formatVersion !== 5 ||
+    envelope.engineVersion !== 5 ||
+    envelope.contentVersion !== 5 ||
+    typeof envelope.checksum !== 'string'
+  ) {
+    throw new Error('World snapshot version metadata is invalid.');
+  }
+  const payloadJson = JSON.stringify(envelope.payload);
+  if (hashCanonicalJson(payloadJson) !== envelope.checksum)
+    throw new Error('World snapshot checksum does not match its payload.');
+  const world = parseVersionFiveWorldPayload(envelope.payload);
+  const canonicalPayload = JSON.parse(canonicalWorldJson(world)) as UnknownRecord;
+  delete canonicalPayload.civilizations;
+  const canonical = JSON.stringify(canonicalPayload);
+  if (canonical !== payloadJson) {
+    let difference = 0;
+    while (difference < canonical.length && canonical[difference] === payloadJson[difference])
+      difference += 1;
+    throw new Error(
+      `World snapshot payload is not canonical at byte ${difference}: ${payloadJson.slice(difference, difference + 80)} != ${canonical.slice(difference, difference + 80)}.`,
+    );
+  }
+  return world;
+}
+
+function deserializeVersionSix(envelope: UnknownRecord): WorldState {
+  assertExactKeys(
+    envelope,
+    ['checksum', 'contentVersion', 'engineVersion', 'format', 'formatVersion', 'payload'],
+    'World snapshot envelope',
+  );
+  if (
     envelope.formatVersion !== WORLD_SNAPSHOT_FORMAT_VERSION ||
     envelope.engineVersion !== WORLD_ENGINE_VERSION ||
     envelope.contentVersion !== WORLD_CONTENT_VERSION ||
@@ -3415,7 +3885,7 @@ function deserializeVersionFive(envelope: UnknownRecord): WorldState {
   const payloadJson = JSON.stringify(envelope.payload);
   if (hashCanonicalJson(payloadJson) !== envelope.checksum)
     throw new Error('World snapshot checksum does not match its payload.');
-  const world = parseVersionFiveWorldPayload(envelope.payload);
+  const world = parseVersionSixWorldPayload(envelope.payload);
   if (canonicalWorldJson(world) !== payloadJson) {
     const canonical = canonicalWorldJson(world);
     let difference = 0;
@@ -3530,6 +4000,9 @@ export function migrateWorldSnapshot(snapshot: string): string {
     throw new Error(`World snapshot version ${formatVersion} is newer than this application.`);
   }
   if (formatVersion === WORLD_SNAPSHOT_FORMAT_VERSION) {
+    return serializeWorldSnapshot(deserializeVersionSix(envelope));
+  }
+  if (formatVersion === 5) {
     return serializeWorldSnapshot(deserializeVersionFive(envelope));
   }
   if (formatVersion === 4) {
@@ -3576,5 +4049,5 @@ export function migrateWorldSnapshot(snapshot: string): string {
 /** Loads and validates a supported snapshot without mutating its input. */
 export function deserializeWorldSnapshot(snapshot: string): WorldState {
   const migrated = migrateWorldSnapshot(snapshot);
-  return deserializeVersionFive(parseEnvelope(migrated));
+  return deserializeVersionSix(parseEnvelope(migrated));
 }

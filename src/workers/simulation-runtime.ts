@@ -7,6 +7,7 @@ import {
   projectionTransferables,
   validateUiToWorkerMessage,
   type AdvanceTicksRequest,
+  type CivilizationsProjection,
   type DevelopmentProjection,
   type FrameDeltaResponse,
   type InitializeRequest,
@@ -25,6 +26,18 @@ import {
   type WorkerToUiMessage,
   type WorldFrameProjection,
 } from '../protocol';
+import {
+  MAX_ACTIVE_CIVILIZATIONS,
+  MAX_ACTIVE_CONFLICTS,
+  MAX_ACTIVE_ROUTES,
+  MAX_ACTIVE_SETTLEMENTS,
+  MAX_DIPLOMACY_PAIRS,
+  MAX_HISTORICAL_COMMUNITIES,
+  MAX_PROJECTED_RESIDENCIES,
+  MAX_ROUTE_CONFLICT_SUMMARIES,
+  MAX_RUINS,
+  MAX_TERRITORY_HISTORY_PER_SETTLEMENT,
+} from '../simulation/civilizations';
 import { deserializeWorldSnapshot, serializeWorldSnapshot } from '../simulation/persistence';
 import {
   RELATIONSHIP_PAGE_SIZE,
@@ -88,6 +101,130 @@ function projectDevelopment(state: WorldState): DevelopmentProjection {
     ),
     recoveredCrisisCount: state.development.crisisHistory.length,
     operationCount: state.development.operationCount,
+  });
+}
+
+function stableIdSorted<T extends { readonly id: number }>(records: readonly T[]): readonly T[] {
+  return [...records].sort((left, right) => left.id - right.id);
+}
+
+function assertProjectionCount(count: number, maximum: number, category: string): void {
+  if (count > maximum) throw new Error(`Civilizations projection ${category} exceeds its bound.`);
+}
+
+/** Copies the bounded M6 authority into a stable-ID-sorted read model. */
+function projectCivilizations(state: WorldState): CivilizationsProjection {
+  const source = state.civilizations;
+  const historicalCommunities =
+    source.settlements.filter((settlement) => settlement.status !== 'active').length +
+    source.civilizations.filter((civilization) => civilization.endedTick !== null).length;
+  const routeConflictSummaries =
+    source.routes.filter((route) => route.status === 'ended').length +
+    source.conflicts.filter((conflict) => conflict.status === 'resolved').length;
+  assertProjectionCount(
+    source.settlements.filter((settlement) => settlement.status === 'active').length,
+    MAX_ACTIVE_SETTLEMENTS,
+    'active settlements',
+  );
+  assertProjectionCount(
+    source.civilizations.filter((civilization) => civilization.endedTick === null).length,
+    MAX_ACTIVE_CIVILIZATIONS,
+    'active civilizations',
+  );
+  assertProjectionCount(
+    historicalCommunities,
+    MAX_HISTORICAL_COMMUNITIES,
+    'historical communities',
+  );
+  assertProjectionCount(source.diplomacy.length, MAX_DIPLOMACY_PAIRS, 'diplomacy');
+  assertProjectionCount(
+    source.routes.filter((route) => route.status !== 'ended').length,
+    MAX_ACTIVE_ROUTES,
+    'active routes',
+  );
+  assertProjectionCount(
+    routeConflictSummaries,
+    MAX_ROUTE_CONFLICT_SUMMARIES,
+    'route/conflict summaries',
+  );
+  assertProjectionCount(
+    source.conflicts.filter((conflict) => conflict.status === 'active').length,
+    MAX_ACTIVE_CONFLICTS,
+    'active conflicts',
+  );
+  assertProjectionCount(source.ruins.length, MAX_RUINS, 'ruins');
+  if (source.tileOwners.length !== state.config.width * state.config.height)
+    throw new Error('Civilizations tile ownership does not match the world dimensions.');
+
+  const settlements = stableIdSorted(source.settlements).map((settlement) => {
+    assertProjectionCount(
+      settlement.territoryHistory.length,
+      MAX_TERRITORY_HISTORY_PER_SETTLEMENT,
+      'settlement territory history',
+    );
+    return Object.freeze({
+      id: settlement.id,
+      civilizationId: settlement.civilizationId,
+      name: settlement.name,
+      cultureId: settlement.cultureId,
+      centerTileIndex: settlement.centerTileIndex,
+      status: settlement.status,
+      population: settlement.population,
+      stability: settlement.stability,
+      reserves: Object.freeze({ ...settlement.reserves }),
+      territoryHistory: Object.freeze(
+        stableIdSorted(settlement.territoryHistory).map((history) => Object.freeze({ ...history })),
+      ),
+      territoryHistorySummaryCount: settlement.territoryHistorySummaryCount,
+      foundedTick: settlement.foundedTick,
+      endedTick: settlement.endedTick,
+      provenance: settlement.provenance,
+    });
+  });
+  const civilizations = stableIdSorted(source.civilizations).map((civilization) =>
+    Object.freeze({
+      id: civilization.id,
+      name: civilization.name,
+      cultureId: civilization.cultureId,
+      status: civilization.status,
+      foundingSettlementId: civilization.foundingSettlementId,
+      memberSettlementIds: Object.freeze([...civilization.memberSettlementIds]),
+      foundedTick: civilization.foundedTick,
+      endedTick: civilization.endedTick,
+      provenance: civilization.provenance,
+    }),
+  );
+  const activeResidencies = stableIdSorted(
+    source.residencies.filter((residency) => residency.endedTick === null),
+  );
+  const residencies = activeResidencies
+    .slice(0, MAX_PROJECTED_RESIDENCIES)
+    .map((residency) => Object.freeze({ ...residency }));
+  const diplomacy = stableIdSorted(source.diplomacy).map((relation) =>
+    Object.freeze({ ...relation }),
+  );
+  const routes = stableIdSorted(source.routes).map((route) => Object.freeze({ ...route }));
+  const conflicts = stableIdSorted(source.conflicts).map((conflict) =>
+    Object.freeze({ ...conflict }),
+  );
+  const ruins = stableIdSorted(source.ruins).map((ruin) => Object.freeze({ ...ruin }));
+  const tileOwners = new Uint32Array(source.tileOwners.length);
+  for (let index = 0; index < source.tileOwners.length; index += 1) {
+    tileOwners[index] = toUint32(source.tileOwners[index]!, 'Tile owner');
+  }
+
+  return Object.freeze({
+    operationCount: source.operationCount,
+    settlements: Object.freeze(settlements),
+    civilizations: Object.freeze(civilizations),
+    residencies: Object.freeze(residencies),
+    activeResidencyCount: activeResidencies.length,
+    historicalResidencyCount: source.residencies.length - activeResidencies.length,
+    diplomacy: Object.freeze(diplomacy),
+    routes: Object.freeze(routes),
+    conflicts: Object.freeze(conflicts),
+    ruins: Object.freeze(ruins),
+    tileOwners,
   });
 }
 
@@ -751,6 +888,7 @@ export function projectWorldFrame(state: WorldState): WorldFrameProjection {
   const settlementSummary = projectSettlementSummary(state.civilization, visibleStructures);
   const society = projectSociety(state);
   const development = projectDevelopment(state);
+  const civilizations = projectCivilizations(state);
 
   return Object.freeze({
     version: WORKER_PROTOCOL_VERSION,
@@ -775,6 +913,7 @@ export function projectWorldFrame(state: WorldState): WorldFrameProjection {
     settlementSummary,
     society,
     development,
+    civilizations,
   });
 }
 

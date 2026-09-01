@@ -38,7 +38,18 @@ export const MAX_BIOGRAPHY_EVENT_IDS = 16;
 export type EconomicRole = 'grower' | 'maker' | 'trader' | 'caretaker';
 export type GovernmentKind = 'council' | 'stewardship';
 export type EntityKind =
-  'person' | 'structure' | 'household' | 'culture' | 'group' | 'institution' | 'world';
+  | 'person'
+  | 'structure'
+  | 'household'
+  | 'culture'
+  | 'group'
+  | 'institution'
+  | 'settlement'
+  | 'civilization'
+  | 'route'
+  | 'conflict'
+  | 'ruin'
+  | 'world';
 export type OfferKind = 'meal' | 'tool';
 
 export interface SocietyEntityRef {
@@ -294,6 +305,11 @@ const ENTITY_KINDS = Object.freeze([
   'culture',
   'group',
   'institution',
+  'settlement',
+  'civilization',
+  'route',
+  'conflict',
+  'ruin',
   'world',
 ] as const satisfies readonly EntityKind[]);
 const OFFER_KINDS = Object.freeze(['meal', 'tool'] as const satisfies readonly OfferKind[]);
@@ -2701,6 +2717,12 @@ export function assertSocietyInvariants(state: SocietyState): void {
         return groupIds.has(entity.id);
       case 'institution':
         return entity.id === state.institution.id;
+      case 'settlement':
+      case 'civilization':
+      case 'route':
+      case 'conflict':
+      case 'ruin':
+        return entity.id > 0;
       case 'world':
         return entity.id === 0;
     }

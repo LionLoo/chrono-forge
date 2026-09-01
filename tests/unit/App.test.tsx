@@ -52,7 +52,7 @@ describe('deterministic world lab', () => {
 
     expect(screen.getByRole('heading', { name: PROJECT_META.promise })).toBeVisible();
     expect(
-      await screen.findByText('Worker projection ready · autonomous settlement active'),
+      await screen.findByText('Worker projection ready · autonomous world active'),
     ).toBeVisible();
     expect(screen.getByText('4348524f-4e4f464f-52474531-00000001')).toBeVisible();
     expect(screen.getByRole('img', { name: 'Generated Chrono Forge world' })).toHaveAttribute(
@@ -72,7 +72,7 @@ describe('deterministic world lab', () => {
   it('changes overlays, camera, and fixed logical ticks through keyboard-accessible controls', async () => {
     const user = userEvent.setup();
     render(<App persistence={createPreviewPersistence()} workerFactory={createRuntimeWorker} />);
-    await screen.findByText('Worker projection ready · autonomous settlement active');
+    await screen.findByText('Worker projection ready · autonomous world active');
 
     await user.click(screen.getByRole('radio', { name: 'Resources' }));
     expect(screen.getByRole('img', { name: 'Generated Chrono Forge world' })).toHaveAttribute(
@@ -93,9 +93,7 @@ describe('deterministic world lab', () => {
     await user.click(screen.getByRole('button', { name: 'Observe 100 fixed ticks' }));
     await waitFor(() => {
       expect(screen.getByText('100')).toBeVisible();
-      expect(
-        screen.getByText('Worker projection ready · autonomous settlement active'),
-      ).toBeVisible();
+      expect(screen.getByText('Worker projection ready · autonomous world active')).toBeVisible();
     });
     expect(
       screen.getByRole('listitem', {
@@ -107,7 +105,7 @@ describe('deterministic world lab', () => {
   it('keeps indirect interventions optional and queues them through the Worker', async () => {
     const user = userEvent.setup();
     render(<App persistence={createPreviewPersistence()} workerFactory={createRuntimeWorker} />);
-    await screen.findByText('Worker projection ready · autonomous settlement active');
+    await screen.findByText('Worker projection ready · autonomous world active');
 
     expect(screen.getByRole('heading', { name: 'Research and conditions' })).toBeVisible();
     await user.click(screen.getByText('Optional intervention'));

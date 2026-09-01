@@ -56,7 +56,7 @@ async function advanceControlledClock(milliseconds) {
 describe('native focus persistence', () => {
   it('starts, pauses, saves, relaunches, resumes, and completes through real SQLite IPC', async () => {
     await $('#focus-title').waitForDisplayed();
-    expect(await (await $('span=SQLite archive')).isDisplayed()).toBe(true);
+    await $('span=SQLite archive').waitForDisplayed();
     expect(await (await $('h2=Settlement and society')).isDisplayed()).toBe(true);
     expect(await (await $('select[aria-label="Inspect person"]')).isDisplayed()).toBe(true);
     expect(await (await $('h3=Timeline')).isDisplayed()).toBe(true);
