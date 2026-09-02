@@ -5,7 +5,7 @@ Last updated: 2026-09-02
 ## Release state
 
 - Goal: build, verify, package, and privately release the complete Chrono Forge v1.0.0 contract; never stop at a prototype or partial roadmap.
-- Current milestone: M8 simulation scale is active on `feature/simulation-scale`, based on verified M7 documentation head `e4827ab1c629ef85121a60d9fb4a9eb994900439`. This checkpoint locks M8 evidence and adds isolated scale, path-cache, and Worker-delta foundations; it does not complete M8.
+- Current milestone: M8 simulation scale is active on `feature/simulation-scale`, based on verified M7 documentation head `e4827ab1c629ef85121a60d9fb4a9eb994900439`; the exact foundation commit is `33893416fb66d93182ec85703a1ba7e7246d2189`. This checkpoint locks M8 evidence and adds isolated scale, path-cache, and Worker-delta foundations; it does not complete M8.
 - Included usage: no read-only weekly allowance meter is exposed. A required Terra/high worker then received an included-plan usage-limit response with a 10:24 PM retry time. No API key, purchased credit, promotional credit, or account credit was used; work stops at this safe checkpoint.
 - v1.0 completion: not satisfied. M8 integration and acceptance, M9-M12, and the private v1.0.0 release remain fully blocking.
 
