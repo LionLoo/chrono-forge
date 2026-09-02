@@ -164,19 +164,19 @@ describe('Pixi world projection', () => {
     expect(zoomedIn).toMatchObject({ zoom: 1.5 * 1.15 });
     expect((mousePoint.clientX - 50 - zoomedIn.x) / zoomedIn.zoom).toBeCloseTo(worldPoint.x);
     expect((mousePoint.clientY - 100 - zoomedIn.y) / zoomedIn.zoom).toBeCloseTo(worldPoint.y);
-    const zoomOut = new WheelEvent('wheel', {
+    const secondZoomIn = new WheelEvent('wheel', {
       bubbles: true,
       cancelable: true,
-      deltaY: 1,
+      deltaY: -1,
       ...mousePoint,
     });
-    expect(host.dispatchEvent(zoomOut)).toBe(false);
-    expect(zoomOut.defaultPrevented).toBe(true);
+    expect(host.dispatchEvent(secondZoomIn)).toBe(false);
+    expect(secondZoomIn.defaultPrevented).toBe(true);
     expect(pageWheel).not.toHaveBeenCalled();
-    const zoomedOut = onCameraChange.mock.calls.at(-1)?.[0] as unknown as WorldCamera;
-    expect(zoomedOut).toMatchObject({ zoom: 1.5 / 1.15 });
-    expect((mousePoint.clientX - 50 - zoomedOut.x) / zoomedOut.zoom).toBeCloseTo(worldPoint.x);
-    expect((mousePoint.clientY - 100 - zoomedOut.y) / zoomedOut.zoom).toBeCloseTo(worldPoint.y);
+    const zoomedTwice = onCameraChange.mock.calls.at(-1)?.[0] as unknown as WorldCamera;
+    expect(zoomedTwice).toMatchObject({ zoom: 1.5 * 1.15 * 1.15 });
+    expect((mousePoint.clientX - 50 - zoomedTwice.x) / zoomedTwice.zoom).toBeCloseTo(worldPoint.x);
+    expect((mousePoint.clientY - 100 - zoomedTwice.y) / zoomedTwice.zoom).toBeCloseTo(worldPoint.y);
     document.removeEventListener('wheel', pageWheel);
 
     view.unmount();

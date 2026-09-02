@@ -49,6 +49,16 @@ function versionSixSnapshot(world: ReturnType<typeof createInitialWorld>): strin
   });
 }
 
+function versionSevenSnapshot(world: ReturnType<typeof createInitialWorld>): string {
+  const envelope = JSON.parse(serializeWorldSnapshot(world)) as Record<string, unknown>;
+  return JSON.stringify({
+    ...envelope,
+    contentVersion: 7,
+    engineVersion: 7,
+    formatVersion: 7,
+  });
+}
+
 function versionTwoSnapshot(ticks = 15_000): {
   readonly snapshot: string;
   readonly source: ReturnType<typeof stepWorld>;
@@ -611,6 +621,18 @@ describe('versioned world snapshots', () => {
     });
     expect(hashWorldState(deserializeWorldSnapshot(migrated))).toBe(hashWorldState(source));
     expect(migrateWorldSnapshot(migrated)).toBe(migrated);
+  });
+
+  it('keeps the v7 parser branch pinned for a later format migration', () => {
+    const source = stepWorld(createInitialWorld([41, 43, 47, 53]), 15_000);
+    const migrated = migrateWorldSnapshot(versionSevenSnapshot(source));
+
+    expect(JSON.parse(migrated)).toMatchObject({
+      contentVersion: WORLD_SNAPSHOT_FORMAT_VERSION,
+      engineVersion: WORLD_SNAPSHOT_FORMAT_VERSION,
+      formatVersion: WORLD_SNAPSHOT_FORMAT_VERSION,
+    });
+    expect(hashWorldState(deserializeWorldSnapshot(migrated))).toBe(hashWorldState(source));
   });
 
   it('continues a v2 save created between society boundaries', () => {

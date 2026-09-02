@@ -535,14 +535,16 @@ export function WorldMapCanvas({
       event.stopPropagation();
       if (event.deltaY === 0) return;
       const bounds = host.getBoundingClientRect();
-      onCameraChangeRef.current(
-        zoomCameraAt(
-          cameraRef.current,
-          event.deltaY < 0 ? 1.15 : 1 / 1.15,
-          event.clientX - bounds.left,
-          event.clientY - bounds.top,
-        ),
+      const nextCamera = zoomCameraAt(
+        cameraRef.current,
+        event.deltaY < 0 ? 1.15 : 1 / 1.15,
+        event.clientX - bounds.left,
+        event.clientY - bounds.top,
       );
+      // Wheel events can arrive before React commits the parent camera update. Keep this
+      // presentation ref current so a normal multi-notch gesture compounds correctly.
+      cameraRef.current = nextCamera;
+      onCameraChangeRef.current(nextCamera);
     };
     host.addEventListener('wheel', handleWheel, { passive: false });
     return () => {
