@@ -135,6 +135,9 @@ describe('Pixi world projection', () => {
     host.hasPointerCapture = vi.fn(() => true);
     const releasePointerCapture = vi.fn();
     host.releasePointerCapture = releasePointerCapture;
+    host.getBoundingClientRect = vi.fn(
+      () => ({ left: 50, top: 100 }) as DOMRect,
+    );
 
     fireEvent.pointerDown(host, { clientX: 10, clientY: 10, pointerId: 7 });
     fireEvent.pointerMove(host, { clientX: 25, clientY: 30, pointerId: 7 });
@@ -145,16 +148,37 @@ describe('Pixi world projection', () => {
 
     const pageWheel = vi.fn();
     document.addEventListener('wheel', pageWheel);
-    const zoomIn = new WheelEvent('wheel', { bubbles: true, cancelable: true, deltaY: -1 });
+    const mousePoint = { clientX: 150, clientY: 160 };
+    const worldPoint = {
+      x: (mousePoint.clientX - 50 - 30) / 1.5,
+      y: (mousePoint.clientY - 100 - 40) / 1.5,
+    };
+    const zoomIn = new WheelEvent('wheel', {
+      bubbles: true,
+      cancelable: true,
+      deltaY: -1,
+      ...mousePoint,
+    });
     expect(host.dispatchEvent(zoomIn)).toBe(false);
     expect(zoomIn.defaultPrevented).toBe(true);
     expect(pageWheel).not.toHaveBeenCalled();
-    expect(onCameraChange).toHaveBeenLastCalledWith({ x: 30, y: 40, zoom: 1.5 * 1.15 });
-    const zoomOut = new WheelEvent('wheel', { bubbles: true, cancelable: true, deltaY: 1 });
+    const zoomedIn = onCameraChange.mock.lastCall?.[0];
+    expect(zoomedIn).toMatchObject({ zoom: 1.5 * 1.15 });
+    expect((mousePoint.clientX - 50 - zoomedIn.x) / zoomedIn.zoom).toBeCloseTo(worldPoint.x);
+    expect((mousePoint.clientY - 100 - zoomedIn.y) / zoomedIn.zoom).toBeCloseTo(worldPoint.y);
+    const zoomOut = new WheelEvent('wheel', {
+      bubbles: true,
+      cancelable: true,
+      deltaY: 1,
+      ...mousePoint,
+    });
     expect(host.dispatchEvent(zoomOut)).toBe(false);
     expect(zoomOut.defaultPrevented).toBe(true);
     expect(pageWheel).not.toHaveBeenCalled();
-    expect(onCameraChange).toHaveBeenLastCalledWith({ x: 30, y: 40, zoom: 1.5 / 1.15 });
+    const zoomedOut = onCameraChange.mock.lastCall?.[0];
+    expect(zoomedOut).toMatchObject({ zoom: 1.5 / 1.15 });
+    expect((mousePoint.clientX - 50 - zoomedOut.x) / zoomedOut.zoom).toBeCloseTo(worldPoint.x);
+    expect((mousePoint.clientY - 100 - zoomedOut.y) / zoomedOut.zoom).toBeCloseTo(worldPoint.y);
     document.removeEventListener('wheel', pageWheel);
 
     view.unmount();

@@ -9,7 +9,7 @@ import {
 } from 'react';
 
 import { STRUCTURE_STATE_CODES, type WorldFrameProjection } from '../protocol';
-import { panCamera, zoomCamera, type WorldCamera } from './camera';
+import { panCamera, zoomCamera, zoomCameraAt, type WorldCamera } from './camera';
 import {
   buildPreparedRenderModel,
   prepareRenderProjection,
@@ -534,7 +534,15 @@ export function WorldMapCanvas({
       event.preventDefault();
       event.stopPropagation();
       if (event.deltaY === 0) return;
-      onCameraChangeRef.current(zoomCamera(cameraRef.current, event.deltaY < 0 ? 1.15 : 1 / 1.15));
+      const bounds = host.getBoundingClientRect();
+      onCameraChangeRef.current(
+        zoomCameraAt(
+          cameraRef.current,
+          event.deltaY < 0 ? 1.15 : 1 / 1.15,
+          event.clientX - bounds.left,
+          event.clientY - bounds.top,
+        ),
+      );
     };
     host.addEventListener('wheel', handleWheel, { passive: false });
     return () => {
