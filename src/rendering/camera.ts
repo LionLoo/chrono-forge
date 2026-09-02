@@ -32,3 +32,30 @@ export function zoomCamera(camera: WorldCamera, factor: number): WorldCamera {
     zoom: finiteClamp(camera.zoom * safeFactor, MIN_ZOOM, MAX_ZOOM),
   };
 }
+
+/**
+ * Changes zoom while preserving the world position beneath a viewport point.
+ * The point is in pixels relative to the map host, not the page.
+ */
+export function zoomCameraAt(
+  camera: WorldCamera,
+  factor: number,
+  anchorX: number,
+  anchorY: number,
+): WorldCamera {
+  const safeFactor = Number.isFinite(factor) && factor > 0 ? factor : 1;
+  const currentZoom = finiteClamp(camera.zoom, MIN_ZOOM, MAX_ZOOM);
+  const zoom = finiteClamp(currentZoom * safeFactor, MIN_ZOOM, MAX_ZOOM);
+  const x = finiteClamp(camera.x, -MAX_OFFSET, MAX_OFFSET);
+  const y = finiteClamp(camera.y, -MAX_OFFSET, MAX_OFFSET);
+  const safeAnchorX = finiteClamp(anchorX, -MAX_OFFSET, MAX_OFFSET);
+  const safeAnchorY = finiteClamp(anchorY, -MAX_OFFSET, MAX_OFFSET);
+  const worldX = (safeAnchorX - x) / currentZoom;
+  const worldY = (safeAnchorY - y) / currentZoom;
+
+  return {
+    x: finiteClamp(safeAnchorX - worldX * zoom, -MAX_OFFSET, MAX_OFFSET),
+    y: finiteClamp(safeAnchorY - worldY * zoom, -MAX_OFFSET, MAX_OFFSET),
+    zoom,
+  };
+}

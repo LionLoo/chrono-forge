@@ -9,7 +9,7 @@ import {
 } from 'react';
 
 import { STRUCTURE_STATE_CODES, type WorldFrameProjection } from '../protocol';
-import { panCamera, zoomCamera, type WorldCamera } from './camera';
+import { panCamera, zoomCamera, zoomCameraAt, type WorldCamera } from './camera';
 import {
   buildPreparedRenderModel,
   prepareRenderProjection,
@@ -34,6 +34,9 @@ interface WorldMapCanvasProps {
 
 interface PixiScene {
   readonly agentGraphics: Graphics;
+  readonly agentLastTargetAtMs: Map<number, number>;
+  readonly agentMotions: Map<number, AgentMotion>;
+  readonly agentTargetTiles: Map<number, number>;
   readonly application: Application;
   readonly builtGraphics: Graphics;
   readonly effectsGraphics: Graphics;
@@ -45,9 +48,20 @@ interface PixiScene {
   lastModel: RenderModel | null;
   preparedProjection: PreparedRenderProjection | null;
   preparedSource: WorldMapProjection | null;
+  animationFrame: number | null;
+  reducedEffects: boolean;
 }
 
 const TILE_SIZE = 6;
+
+interface AgentMotion {
+  readonly durationMs: number;
+  readonly fromX: number;
+  readonly fromY: number;
+  readonly startedAtMs: number;
+  readonly targetX: number;
+  readonly targetY: number;
+}
 
 function viewportFor(
   host: HTMLElement,
@@ -216,10 +230,28 @@ function drawStructures(graphics: Graphics, model: RenderModel): void {
   }
 }
 
-function drawAgents(graphics: Graphics, model: RenderModel): void {
+function agentMotionPoint(motion: AgentMotion, now: number): readonly [number, number, boolean] {
+  const progress = Math.max(0, Math.min(1, (now - motion.startedAtMs) / motion.durationMs));
+  return [
+    motion.fromX + (motion.targetX - motion.fromX) * progress,
+    motion.fromY + (motion.targetY - motion.fromY) * progress,
+    progress < 1,
+  ];
+}
+
+function drawAgents(
+  graphics: Graphics,
+  model: RenderModel,
+  motions: ReadonlyMap<number, AgentMotion>,
+  now: number,
+): void {
   graphics.clear();
   for (const agent of model.agents) {
-    const [x, y] = tilePoint(agent.tileIndex, model.width);
+    const motion = motions.get(agent.selectable.id);
+    const [x, y] =
+      motion === undefined
+        ? tilePoint(agent.tileIndex, model.width)
+        : agentMotionPoint(motion, now);
     const fill =
       agent.healthTier === 'sound' ? 0xf4ede0 : agent.healthTier === 'worn' ? 0xe2ac55 : 0xd75d55;
     const radius = agent.ageTier === 'child' ? 1 : agent.ageTier === 'elder' ? 1.55 : 1.35;
@@ -230,6 +262,80 @@ function drawAgents(graphics: Graphics, model: RenderModel): void {
       graphics.rect(x + 1.45, y - 0.4, 0.8, 0.8).fill(0xf5ead1);
     }
   }
+}
+
+function updateAgentMotions(
+  scene: PixiScene,
+  model: RenderModel,
+  reducedEffects: boolean,
+): boolean {
+  const now = performance.now();
+  let changed = false;
+  const visibleIds = new Set<number>();
+  for (const agent of model.agents) {
+    const id = agent.selectable.id;
+    visibleIds.add(id);
+    const previousTarget = scene.agentTargetTiles.get(id);
+    const [targetX, targetY] = tilePoint(agent.tileIndex, model.width);
+    if (previousTarget === undefined) {
+      scene.agentTargetTiles.set(id, agent.tileIndex);
+      scene.agentLastTargetAtMs.set(id, now);
+      continue;
+    }
+    if (previousTarget !== agent.tileIndex) {
+      const previousMotion = scene.agentMotions.get(id);
+      const [fromX, fromY] =
+        previousMotion === undefined
+          ? tilePoint(previousTarget, model.width)
+          : agentMotionPoint(previousMotion, now);
+      scene.agentTargetTiles.set(id, agent.tileIndex);
+      const priorTargetAtMs = scene.agentLastTargetAtMs.get(id) ?? now;
+      scene.agentLastTargetAtMs.set(id, now);
+      if (reducedEffects) {
+        scene.agentMotions.delete(id);
+      } else {
+        scene.agentMotions.set(id, {
+          // One authoritative position is emitted per completed logical movement.
+          // Use that observed interval so normal focus pace glides between sparse
+          // action pulses, while accelerated pace remains responsive.
+          durationMs: Math.max(120, Math.min(10_000, Math.round((now - priorTargetAtMs) * 0.9))),
+          fromX,
+          fromY,
+          startedAtMs: now,
+          targetX,
+          targetY,
+        });
+      }
+      changed = true;
+    }
+  }
+  for (const id of scene.agentTargetTiles.keys()) {
+    if (!visibleIds.has(id)) {
+      scene.agentTargetTiles.delete(id);
+      scene.agentLastTargetAtMs.delete(id);
+      scene.agentMotions.delete(id);
+    }
+  }
+  if (reducedEffects && scene.agentMotions.size > 0) {
+    scene.agentMotions.clear();
+    changed = true;
+  }
+  return changed;
+}
+
+function scheduleAgentMotion(scene: PixiScene): void {
+  if (scene.animationFrame !== null || typeof window.requestAnimationFrame !== 'function') return;
+  const animate = (now: number): void => {
+    scene.animationFrame = null;
+    const model = scene.lastModel;
+    if (model === null) return;
+    drawAgents(scene.agentGraphics, model, scene.agentMotions, now);
+    const hasActiveMotion = [...scene.agentMotions.values()].some(
+      (motion) => agentMotionPoint(motion, now)[2],
+    );
+    if (hasActiveMotion) scheduleAgentMotion(scene);
+  };
+  scene.animationFrame = window.requestAnimationFrame(animate);
 }
 
 function drawEffects(graphics: Graphics, model: RenderModel): void {
@@ -333,13 +439,17 @@ function applyProjection(
   if (previous?.layerSignatures.effects !== model.layerSignatures.effects) {
     drawEffects(scene.effectsGraphics, model);
   }
-  if (previous?.layerSignatures.agents !== model.layerSignatures.agents) {
-    drawAgents(scene.agentGraphics, model);
+  const agentLayerChanged = previous?.layerSignatures.agents !== model.layerSignatures.agents;
+  const agentMotionChanged = updateAgentMotions(scene, model, reducedEffects);
+  if (agentLayerChanged || agentMotionChanged || scene.reducedEffects !== reducedEffects) {
+    drawAgents(scene.agentGraphics, model, scene.agentMotions, performance.now());
   }
   if (previous?.layerSignatures.structures !== model.layerSignatures.structures) {
     drawStructures(scene.structureGraphics, model);
   }
+  scene.reducedEffects = reducedEffects;
   scene.lastModel = model;
+  if (!reducedEffects && scene.agentMotions.size > 0) scheduleAgentMotion(scene);
   return model;
 }
 
@@ -418,6 +528,33 @@ export function WorldMapCanvas({
   useEffect(() => {
     const host = hostRef.current;
     if (!host) return;
+    // React delegates wheel events as passive in some embedded WebView environments.
+    // A native non-passive listener keeps map zoom from also scrolling the page.
+    const handleWheel = (event: WheelEvent) => {
+      event.preventDefault();
+      event.stopPropagation();
+      if (event.deltaY === 0) return;
+      const bounds = host.getBoundingClientRect();
+      const nextCamera = zoomCameraAt(
+        cameraRef.current,
+        event.deltaY < 0 ? 1.15 : 1 / 1.15,
+        event.clientX - bounds.left,
+        event.clientY - bounds.top,
+      );
+      // Wheel events can arrive before React commits the parent camera update. Keep this
+      // presentation ref current so a normal multi-notch gesture compounds correctly.
+      cameraRef.current = nextCamera;
+      onCameraChangeRef.current(nextCamera);
+    };
+    host.addEventListener('wheel', handleWheel, { passive: false });
+    return () => {
+      host.removeEventListener('wheel', handleWheel);
+    };
+  }, []);
+
+  useEffect(() => {
+    const host = hostRef.current;
+    if (!host) return;
     let disposed = false;
     const application = new Application();
     void application
@@ -457,6 +594,9 @@ export function WorldMapCanvas({
         host.appendChild(application.canvas);
         const scene: PixiScene = {
           agentGraphics,
+          agentLastTargetAtMs: new Map(),
+          agentMotions: new Map(),
+          agentTargetTiles: new Map(),
           application,
           builtGraphics,
           effectsGraphics,
@@ -468,6 +608,8 @@ export function WorldMapCanvas({
           lastModel: null,
           preparedProjection: null,
           preparedSource: null,
+          animationFrame: null,
+          reducedEffects: reducedEffectsRef.current,
         };
         sceneRef.current = scene;
         const model = applyProjection(
@@ -495,6 +637,9 @@ export function WorldMapCanvas({
     return () => {
       disposed = true;
       if (sceneRef.current?.application === application) {
+        if (sceneRef.current.animationFrame !== null) {
+          window.cancelAnimationFrame(sceneRef.current.animationFrame);
+        }
         sceneRef.current = null;
         application.destroy(true, { children: true });
       }
@@ -614,12 +759,6 @@ export function WorldMapCanvas({
       onPointerDown={handlePointerDown}
       onPointerMove={handlePointerMove}
       onPointerUp={handlePointerUp}
-      onWheel={(event) => {
-        event.preventDefault();
-        onCameraChangeRef.current(
-          zoomCamera(cameraRef.current, event.deltaY < 0 ? 1.15 : 1 / 1.15),
-        );
-      }}
       ref={hostRef}
     />
   );
