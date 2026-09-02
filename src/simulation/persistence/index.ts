@@ -84,9 +84,12 @@ import {
 } from '../world';
 
 export const WORLD_SNAPSHOT_FORMAT = 'chrono-forge-world';
-export const WORLD_SNAPSHOT_FORMAT_VERSION = 6;
-export const WORLD_ENGINE_VERSION = 6;
-export const WORLD_CONTENT_VERSION = 6;
+// A strict persisted-payload shape change must increment all three values and retain a
+// parser for the prior format below. This keeps development saves from silently being
+// reinterpreted as a newer schema.
+export const WORLD_SNAPSHOT_FORMAT_VERSION = 7;
+export const WORLD_ENGINE_VERSION = 7;
+export const WORLD_CONTENT_VERSION = 7;
 
 const MAX_WORLD_TILES = 1_000_000;
 const MAX_WORLD_SNAPSHOT_BYTES = 50 * 1024 * 1024;
@@ -3868,16 +3871,16 @@ function deserializeVersionFive(envelope: UnknownRecord): WorldState {
   return world;
 }
 
-function deserializeVersionSix(envelope: UnknownRecord): WorldState {
+function deserializeVersionedWorld(envelope: UnknownRecord, version: number): WorldState {
   assertExactKeys(
     envelope,
     ['checksum', 'contentVersion', 'engineVersion', 'format', 'formatVersion', 'payload'],
     'World snapshot envelope',
   );
   if (
-    envelope.formatVersion !== WORLD_SNAPSHOT_FORMAT_VERSION ||
-    envelope.engineVersion !== WORLD_ENGINE_VERSION ||
-    envelope.contentVersion !== WORLD_CONTENT_VERSION ||
+    envelope.formatVersion !== version ||
+    envelope.engineVersion !== version ||
+    envelope.contentVersion !== version ||
     typeof envelope.checksum !== 'string'
   ) {
     throw new Error('World snapshot version metadata is invalid.');
@@ -3896,6 +3899,16 @@ function deserializeVersionSix(envelope: UnknownRecord): WorldState {
     );
   }
   return world;
+}
+
+/** Parses the final M6 payload shape before its one-way v7 envelope migration. */
+function deserializeVersionSix(envelope: UnknownRecord): WorldState {
+  return deserializeVersionedWorld(envelope, 6);
+}
+
+/** Parses the current payload shape. */
+function deserializeVersionSeven(envelope: UnknownRecord): WorldState {
+  return deserializeVersionedWorld(envelope, WORLD_SNAPSHOT_FORMAT_VERSION);
 }
 
 function canonicalVersionTwoWorldJson(state: VersionTwoWorldState): string {
@@ -4000,6 +4013,9 @@ export function migrateWorldSnapshot(snapshot: string): string {
     throw new Error(`World snapshot version ${formatVersion} is newer than this application.`);
   }
   if (formatVersion === WORLD_SNAPSHOT_FORMAT_VERSION) {
+    return serializeWorldSnapshot(deserializeVersionSeven(envelope));
+  }
+  if (formatVersion === 6) {
     return serializeWorldSnapshot(deserializeVersionSix(envelope));
   }
   if (formatVersion === 5) {
@@ -4049,5 +4065,5 @@ export function migrateWorldSnapshot(snapshot: string): string {
 /** Loads and validates a supported snapshot without mutating its input. */
 export function deserializeWorldSnapshot(snapshot: string): WorldState {
   const migrated = migrateWorldSnapshot(snapshot);
-  return deserializeVersionSix(parseEnvelope(migrated));
+  return deserializeVersionSeven(parseEnvelope(migrated));
 }

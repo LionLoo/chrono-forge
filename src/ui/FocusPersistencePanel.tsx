@@ -40,6 +40,17 @@ interface WorkspaceData {
   readonly slots: readonly SaveSlotSummary[];
 }
 
+function freshRecoverySlot(slots: readonly SaveSlotSummary[]): {
+  readonly slotId: string;
+  readonly name: string;
+} {
+  const existingIds = new Set(slots.map((slot) => slot.slotId));
+  for (let index = 1; ; index += 1) {
+    const slotId = `fresh-world-${index}`;
+    if (!existingIds.has(slotId)) return { slotId, name: `Fresh world ${index}` };
+  }
+}
+
 function selectRestorableSession(save: LoadedSave): FocusSession | null {
   const session = save.focusSession;
   if (
@@ -190,6 +201,8 @@ export function FocusPersistencePanel({
   const bootstrapPromiseRef = useRef<Promise<WorkspaceData> | null>(null);
   const [workspace, setWorkspace] = useState<WorkspaceData | null>(null);
   const [bootstrapError, setBootstrapError] = useState<string | null>(null);
+  const [recoveryError, setRecoveryError] = useState<string | null>(null);
+  const [recoveringFreshWorld, setRecoveringFreshWorld] = useState(false);
   const [workspaceRevision, setWorkspaceRevision] = useState(0);
 
   useEffect(() => {
@@ -231,11 +244,60 @@ export function FocusPersistencePanel({
     setWorkspaceRevision((current) => current + 1);
   }, []);
 
+  const startFreshWorld = useCallback(async () => {
+    setRecoveringFreshWorld(true);
+    setRecoveryError(null);
+    try {
+      const [settings, slots] = await Promise.all([
+        runtime.gateway.loadSettings(),
+        runtime.gateway.listSaveSlots(),
+      ]);
+      const recoverySlot = freshRecoverySlot(slots);
+      const snapshot = await simulation.requestSave();
+      await runtime.gateway.commitSaveSlot(recoverySlot.slotId, recoverySlot.name, snapshot);
+      await runtime.gateway.saveSettings({ ...settings, activeSlotId: recoverySlot.slotId });
+      const recoveredWorkspace = await loadWorkspace(clock, runtime, {
+        events: simulation.events,
+        loadSnapshot: simulation.loadSnapshot,
+        performOfflineCatchUp: simulation.performOfflineCatchUp,
+        requestSave: simulation.requestSave,
+      });
+      bootstrapPromiseRef.current = Promise.resolve(recoveredWorkspace);
+      setWorkspace(recoveredWorkspace);
+      setBootstrapError(null);
+      setWorkspaceRevision((current) => current + 1);
+    } catch (error) {
+      setRecoveryError(
+        error instanceof Error ? error.message : 'A fresh local world could not be created.',
+      );
+    } finally {
+      setRecoveringFreshWorld(false);
+    }
+  }, [
+    clock,
+    runtime,
+    simulation.events,
+    simulation.loadSnapshot,
+    simulation.performOfflineCatchUp,
+    simulation.requestSave,
+  ]);
+
   if (bootstrapError !== null) {
     return (
       <section className="focus-card focus-card-error" aria-labelledby="focus-title">
         <h2 id="focus-title">Focus and local saves</h2>
         <p role="alert">Persistence fault: {bootstrapError}</p>
+        <p>
+          The affected slot is retained. You can start a separate fresh world while it is repaired.
+        </p>
+        <button
+          disabled={recoveringFreshWorld}
+          onClick={() => void startFreshWorld()}
+          type="button"
+        >
+          {recoveringFreshWorld ? 'Creating fresh world…' : 'Start a fresh world'}
+        </button>
+        {recoveryError === null ? null : <p role="alert">Fresh-world fault: {recoveryError}</p>}
       </section>
     );
   }

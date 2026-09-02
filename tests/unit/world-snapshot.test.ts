@@ -39,6 +39,16 @@ function versionOneSnapshot(worldJson: string): string {
   });
 }
 
+function versionSixSnapshot(world: ReturnType<typeof createInitialWorld>): string {
+  const envelope = JSON.parse(serializeWorldSnapshot(world)) as Record<string, unknown>;
+  return JSON.stringify({
+    ...envelope,
+    contentVersion: 6,
+    engineVersion: 6,
+    formatVersion: 6,
+  });
+}
+
 function versionTwoSnapshot(ticks = 15_000): {
   readonly snapshot: string;
   readonly source: ReturnType<typeof stepWorld>;
@@ -259,9 +269,9 @@ describe('versioned world snapshots', () => {
     const loaded = deserializeWorldSnapshot(snapshot);
 
     expect(JSON.parse(snapshot)).toMatchObject({
-      contentVersion: 6,
-      engineVersion: 6,
-      formatVersion: 6,
+      contentVersion: WORLD_SNAPSHOT_FORMAT_VERSION,
+      engineVersion: WORLD_SNAPSHOT_FORMAT_VERSION,
+      formatVersion: WORLD_SNAPSHOT_FORMAT_VERSION,
     });
     expect(developmentDto(loaded.development)).toStrictEqual(developmentDto(original.development));
     expect(canonicalWorldJson(loaded)).toBe(canonicalWorldJson(original));
@@ -287,9 +297,9 @@ describe('versioned world snapshots', () => {
     const loaded = deserializeWorldSnapshot(migrated);
 
     expect(JSON.parse(migrated)).toMatchObject({
-      contentVersion: 6,
-      engineVersion: 6,
-      formatVersion: 6,
+      contentVersion: WORLD_SNAPSHOT_FORMAT_VERSION,
+      engineVersion: WORLD_SNAPSHOT_FORMAT_VERSION,
+      formatVersion: WORLD_SNAPSHOT_FORMAT_VERSION,
     });
     expect(developmentDto(loaded.development)).toStrictEqual(
       developmentDto(createInitialDevelopment(source.seed, source.tick)),
@@ -310,9 +320,9 @@ describe('versioned world snapshots', () => {
     const loaded = deserializeWorldSnapshot(migrated);
 
     expect(JSON.parse(migrated)).toMatchObject({
-      contentVersion: 6,
-      engineVersion: 6,
-      formatVersion: 6,
+      contentVersion: WORLD_SNAPSHOT_FORMAT_VERSION,
+      engineVersion: WORLD_SNAPSHOT_FORMAT_VERSION,
+      formatVersion: WORLD_SNAPSHOT_FORMAT_VERSION,
     });
     expect(loaded.eventLog).toStrictEqual(source.eventLog);
     expect(loaded.civilizations).toMatchObject({ tick: source.tick, operationCount: 0 });
@@ -457,7 +467,9 @@ describe('versioned world snapshots', () => {
     const loaded = deserializeWorldSnapshot(migratedSnapshot);
     const interpersonal = loaded.civilization.society.interpersonal;
 
-    expect(JSON.parse(migratedSnapshot)).toMatchObject({ formatVersion: 6 });
+    expect(JSON.parse(migratedSnapshot)).toMatchObject({
+      formatVersion: WORLD_SNAPSHOT_FORMAT_VERSION,
+    });
     expect(interpersonal.active).toHaveLength(1);
     expect(interpersonal.active[0]).toMatchObject({
       firstPersonId: 1,
@@ -573,7 +585,9 @@ describe('versioned world snapshots', () => {
     const { snapshot, source } = versionTwoSnapshot();
     const loaded = deserializeWorldSnapshot(migrateWorldSnapshot(snapshot));
 
-    expect(JSON.parse(migrateWorldSnapshot(snapshot))).toMatchObject({ formatVersion: 6 });
+    expect(JSON.parse(migrateWorldSnapshot(snapshot))).toMatchObject({
+      formatVersion: WORLD_SNAPSHOT_FORMAT_VERSION,
+    });
     expect(loaded.eventLog.map((event) => [event.id, event.kind])).toStrictEqual(
       source.eventLog.map((event) => [event.id, event.kind]),
     );
@@ -584,6 +598,19 @@ describe('versioned world snapshots', () => {
     expect(loaded.civilization.society.people.map((person) => person.name)).toStrictEqual(
       source.civilization.agents.map((agent) => agent.name),
     );
+  });
+
+  it('migrates a canonical v6 envelope to the current version without changing authority', () => {
+    const source = stepWorld(createInitialWorld([31, 37, 41, 43]), 15_000);
+    const migrated = migrateWorldSnapshot(versionSixSnapshot(source));
+
+    expect(JSON.parse(migrated)).toMatchObject({
+      contentVersion: WORLD_SNAPSHOT_FORMAT_VERSION,
+      engineVersion: WORLD_SNAPSHOT_FORMAT_VERSION,
+      formatVersion: WORLD_SNAPSHOT_FORMAT_VERSION,
+    });
+    expect(hashWorldState(deserializeWorldSnapshot(migrated))).toBe(hashWorldState(source));
+    expect(migrateWorldSnapshot(migrated)).toBe(migrated);
   });
 
   it('continues a v2 save created between society boundaries', () => {
