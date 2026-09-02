@@ -274,15 +274,7 @@ export function FocusPersistencePanel({
     } finally {
       setRecoveringFreshWorld(false);
     }
-  }, [
-    clock,
-    runtime,
-    simulation,
-    simulation.events,
-    simulation.loadSnapshot,
-    simulation.performOfflineCatchUp,
-    simulation.requestSave,
-  ]);
+  }, [clock, runtime, simulation]);
 
   if (bootstrapError !== null) {
     return (
