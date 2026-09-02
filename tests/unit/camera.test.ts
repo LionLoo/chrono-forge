@@ -1,6 +1,11 @@
 import { describe, expect, it } from 'vitest';
 
-import { INITIAL_WORLD_CAMERA, panCamera, zoomCamera, zoomCameraAt } from '../../src/rendering/camera';
+import {
+  INITIAL_WORLD_CAMERA,
+  panCamera,
+  zoomCamera,
+  zoomCameraAt,
+} from '../../src/rendering/camera';
 
 describe('world camera', () => {
   it('pans without changing zoom', () => {

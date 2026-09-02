@@ -135,9 +135,7 @@ describe('Pixi world projection', () => {
     host.hasPointerCapture = vi.fn(() => true);
     const releasePointerCapture = vi.fn();
     host.releasePointerCapture = releasePointerCapture;
-    host.getBoundingClientRect = vi.fn(
-      () => ({ left: 50, top: 100 }) as DOMRect,
-    );
+    host.getBoundingClientRect = vi.fn(() => ({ left: 50, top: 100 }) as DOMRect);
 
     fireEvent.pointerDown(host, { clientX: 10, clientY: 10, pointerId: 7 });
     fireEvent.pointerMove(host, { clientX: 25, clientY: 30, pointerId: 7 });
