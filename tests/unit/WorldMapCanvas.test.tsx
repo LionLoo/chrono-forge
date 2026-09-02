@@ -1,7 +1,7 @@
 import { fireEvent, render, waitFor } from '@testing-library/react';
 import { vi } from 'vitest';
 
-import { INITIAL_WORLD_CAMERA } from '../../src/rendering/camera';
+import { INITIAL_WORLD_CAMERA, type WorldCamera } from '../../src/rendering/camera';
 import { STRUCTURE_KIND_CODES, STRUCTURE_STATE_CODES } from '../../src/protocol';
 import { WorldMapCanvas, type WorldMapProjection } from '../../src/rendering/WorldMapCanvas';
 import { createInitialWorld, stepWorld } from '../../src/simulation/world';
@@ -160,7 +160,7 @@ describe('Pixi world projection', () => {
     expect(host.dispatchEvent(zoomIn)).toBe(false);
     expect(zoomIn.defaultPrevented).toBe(true);
     expect(pageWheel).not.toHaveBeenCalled();
-    const zoomedIn = onCameraChange.mock.lastCall?.[0];
+    const zoomedIn = onCameraChange.mock.calls.at(-1)?.[0] as unknown as WorldCamera;
     expect(zoomedIn).toMatchObject({ zoom: 1.5 * 1.15 });
     expect((mousePoint.clientX - 50 - zoomedIn.x) / zoomedIn.zoom).toBeCloseTo(worldPoint.x);
     expect((mousePoint.clientY - 100 - zoomedIn.y) / zoomedIn.zoom).toBeCloseTo(worldPoint.y);
@@ -173,7 +173,7 @@ describe('Pixi world projection', () => {
     expect(host.dispatchEvent(zoomOut)).toBe(false);
     expect(zoomOut.defaultPrevented).toBe(true);
     expect(pageWheel).not.toHaveBeenCalled();
-    const zoomedOut = onCameraChange.mock.lastCall?.[0];
+    const zoomedOut = onCameraChange.mock.calls.at(-1)?.[0] as unknown as WorldCamera;
     expect(zoomedOut).toMatchObject({ zoom: 1.5 / 1.15 });
     expect((mousePoint.clientX - 50 - zoomedOut.x) / zoomedOut.zoom).toBeCloseTo(worldPoint.x);
     expect((mousePoint.clientY - 100 - zoomedOut.y) / zoomedOut.zoom).toBeCloseTo(worldPoint.y);
