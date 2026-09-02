@@ -143,10 +143,19 @@ describe('Pixi world projection', () => {
     fireEvent.pointerUp(host, { pointerId: 7 });
     expect(releasePointerCapture).toHaveBeenCalledWith(7);
 
-    fireEvent.wheel(host, { deltaY: -1 });
+    const pageWheel = vi.fn();
+    document.addEventListener('wheel', pageWheel);
+    const zoomIn = new WheelEvent('wheel', { bubbles: true, cancelable: true, deltaY: -1 });
+    expect(host.dispatchEvent(zoomIn)).toBe(false);
+    expect(zoomIn.defaultPrevented).toBe(true);
+    expect(pageWheel).not.toHaveBeenCalled();
     expect(onCameraChange).toHaveBeenLastCalledWith({ x: 30, y: 40, zoom: 1.5 * 1.15 });
-    fireEvent.wheel(host, { deltaY: 1 });
+    const zoomOut = new WheelEvent('wheel', { bubbles: true, cancelable: true, deltaY: 1 });
+    expect(host.dispatchEvent(zoomOut)).toBe(false);
+    expect(zoomOut.defaultPrevented).toBe(true);
+    expect(pageWheel).not.toHaveBeenCalled();
     expect(onCameraChange).toHaveBeenLastCalledWith({ x: 30, y: 40, zoom: 1.5 / 1.15 });
+    document.removeEventListener('wheel', pageWheel);
 
     view.unmount();
     expect(pixiMocks.applications[0]?.destroy).toHaveBeenCalled();

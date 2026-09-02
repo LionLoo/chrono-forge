@@ -418,6 +418,23 @@ export function WorldMapCanvas({
   useEffect(() => {
     const host = hostRef.current;
     if (!host) return;
+    // React delegates wheel events as passive in some embedded WebView environments.
+    // A native non-passive listener keeps map zoom from also scrolling the page.
+    const handleWheel = (event: WheelEvent) => {
+      event.preventDefault();
+      event.stopPropagation();
+      if (event.deltaY === 0) return;
+      onCameraChangeRef.current(zoomCamera(cameraRef.current, event.deltaY < 0 ? 1.15 : 1 / 1.15));
+    };
+    host.addEventListener('wheel', handleWheel, { passive: false });
+    return () => {
+      host.removeEventListener('wheel', handleWheel);
+    };
+  }, []);
+
+  useEffect(() => {
+    const host = hostRef.current;
+    if (!host) return;
     let disposed = false;
     const application = new Application();
     void application
@@ -614,12 +631,6 @@ export function WorldMapCanvas({
       onPointerDown={handlePointerDown}
       onPointerMove={handlePointerMove}
       onPointerUp={handlePointerUp}
-      onWheel={(event) => {
-        event.preventDefault();
-        onCameraChangeRef.current(
-          zoomCamera(cameraRef.current, event.deltaY < 0 ? 1.15 : 1 / 1.15),
-        );
-      }}
       ref={hostRef}
     />
   );
