@@ -4,7 +4,7 @@ import { vi } from 'vitest';
 import { INITIAL_WORLD_CAMERA } from '../../src/rendering/camera';
 import { STRUCTURE_KIND_CODES, STRUCTURE_STATE_CODES } from '../../src/protocol';
 import { WorldMapCanvas, type WorldMapProjection } from '../../src/rendering/WorldMapCanvas';
-import { createInitialWorld } from '../../src/simulation/world';
+import { createInitialWorld, stepWorld } from '../../src/simulation/world';
 import { projectWorldFrame } from '../../src/workers/simulation-runtime';
 
 const pixiMocks = vi.hoisted(() => {
@@ -159,6 +159,109 @@ describe('Pixi world projection', () => {
 
     view.unmount();
     expect(pixiMocks.applications[0]?.destroy).toHaveBeenCalled();
+  });
+
+  it('interpolates authoritative agent tile changes without changing the world projection', async () => {
+    let now = 1_000;
+    let animation: FrameRequestCallback | null = null;
+    const performanceNow = vi.spyOn(performance, 'now').mockImplementation(() => now);
+    const requestAnimationFrame = vi
+      .spyOn(window, 'requestAnimationFrame')
+      .mockImplementation((callback) => {
+        animation = callback;
+        return 1;
+      });
+    const world = createInitialWorld([1, 2, 3, 4]);
+    const initial = projectWorldFrame(world);
+    const advanced = projectWorldFrame(stepWorld(world, 100));
+    const movedAgentIndex = [...initial.agentTiles].findIndex(
+      (tile, index) => tile !== advanced.agentTiles[index],
+    );
+    expect(movedAgentIndex).toBeGreaterThanOrEqual(0);
+    const onCameraChange = vi.fn();
+    const view = render(
+      <WorldMapCanvas
+        camera={INITIAL_WORLD_CAMERA}
+        onCameraChange={onCameraChange}
+        overlay="terrain"
+        projection={initial}
+      />,
+    );
+
+    await waitFor(() => expect(view.getByRole('img')).toBeVisible());
+    const agentGraphics = pixiMocks.graphics[4]!;
+    const agentCount = initial.agentIds.length;
+    const before = agentGraphics.circle.mock.calls[movedAgentIndex]!;
+    now = 11_000;
+    view.rerender(
+      <WorldMapCanvas
+        camera={INITIAL_WORLD_CAMERA}
+        onCameraChange={onCameraChange}
+        overlay="terrain"
+        projection={advanced}
+      />,
+    );
+
+    const atMotionStart = agentGraphics.circle.mock.calls[agentCount + movedAgentIndex]!;
+    expect(atMotionStart.slice(0, 2)).toEqual(before.slice(0, 2));
+    const scheduledAnimation = animation as FrameRequestCallback | null;
+    expect(scheduledAnimation).not.toBeNull();
+    if (scheduledAnimation === null) throw new Error('Agent animation was not scheduled.');
+    now = 15_500;
+    scheduledAnimation(now);
+    const halfway = agentGraphics.circle.mock.calls.at(-agentCount + movedAgentIndex)!;
+    const destinationTile = advanced.agentTiles[movedAgentIndex]!;
+    const destination = [
+      ((destinationTile % advanced.width) + 0.5) * 6,
+      (Math.floor(destinationTile / advanced.width) + 0.5) * 6,
+    ];
+    expect(halfway.slice(0, 2)).not.toEqual(before.slice(0, 2));
+    expect(halfway.slice(0, 2)).not.toEqual(destination);
+
+    requestAnimationFrame.mockRestore();
+    performanceNow.mockRestore();
+  });
+
+  it('keeps reduced-effects agent movement static', async () => {
+    const requestAnimationFrame = vi.spyOn(window, 'requestAnimationFrame');
+    const world = createInitialWorld([1, 2, 3, 4]);
+    const initial = projectWorldFrame(world);
+    const advanced = projectWorldFrame(stepWorld(world, 100));
+    const movedAgentIndex = [...initial.agentTiles].findIndex(
+      (tile, index) => tile !== advanced.agentTiles[index],
+    );
+    expect(movedAgentIndex).toBeGreaterThanOrEqual(0);
+    const view = render(
+      <WorldMapCanvas
+        camera={INITIAL_WORLD_CAMERA}
+        onCameraChange={vi.fn()}
+        overlay="terrain"
+        projection={initial}
+        reducedEffects
+      />,
+    );
+
+    await waitFor(() => expect(view.getByRole('img')).toBeVisible());
+    const agentGraphics = pixiMocks.graphics[4]!;
+    view.rerender(
+      <WorldMapCanvas
+        camera={INITIAL_WORLD_CAMERA}
+        onCameraChange={vi.fn()}
+        overlay="terrain"
+        projection={advanced}
+        reducedEffects
+      />,
+    );
+
+    const destinationTile = advanced.agentTiles[movedAgentIndex]!;
+    expect(
+      agentGraphics.circle.mock.calls.at(-initial.agentIds.length + movedAgentIndex)?.slice(0, 2),
+    ).toEqual([
+      ((destinationTile % advanced.width) + 0.5) * 6,
+      (Math.floor(destinationTile / advanced.width) + 0.5) * 6,
+    ]);
+    expect(requestAnimationFrame).not.toHaveBeenCalled();
+    requestAnimationFrame.mockRestore();
   });
 
   it('surfaces renderer initialization errors', async () => {

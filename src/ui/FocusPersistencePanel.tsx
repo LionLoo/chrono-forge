@@ -232,6 +232,7 @@ export function FocusPersistencePanel({
   }, [
     clock,
     runtime,
+    simulation,
     simulation.events,
     simulation.loadSnapshot,
     simulation.performOfflineCatchUp,
