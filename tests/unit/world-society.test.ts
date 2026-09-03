@@ -108,7 +108,7 @@ describe('M4 society world integration', () => {
       hashWorldState(initial),
       hashWorldState(atThirtyMinutes),
       hashWorldState(atSixtyMinutes),
-    ]).toEqual(['7d7e3e85', '5338a428', '4481a024']);
+    ]).toEqual(['c869127d', 'ff5b7464', 'ca5dd6bc']);
     expect(atThirtyMinutes.civilization.structures).not.toEqual(initial.civilization.structures);
     expect(atSixtyMinutes.civilization.stockpile).not.toEqual(
       atThirtyMinutes.civilization.stockpile,

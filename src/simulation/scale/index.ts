@@ -258,6 +258,19 @@ function nextRngState(rng: Xoshiro128State): Xoshiro128State {
   return random.save();
 }
 
+function advanceRngState(rng: Xoshiro128State, steps: number): Xoshiro128State {
+  const random = new Xoshiro128StarStar(rng);
+  for (let index = 0; index < steps; index += 1) random.nextUint32();
+  return random.save();
+}
+
+function nextScheduledTick(state: PopulationScaleState): number {
+  let next = Number.MAX_SAFE_INTEGER;
+  for (const resident of state.detailedResidents) next = Math.min(next, resident.nextUpdateTick);
+  for (const cohort of state.cohorts) next = Math.min(next, cohort.nextUpdateTick);
+  return next;
+}
+
 function restoredResidentRngState(id: number): Xoshiro128State {
   return [id >>> 0, (id ^ 0x9e3779b9) >>> 0, (id ^ 0x243f6a88) >>> 0, (id ^ 0xb7e15162) >>> 0];
 }
@@ -390,8 +403,11 @@ export function advancePopulationScale(
   assertPopulationScaleInvariants(input);
   assertNonNegativeInteger(logicalTicks, 'logicalTicks');
   let state = input;
-  for (let offset = 0; offset < logicalTicks; offset += 1) {
-    const tick = state.tick + 1;
+  const endingTick = state.tick + logicalTicks;
+  while (state.tick < endingTick) {
+    const scheduledTick = nextScheduledTick(state);
+    const tick = Math.min(endingTick, Math.max(state.tick + 1, scheduledTick));
+    const rng = advanceRngState(state.rng, tick - state.tick);
     const due = [
       ...state.detailedResidents
         .filter((resident) => resident.nextUpdateTick <= tick)
@@ -403,6 +419,10 @@ export function advancePopulationScale(
       (left, right) =>
         left.id - right.id || (left.kind === right.kind ? 0 : left.kind === 'detail' ? -1 : 1),
     );
+    if (due.length === 0) {
+      state = { ...state, tick, rng };
+      continue;
+    }
     const selected = due.slice(0, MAX_SCALE_WORK_PER_TICK);
     const selectedDetails = new Set(
       selected.filter((item) => item.kind === 'detail').map((item) => item.id),
@@ -429,12 +449,10 @@ export function advancePopulationScale(
           }
         : cohort,
     );
-    const random = new Xoshiro128StarStar(state.rng);
-    random.nextUint32();
     state = {
       ...state,
       tick,
-      rng: random.save(),
+      rng,
       detailedResidents,
       cohorts,
       backlog: normalizeBacklog(tick, detailedResidents, cohorts),

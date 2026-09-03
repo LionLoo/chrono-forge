@@ -1,4 +1,9 @@
-import { WORKER_PROTOCOL_VERSION, type WorkerToUiMessage } from '../../src/protocol';
+import {
+  WORKER_PROTOCOL_VERSION,
+  type WorkerToUiMessage,
+  type WorldFrameProjection,
+} from '../../src/protocol';
+import { applyWorldFrameDelta } from '../../src/protocol/frame-delta';
 import { createInitialWorld, hashWorldState, stepWorld } from '../../src/simulation/world';
 import { createSimulationRuntime } from '../../src/workers/simulation-runtime';
 
@@ -8,6 +13,19 @@ const seeds = [
   [101, 202, 303, 404],
   [0xffff_ffff, 0, 0x8000_0000, 17],
 ] as const;
+
+function reconstructedFrame(messages: readonly WorkerToUiMessage[]): WorldFrameProjection {
+  let frame: WorldFrameProjection | undefined;
+  for (const message of messages) {
+    if (message.type === 'ready') frame = message.frame;
+    if (message.type === 'frameDelta') {
+      if (frame === undefined) throw new Error('Worker sent a delta before ready.');
+      frame = applyWorldFrameDelta(frame, message.delta);
+    }
+  }
+  if (frame === undefined) throw new Error('Long worker frame is missing.');
+  return frame;
+}
 
 describe('accelerated deterministic world horizon', () => {
   it('preserves generation fields and factual event references across large fixed-tick advances', () => {
@@ -45,12 +63,8 @@ describe('accelerated deterministic world horizon', () => {
       ticks: LONG_HORIZON,
     });
 
-    const frame = responses.find((message) => message.type === 'frameDelta');
-    expect(frame?.type).toBe('frameDelta');
-    if (frame?.type !== 'frameDelta') throw new Error('Long worker frame is missing.');
-    expect(frame.frame.tick).toBe(LONG_HORIZON);
-    expect(frame.frame.stateHash).toBe(
-      hashWorldState(stepWorld(createInitialWorld(seed), LONG_HORIZON)),
-    );
+    const frame = reconstructedFrame(responses);
+    expect(frame.tick).toBe(LONG_HORIZON);
+    expect(frame.stateHash).toBe(hashWorldState(stepWorld(createInitialWorld(seed), LONG_HORIZON)));
   }, 30_000);
 });

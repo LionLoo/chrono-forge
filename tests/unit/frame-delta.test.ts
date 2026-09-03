@@ -101,6 +101,9 @@ describe('ordered world frame deltas', () => {
     expect(() => applyWorldFrameDelta(previous, { ...delta, width: previous.width + 1 })).toThrow(
       'dimensions',
     );
+    expect(() => applyWorldFrameDelta(previous, { ...delta, version: 6 as never })).toThrow(
+      'protocol version',
+    );
     expect(() =>
       applyWorldFrameDelta(previous, {
         ...delta,

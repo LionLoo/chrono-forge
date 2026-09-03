@@ -190,4 +190,15 @@ describe('M8 deterministic population scale authority', () => {
     );
     expect(populationScaleDto(first)).not.toBe(first);
   });
+
+  it('fast-forwards a large empty logical batch without manufacturing scheduled work', () => {
+    const initial = createPopulationScale(SEED, 0, { detailedResidents: [] });
+    const advanced = advancePopulationScale(initial, 1_000_000);
+
+    expect(advanced).toMatchObject({
+      tick: 1_000_000,
+      operationCount: 0,
+      backlog: { detailedDue: 0, cohortDue: 0, totalDue: 0 },
+    });
+  });
 });
