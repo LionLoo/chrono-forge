@@ -107,6 +107,42 @@ function createStatefulSimulation(initialWorld?: WorldState): {
 }
 
 describe('FocusPersistencePanel offline progression', () => {
+  it('creates and selects a separate fresh world when the current slot cannot be restored', async () => {
+    const user = userEvent.setup();
+    const base = createInMemoryPersistenceGateway(() => 1_000);
+    await base.commitSaveSlot('primary', 'Founding world', snapshot);
+    const gateway: PersistenceGateway = {
+      ...base,
+      async loadSaveSlot(slotId) {
+        if (slotId === 'primary') {
+          throw new Error('save slot has no semantically valid generation');
+        }
+        return base.loadSaveSlot(slotId);
+      },
+    };
+    const { simulation } = createSimulation();
+
+    render(
+      <FocusPersistencePanel
+        alerts={{ notifyCompletion: () => Promise.resolve() }}
+        clock={{ now: () => 1_000 }}
+        runtime={{ gateway, mode: 'browser-preview' }}
+        simulation={simulation}
+      />,
+    );
+
+    await screen.findByText('Persistence fault: save slot has no semantically valid generation');
+    await user.click(screen.getByRole('button', { name: 'Start a fresh world' }));
+
+    await screen.findByRole('button', { name: 'Start focus' });
+    expect((await base.listSaveSlots()).map((slot) => slot.slotId).sort()).toEqual([
+      'fresh-world-1',
+      'primary',
+    ]);
+    expect((await base.loadSettings()).activeSlotId).toBe('fresh-world-1');
+    expect(await base.loadSaveSlot('primary')).not.toBeNull();
+  });
+
   it('bounds elapsed time and clamps the configured rate to the worker limit', async () => {
     let nowMs = 1_000;
     const gateway = createInMemoryPersistenceGateway(() => nowMs);

@@ -84,10 +84,15 @@ import {
 } from '../world';
 
 export const WORLD_SNAPSHOT_FORMAT = 'chrono-forge-world';
-export const WORLD_SNAPSHOT_FORMAT_VERSION = 6;
-export const WORLD_ENGINE_VERSION = 6;
-export const WORLD_CONTENT_VERSION = 6;
+// A strict persisted-payload shape change must increment all three values and retain a
+// parser for the prior format below. This keeps development saves from silently being
+// reinterpreted as a newer schema.
+export const WORLD_SNAPSHOT_FORMAT_VERSION = 7;
+export const WORLD_ENGINE_VERSION = 7;
+export const WORLD_CONTENT_VERSION = 7;
 
+const WORLD_SNAPSHOT_VERSION_SIX = 6;
+const WORLD_SNAPSHOT_VERSION_SEVEN = 7;
 const MAX_WORLD_TILES = 1_000_000;
 const MAX_WORLD_SNAPSHOT_BYTES = 50 * 1024 * 1024;
 const MAX_EVENT_KIND_LENGTH = 64;
@@ -3868,16 +3873,16 @@ function deserializeVersionFive(envelope: UnknownRecord): WorldState {
   return world;
 }
 
-function deserializeVersionSix(envelope: UnknownRecord): WorldState {
+function deserializeVersionedWorld(envelope: UnknownRecord, version: number): WorldState {
   assertExactKeys(
     envelope,
     ['checksum', 'contentVersion', 'engineVersion', 'format', 'formatVersion', 'payload'],
     'World snapshot envelope',
   );
   if (
-    envelope.formatVersion !== WORLD_SNAPSHOT_FORMAT_VERSION ||
-    envelope.engineVersion !== WORLD_ENGINE_VERSION ||
-    envelope.contentVersion !== WORLD_CONTENT_VERSION ||
+    envelope.formatVersion !== version ||
+    envelope.engineVersion !== version ||
+    envelope.contentVersion !== version ||
     typeof envelope.checksum !== 'string'
   ) {
     throw new Error('World snapshot version metadata is invalid.');
@@ -3896,6 +3901,16 @@ function deserializeVersionSix(envelope: UnknownRecord): WorldState {
     );
   }
   return world;
+}
+
+/** Parses the final M6 payload shape before its one-way v7 envelope migration. */
+function deserializeVersionSix(envelope: UnknownRecord): WorldState {
+  return deserializeVersionedWorld(envelope, WORLD_SNAPSHOT_VERSION_SIX);
+}
+
+/** Parses the v7 payload shape. Keep this pinned when a later format becomes current. */
+function deserializeVersionSeven(envelope: UnknownRecord): WorldState {
+  return deserializeVersionedWorld(envelope, WORLD_SNAPSHOT_VERSION_SEVEN);
 }
 
 function canonicalVersionTwoWorldJson(state: VersionTwoWorldState): string {
@@ -3999,7 +4014,15 @@ export function migrateWorldSnapshot(snapshot: string): string {
   if (formatVersion > WORLD_SNAPSHOT_FORMAT_VERSION) {
     throw new Error(`World snapshot version ${formatVersion} is newer than this application.`);
   }
+  // Keep every historic parser branch explicit. When v8 is introduced, add its parser for the
+  // current-version branch below but retain this v7 branch so existing generations keep loading.
+  if (formatVersion === WORLD_SNAPSHOT_VERSION_SEVEN) {
+    return serializeWorldSnapshot(deserializeVersionSeven(envelope));
+  }
   if (formatVersion === WORLD_SNAPSHOT_FORMAT_VERSION) {
+    return serializeWorldSnapshot(deserializeVersionSeven(envelope));
+  }
+  if (formatVersion === WORLD_SNAPSHOT_VERSION_SIX) {
     return serializeWorldSnapshot(deserializeVersionSix(envelope));
   }
   if (formatVersion === 5) {
@@ -4049,5 +4072,5 @@ export function migrateWorldSnapshot(snapshot: string): string {
 /** Loads and validates a supported snapshot without mutating its input. */
 export function deserializeWorldSnapshot(snapshot: string): WorldState {
   const migrated = migrateWorldSnapshot(snapshot);
-  return deserializeVersionSix(parseEnvelope(migrated));
+  return deserializeVersionSeven(parseEnvelope(migrated));
 }
