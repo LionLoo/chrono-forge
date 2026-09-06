@@ -2,7 +2,7 @@
 
 `PRODUCT_SPEC.md` is the product contract and `PLAN.md` contains the decision-complete acceptance criteria, branches, and validation for each item. Milestones run in this order:
 
-Current checkpoint: M0-M8 are merged, independently reviewed, and hosted-verified on `main`. M9 is the next release-blocking milestone but has not started because the included weekly allowance is nearly exhausted; the billing guardrail requires a pause after the durable M8 documentation checkpoint. M9-M12 and the private v1.0.0 release remain fully blocking until their gates finish.
+Current checkpoint: M0-M8 are merged, independently reviewed, and hosted-verified on `main`. M9 is the next active release-blocking milestone. M9-M12 and the private v1.0.0 release remain fully blocking until their gates finish.
 
 | Order | Milestone                                                    | Outcome                                                                                       |
 | ----- | ------------------------------------------------------------ | --------------------------------------------------------------------------------------------- |
