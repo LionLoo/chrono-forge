@@ -2,6 +2,8 @@ import { findLocalPath, type LocalPathRequest, type PathStatus, type TilePoint }
 
 /** The maximum number of completed route results retained by one authoritative cache. */
 export const MAX_PATH_CACHE_ENTRIES = 128;
+/** Oldest unique route demand retained while fixed-quota path work catches up. */
+export const MAX_PENDING_PATH_REQUESTS = 128;
 
 export type FlowDirection = 'north' | 'east' | 'south' | 'west' | 'arrived';
 
@@ -11,6 +13,7 @@ export interface PathCacheRequest {
   readonly chunkSize: number;
   readonly start: TilePoint;
   readonly goal: TilePoint;
+  /** Per tile-search stage quota; hierarchical work has a fixed derived total bound. */
   readonly maxExpansions: number;
   readonly revision: number;
 }
@@ -29,6 +32,10 @@ export interface PendingPathRequest {
   readonly key: string;
   readonly queuedAtTick: number;
   readonly request: PathCacheRequest;
+  /** Present only after a bounded corridor attempt defers its full-quota direct fallback. */
+  readonly stage?: 'direct-fallback';
+  readonly fallbackExpansionOffset?: number;
+  readonly fallbackEligibleTick?: number;
 }
 
 export interface CachedPathResult {
@@ -60,8 +67,8 @@ export interface PathCacheState {
 
 export interface PathCacheRequestOutcome {
   readonly state: PathCacheState;
-  readonly kind: 'cache-hit' | 'queued';
-  readonly requestId: number;
+  readonly kind: 'cache-hit' | 'queued' | 'saturated';
+  readonly requestId?: number;
   readonly result?: CachedPathResult;
 }
 
@@ -197,6 +204,27 @@ function freezeState(
   });
 }
 
+/** Constant-cost guard for trusted hot-path transitions; deep validation remains a boundary check. */
+function assertTransitionState(state: PathCacheState): void {
+  assertNonNegativeSafeInteger(state.terrainRevision, 'Terrain revision');
+  assertNonNegativeSafeInteger(state.logicalTick, 'Logical tick');
+  assertNonNegativeSafeInteger(state.nextRequestId, 'Next request ID');
+  assertNonNegativeSafeInteger(state.nextEntryId, 'Next entry ID');
+  assertNonNegativeSafeInteger(state.operationCount, 'Operation count');
+  if (!isRuntimeArray(state.pending) || !isRuntimeArray(state.completed)) {
+    throw new RangeError('Path cache queues must be arrays.');
+  }
+  if (state.backlog !== state.pending.length) {
+    throw new RangeError('Path cache backlog must equal pending queue length.');
+  }
+  if (state.pending.length > MAX_PENDING_PATH_REQUESTS) {
+    throw new RangeError('Path cache exceeds its pending-request limit.');
+  }
+  if (state.completed.length > MAX_PATH_CACHE_ENTRIES) {
+    throw new RangeError('Path cache exceeds its completed-entry limit.');
+  }
+}
+
 function assertTick(state: PathCacheState, logicalTick: number): void {
   assertNonNegativeSafeInteger(logicalTick, 'Logical tick');
   if (logicalTick < state.logicalTick) {
@@ -213,6 +241,179 @@ function chunkIdFor(tile: number, request: PathCacheRequest): number {
   const y = Math.floor(tile / request.width);
   const chunksWide = Math.ceil(request.width / request.chunkSize);
   return Math.floor(y / request.chunkSize) * chunksWide + Math.floor(x / request.chunkSize);
+}
+
+function chunkPointFor(point: TilePoint, request: PathCacheRequest): TilePoint {
+  return Object.freeze({
+    x: Math.floor(point.x / request.chunkSize),
+    y: Math.floor(point.y / request.chunkSize),
+  });
+}
+
+function chunkRouteForPath(
+  path: readonly TilePoint[],
+  request: PathCacheRequest,
+): readonly number[] {
+  const seenChunks = new Set<number>();
+  return Object.freeze(
+    path
+      .map((point) => tileId(point, request.width))
+      .filter((tile) => {
+        const chunk = chunkIdFor(tile, request);
+        if (seenChunks.has(chunk)) return false;
+        seenChunks.add(chunk);
+        return true;
+      })
+      .map((tile) => chunkIdFor(tile, request)),
+  );
+}
+
+function corridorChunksForPath(
+  path: readonly TilePoint[],
+  chunksWide: number,
+  chunksHigh: number,
+): ReadonlySet<number> {
+  const allowed = new Set<number>();
+  for (const point of path) {
+    for (let offsetY = -1; offsetY <= 1; offsetY += 1) {
+      const y = point.y + offsetY;
+      if (y < 0 || y >= chunksHigh) continue;
+      for (let offsetX = -1; offsetX <= 1; offsetX += 1) {
+        const x = point.x + offsetX;
+        if (x >= 0 && x < chunksWide) allowed.add(y * chunksWide + x);
+      }
+    }
+  }
+  return allowed;
+}
+
+function withExpansionOffset(
+  result: ReturnType<typeof findLocalPath>,
+  expansionOffset: number,
+): ReturnType<typeof findLocalPath> {
+  return Object.freeze({ ...result, expansions: expansionOffset + result.expansions });
+}
+
+function maximumHierarchicalExpansions(request: PathCacheRequest): number {
+  const chunksWide = Math.ceil(request.width / request.chunkSize);
+  const chunksHigh = Math.ceil(request.height / request.chunkSize);
+  if (chunksWide === 1 && chunksHigh === 1) return request.maxExpansions;
+  const coarseLimit = Math.min(request.maxExpansions, chunksWide * chunksHigh);
+  const maximum = coarseLimit + request.maxExpansions * 2;
+  return Number.isSafeInteger(maximum) ? maximum : Number.MAX_SAFE_INTEGER;
+}
+
+interface HierarchicalPathAttempt {
+  readonly result: ReturnType<typeof findLocalPath>;
+  readonly needsDirectFallback: boolean;
+}
+
+/** Open chunk topology has no obstacles, so its exact A* route can be built without heap state. */
+function findOpenChunkPath(
+  start: TilePoint,
+  goal: TilePoint,
+  maxExpansions: number,
+): ReturnType<typeof findLocalPath> {
+  const distance = Math.abs(goal.x - start.x) + Math.abs(goal.y - start.y);
+  if (distance > maxExpansions) {
+    return Object.freeze({
+      status: 'quota-exhausted',
+      path: Object.freeze([]),
+      expansions: maxExpansions,
+    });
+  }
+  const path: TilePoint[] = [Object.freeze({ x: start.x, y: start.y })];
+  let x = start.x;
+  let y = start.y;
+  while (x !== goal.x || y !== goal.y) {
+    // This matches the A* tie-break `(f, h, rowMajorNodeId)` on an obstacle-free grid.
+    if (y > goal.y) y -= 1;
+    else if (x !== goal.x) x += x < goal.x ? 1 : -1;
+    else y += 1;
+    path.push(Object.freeze({ x, y }));
+  }
+  return Object.freeze({ status: 'complete', path: Object.freeze(path), expansions: distance });
+}
+
+/**
+ * Coarse/corridor work gets one full tile-stage quota. If it cannot complete, the caller defers a
+ * full-quota direct fallback to the next scheduled cache pulse. This preserves direct-search
+ * reachability without doubling expensive tile work inside one fixed-quota pulse.
+ */
+function findHierarchicalPathAttempt(
+  request: PathCacheRequest,
+  traversal: PathCacheTraversal,
+): HierarchicalPathAttempt {
+  const chunksWide = Math.ceil(request.width / request.chunkSize);
+  const chunksHigh = Math.ceil(request.height / request.chunkSize);
+  const startChunk = chunkPointFor(request.start, request);
+  const goalChunk = chunkPointFor(request.goal, request);
+  const localRequest = (
+    maxExpansions: number,
+    allowedChunks?: ReadonlySet<number>,
+  ): LocalPathRequest => ({
+    width: request.width,
+    height: request.height,
+    start: request.start,
+    goal: request.goal,
+    maxExpansions,
+    isPassable: (x, y) => {
+      const chunk =
+        Math.floor(y / request.chunkSize) * chunksWide + Math.floor(x / request.chunkSize);
+      return (
+        (allowedChunks === undefined || allowedChunks.has(chunk)) &&
+        (traversal.isPassable?.(x, y) ?? true)
+      );
+    },
+    ...(traversal.movementCost === undefined ? {} : { movementCost: traversal.movementCost }),
+  });
+  if (
+    request.width * request.height <= request.maxExpansions ||
+    (startChunk.x === goalChunk.x && startChunk.y === goalChunk.y)
+  ) {
+    return Object.freeze({
+      result: findLocalPath(localRequest(request.maxExpansions)),
+      needsDirectFallback: false,
+    });
+  }
+
+  // Coarse topology deliberately treats every in-bounds chunk as traversable. Tile passability is
+  // authoritative only in the bounded corridor search below.
+  const coarse = findOpenChunkPath(
+    startChunk,
+    goalChunk,
+    Math.min(request.maxExpansions, chunksWide * chunksHigh),
+  );
+  if (coarse.status === 'complete') {
+    const allowedChunks = corridorChunksForPath(coarse.path, chunksWide, chunksHigh);
+    const corridor = findLocalPath(localRequest(request.maxExpansions, allowedChunks));
+    if (corridor.status === 'complete' || allowedChunks.size === chunksWide * chunksHigh) {
+      return Object.freeze({
+        result: withExpansionOffset(corridor, coarse.expansions),
+        needsDirectFallback: false,
+      });
+    }
+    return Object.freeze({
+      result: withExpansionOffset(corridor, coarse.expansions),
+      needsDirectFallback: true,
+    });
+  }
+  return Object.freeze({ result: coarse, needsDirectFallback: true });
+}
+
+function findDirectPath(
+  request: PathCacheRequest,
+  traversal: PathCacheTraversal,
+): ReturnType<typeof findLocalPath> {
+  return findLocalPath({
+    width: request.width,
+    height: request.height,
+    start: request.start,
+    goal: request.goal,
+    maxExpansions: request.maxExpansions,
+    isPassable: (x, y) => traversal.isPassable?.(x, y) ?? true,
+    ...(traversal.movementCost === undefined ? {} : { movementCost: traversal.movementCost }),
+  });
 }
 
 function flowDirections(path: readonly TilePoint[]): readonly FlowDirection[] {
@@ -250,19 +451,7 @@ function makeEntry(
   logicalTick: number,
 ): CachedPathResult {
   const tilePath = Object.freeze(result.path.map((point) => tileId(point, request.width)));
-  const seenChunks = new Set<number>();
-  const chunkRoute = Object.freeze(
-    tilePath
-      .filter((tile) => {
-        const chunk = chunkIdFor(tile, request);
-        if (seenChunks.has(chunk)) {
-          return false;
-        }
-        seenChunks.add(chunk);
-        return true;
-      })
-      .map((tile) => chunkIdFor(tile, request)),
-  );
+  const chunkRoute = chunkRouteForPath(result.path, request);
   return Object.freeze({
     entryId,
     key: keyFor(request),
@@ -301,19 +490,11 @@ function arraysEqual<T>(left: readonly T[], right: readonly T[]): boolean {
   return left.length === right.length && left.every((value, index) => value === right[index]);
 }
 
-function requestForPending(
-  state: PathCacheState,
-  request: PathCacheRequest,
-): PendingPathRequest | undefined {
-  const key = keyFor(request);
+function requestForPending(state: PathCacheState, key: string): PendingPathRequest | undefined {
   return state.pending.find((pending) => pending.key === key);
 }
 
-function resultForRequest(
-  state: PathCacheState,
-  request: PathCacheRequest,
-): CachedPathResult | undefined {
-  const key = keyFor(request);
+function resultForRequest(state: PathCacheState, key: string): CachedPathResult | undefined {
   return state.completed.find((entry) => entry.key === key);
 }
 
@@ -337,23 +518,30 @@ export function requestPath(
   request: PathCacheRequest,
   logicalTick: number,
 ): PathCacheRequestOutcome {
-  assertPathCacheInvariants(state);
+  assertTransitionState(state);
   assertRequest(request);
   assertTick(state, logicalTick);
   if (request.revision !== state.terrainRevision) {
     throw new RangeError('Path request revision must equal the current terrain revision.');
   }
 
-  const cached = resultForRequest(state, request);
+  const key = keyFor(request);
+  const cached = resultForRequest(state, key);
   if (cached !== undefined) {
-    const result = Object.freeze({ ...cached, lastUsedTick: logicalTick });
-    const nextState = freezeState({
-      ...state,
-      logicalTick,
-      completed: state.completed.map((entry) =>
-        entry.entryId === cached.entryId ? result : entry,
-      ),
-    });
+    const result =
+      cached.lastUsedTick === logicalTick
+        ? cached
+        : Object.freeze({ ...cached, lastUsedTick: logicalTick });
+    const completed =
+      result === cached
+        ? state.completed
+        : Object.freeze(
+            state.completed.map((entry) => (entry.entryId === cached.entryId ? result : entry)),
+          );
+    const nextState =
+      logicalTick === state.logicalTick && completed === state.completed
+        ? state
+        : Object.freeze({ ...state, logicalTick, completed });
     return Object.freeze({
       state: nextState,
       kind: 'cache-hit',
@@ -362,15 +550,24 @@ export function requestPath(
     });
   }
 
-  const pending = requestForPending(state, request);
+  const pending = requestForPending(state, key);
   if (pending !== undefined) {
-    const nextState = freezeState({ ...state, logicalTick });
+    const nextState =
+      logicalTick === state.logicalTick ? state : Object.freeze({ ...state, logicalTick });
     return Object.freeze({ state: nextState, kind: 'queued', requestId: pending.requestId });
+  }
+
+  // Preserve the oldest already-authoritative demand. Repeated requests coalesce above; a new
+  // unique request retries on a later settlement pulse after fixed-quota work frees capacity.
+  if (state.pending.length >= MAX_PENDING_PATH_REQUESTS) {
+    const nextState =
+      logicalTick === state.logicalTick ? state : Object.freeze({ ...state, logicalTick });
+    return Object.freeze({ state: nextState, kind: 'saturated' });
   }
 
   const queued = Object.freeze({
     requestId: state.nextRequestId,
-    key: keyFor(request),
+    key,
     queuedAtTick: logicalTick,
     request: cloneRequest(request),
   });
@@ -393,25 +590,56 @@ export function advancePathCache(
   maximumRequestQuota: number,
   logicalTick: number,
 ): PathCacheAdvanceResult {
-  assertPathCacheInvariants(state);
+  assertTransitionState(state);
   assertNonNegativeSafeInteger(maximumRequestQuota, 'Maximum request quota');
   assertTick(state, logicalTick);
 
-  const processed = state.pending.slice(0, maximumRequestQuota);
-  const remaining = state.pending.slice(processed.length);
+  const processed = state.pending
+    .filter(
+      (pending) =>
+        pending.fallbackEligibleTick === undefined || pending.fallbackEligibleTick <= logicalTick,
+    )
+    .slice(0, maximumRequestQuota);
+  if (processed.length === 0) {
+    const nextState =
+      logicalTick === state.logicalTick ? state : Object.freeze({ ...state, logicalTick });
+    return Object.freeze({ state: nextState, completed: Object.freeze([]) });
+  }
+  const processedIds = new Set(processed.map((pending) => pending.requestId));
+  const remaining = state.pending.filter((pending) => !processedIds.has(pending.requestId));
   const completed: CachedPathResult[] = [];
+  const deferred: PendingPathRequest[] = [];
   let nextEntryId = state.nextEntryId;
   for (const pending of processed) {
-    const localRequest: LocalPathRequest = {
-      width: pending.request.width,
-      height: pending.request.height,
-      start: pending.request.start,
-      goal: pending.request.goal,
-      maxExpansions: pending.request.maxExpansions,
-      ...(traversal.isPassable === undefined ? {} : { isPassable: traversal.isPassable }),
-      ...(traversal.movementCost === undefined ? {} : { movementCost: traversal.movementCost }),
-    };
-    const result = findLocalPath(localRequest);
+    let result: ReturnType<typeof findLocalPath>;
+    if (pending.stage === 'direct-fallback') {
+      result = withExpansionOffset(
+        findDirectPath(pending.request, traversal),
+        pending.fallbackExpansionOffset ?? 0,
+      );
+    } else {
+      const attempt = findHierarchicalPathAttempt(pending.request, traversal);
+      if (attempt.needsDirectFallback) {
+        if (logicalTick === Number.MAX_SAFE_INTEGER) {
+          result = withExpansionOffset(
+            findDirectPath(pending.request, traversal),
+            attempt.result.expansions,
+          );
+        } else {
+          deferred.push(
+            Object.freeze({
+              ...pending,
+              stage: 'direct-fallback' as const,
+              fallbackExpansionOffset: attempt.result.expansions,
+              fallbackEligibleTick: logicalTick + 1,
+            }),
+          );
+          continue;
+        }
+      } else {
+        result = attempt.result;
+      }
+    }
     completed.push(makeEntry(nextEntryId, pending.request, result, logicalTick));
     nextEntryId += 1;
   }
@@ -419,7 +647,7 @@ export function advancePathCache(
     ...state,
     logicalTick,
     nextEntryId,
-    pending: remaining,
+    pending: [...deferred, ...remaining],
     completed: evictToLimit([...state.completed, ...completed]),
     operationCount: state.operationCount + processed.length,
   });
@@ -473,6 +701,9 @@ export function assertPathCacheInvariants(state: PathCacheState): void {
   if (state.backlog !== pendingEntries.length) {
     throw new RangeError('Path cache backlog must equal pending queue length.');
   }
+  if (pendingEntries.length > MAX_PENDING_PATH_REQUESTS) {
+    throw new RangeError('Path cache exceeds its pending-request limit.');
+  }
   if (completedEntries.length > MAX_PATH_CACHE_ENTRIES) {
     throw new RangeError('Path cache exceeds its completed-entry limit.');
   }
@@ -487,6 +718,38 @@ export function assertPathCacheInvariants(state: PathCacheState): void {
       throw new RangeError('Pending request cannot be queued in the future.');
     }
     assertRequest(pending.request);
+    if (
+      (pending.stage === undefined &&
+        (pending.fallbackExpansionOffset !== undefined ||
+          pending.fallbackEligibleTick !== undefined)) ||
+      (pending.stage !== undefined && pending.stage !== 'direct-fallback') ||
+      (pending.stage === 'direct-fallback' &&
+        (pending.fallbackExpansionOffset === undefined ||
+          pending.fallbackEligibleTick === undefined))
+    ) {
+      throw new RangeError('Pending request has invalid fallback stage data.');
+    }
+    if (pending.fallbackExpansionOffset !== undefined) {
+      assertNonNegativeSafeInteger(
+        pending.fallbackExpansionOffset,
+        'Pending fallback expansion offset',
+      );
+      if (
+        pending.fallbackExpansionOffset >
+        maximumHierarchicalExpansions(pending.request) - pending.request.maxExpansions
+      ) {
+        throw new RangeError('Pending fallback expansion offset exceeds its fixed work bound.');
+      }
+    }
+    if (pending.fallbackEligibleTick !== undefined) {
+      assertNonNegativeSafeInteger(pending.fallbackEligibleTick, 'Pending fallback eligible tick');
+      if (
+        pending.fallbackEligibleTick <= pending.queuedAtTick ||
+        pending.fallbackEligibleTick > state.logicalTick + 1
+      ) {
+        throw new RangeError('Pending fallback eligible tick is outside its scheduled range.');
+      }
+    }
     if (
       pending.request.revision !== state.terrainRevision ||
       pending.key !== keyFor(pending.request)
@@ -516,6 +779,9 @@ export function assertPathCacheInvariants(state: PathCacheState): void {
       throw new RangeError('Completed entry has invalid logical tick data.');
     }
     assertRequest(entry.request);
+    if (entry.expansions > maximumHierarchicalExpansions(entry.request)) {
+      throw new RangeError('Completed entry exceeds its fixed hierarchical work bound.');
+    }
     if (entry.request.revision !== state.terrainRevision || entry.key !== keyFor(entry.request)) {
       throw new RangeError('Completed entry has stale or invalid key data.');
     }

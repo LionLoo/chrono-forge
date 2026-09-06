@@ -29,16 +29,20 @@ import {
 } from '../development';
 import { deriveXoshiro128State, Xoshiro128StarStar } from '../random';
 import {
+  FIRST_ORDINARY_RESIDENT_ID,
   advancePopulationScale,
   assertPopulationScaleInvariants,
   createPopulationScale,
   populationScaleDto,
+  reconcileAnonymousPopulation,
+  reconcilePopulationLod,
   type DetailedResidentState,
   type PopulationScaleState,
 } from '../scale';
 import {
   assertPathCacheInvariants,
   createPathCacheState,
+  invalidatePathCache,
   toCanonicalPathCacheDto,
   type PathCacheState,
 } from '../pathfinding/cache';
@@ -61,7 +65,7 @@ import {
   type SocietyAuthoritativeEvent,
 } from '../society';
 import {
-  advanceCivilization,
+  advanceCivilizationWithPathCache,
   assertCivilizationInvariants,
   attachFactualMemories,
   civilizationDto,
@@ -460,8 +464,8 @@ function namedScaleResidents(
       .filter((person) => person.alive)
       .map((person): DetailedResidentState => {
         const agent = agentsById.get(person.id);
-        if (!agent?.alive)
-          throw new Error('Alive named people must retain an alive detailed agent.');
+        if (agent === undefined)
+          throw new Error('Alive named people must retain a detailed agent record.');
         const settlement =
           settlementsById.get(residencyByPersonId.get(person.id)?.settlementId ?? -1) ??
           primarySettlement;
@@ -526,6 +530,34 @@ function namedScaleResidents(
   );
 }
 
+function reconcileSettlementPopulationAuthority(
+  state: Pick<WorldState, 'civilization' | 'civilizations' | 'config' | 'populationScale' | 'tick'>,
+): PopulationScaleState {
+  const named = namedScaleResidents(state);
+  const namedBySettlement = new Map<number, number>();
+  for (const resident of named) {
+    namedBySettlement.set(
+      resident.settlementId,
+      (namedBySettlement.get(resident.settlementId) ?? 0) + 1,
+    );
+  }
+  return reconcileAnonymousPopulation(
+    state.populationScale,
+    [...state.civilizations.settlements]
+      .sort((left, right) => left.id - right.id)
+      .map((settlement) => ({
+        settlementId: settlement.id,
+        civilizationId: settlement.civilizationId,
+        cultureId: settlement.cultureId,
+        tileIndex: settlement.centerTileIndex,
+        residentCount:
+          settlement.status === 'abandoned'
+            ? 0
+            : Math.max(0, settlement.population - (namedBySettlement.get(settlement.id) ?? 0)),
+      })),
+  );
+}
+
 /** Initializes M8 state at a saved tick without replaying population or cache history. */
 export function initializeM8WorldAuthority(
   state: Pick<WorldState, 'seed' | 'civilization' | 'civilizations' | 'config' | 'tick'>,
@@ -535,14 +567,19 @@ export function initializeM8WorldAuthority(
     state.tick,
     { detailedResidents: namedScaleResidents(state) },
   );
+  const reconciledPopulationScale = reconcileSettlementPopulationAuthority({
+    ...state,
+    populationScale,
+  });
   const pathCache = Object.freeze({ ...createPathCacheState(0), logicalTick: state.tick });
   assertPathCacheInvariants(pathCache);
-  return Object.freeze({ populationScale, pathCache });
+  return Object.freeze({ populationScale: reconciledPopulationScale, pathCache });
 }
 
 function synchronizePopulationScale(state: WorldState): PopulationScaleState {
   const named = namedScaleResidents(state);
   const namedIds = new Set(named.map((resident) => resident.id));
+  const societyPersonIds = new Set(state.civilization.society.people.map((person) => person.id));
   const existingById = new Map(
     state.populationScale.detailedResidents.map((resident) => [resident.id, resident]),
   );
@@ -551,7 +588,9 @@ function synchronizePopulationScale(state: WorldState): PopulationScaleState {
       if (namedIds.has(residentId))
         throw new Error('Named residents cannot also appear in aggregate population authority.');
   const detailedResidents = [
-    ...state.populationScale.detailedResidents.filter((resident) => !namedIds.has(resident.id)),
+    ...state.populationScale.detailedResidents.filter(
+      (resident) => !societyPersonIds.has(resident.id),
+    ),
     ...named.map((resident) => {
       const existing = existingById.get(resident.id);
       return existing === undefined
@@ -608,6 +647,19 @@ function synchronizeSettlementPopulation(state: WorldState): WorldState {
       ),
     }),
   });
+}
+
+/**
+ * Adopts an already-authoritative settlement population change into M8 scale authority. This is
+ * the only bridge for anonymous population; it never creates society people or relationship data.
+ */
+export function reconcileWorldPopulationAuthority(state: WorldState): WorldState {
+  return synchronizeSettlementPopulation(
+    Object.freeze({
+      ...state,
+      populationScale: reconcileSettlementPopulationAuthority(state),
+    }),
+  );
 }
 
 /** Builds an immutable world snapshot from only a seed and integer configuration. */
@@ -1232,6 +1284,34 @@ function applyDevelopmentResult(
     ...tileFields,
     tiles: tileFields,
   });
+  const changedWalkabilityTiles: number[] = [];
+  for (let index = 0; index < state.hazard.length; index += 1) {
+    if (isWalkableTile(state, index) !== isWalkableTile(next, index)) {
+      changedWalkabilityTiles.push(index);
+    }
+  }
+  if (changedWalkabilityTiles.length > 0) {
+    const changed = new Set(changedWalkabilityTiles);
+    const agentsWithValidRoutes = Object.freeze(
+      next.civilization.agents.map((agent) =>
+        agent.route.slice(agent.routeCursor + 1).some((tile) => changed.has(tile))
+          ? Object.freeze({ ...agent, route: Object.freeze([]), routeCursor: 0 })
+          : agent,
+      ),
+    );
+    next = Object.freeze({
+      ...next,
+      pathCache: invalidatePathCache(
+        next.pathCache,
+        next.pathCache.terrainRevision + 1,
+        changedWalkabilityTiles,
+      ),
+      civilization: Object.freeze({
+        ...next.civilization,
+        agents: agentsWithValidRoutes,
+      }),
+    });
+  }
   const created: WorldEvent[] = [];
   for (const event of result.events) {
     next = appendWorldEvent(next, event.kind, tick, {
@@ -1278,6 +1358,7 @@ function settlementTerrain(state: WorldState): SettlementTerrain {
   return Object.freeze({
     width: state.config.width,
     height: state.config.height,
+    chunkSize: state.config.chunkSize,
     food: state.food,
     freshWater: state.freshWater,
     timber: state.timber,
@@ -2097,13 +2178,18 @@ export function stepWorld(state: WorldState, ticks = 1): WorldState {
       pulseTick - next.populationScale.tick,
     );
     const terrain = settlementTerrain(next);
-    const pulse = advanceCivilization(next.civilization, terrain, pulseTick);
+    const pulse = advanceCivilizationWithPathCache(
+      next.civilization,
+      terrain,
+      pulseTick,
+      next.pathCache,
+    );
     next = Object.freeze({
       ...next,
       tick: pulseTick,
       civilization: pulse.civilization,
       populationScale,
-      pathCache: Object.freeze({ ...next.pathCache, logicalTick: pulseTick }),
+      pathCache: pulse.pathCache,
     });
     const createdEvents: WorldEvent[] = [];
     for (const draft of pulse.events) {
@@ -2121,6 +2207,10 @@ export function stepWorld(state: WorldState, ticks = 1): WorldState {
           biographyHistoricalSources(next, societyEvents),
         ),
       }),
+    });
+    next = Object.freeze({
+      ...next,
+      civilizations: reconcileCivilizationResidencies(next),
     });
     next = Object.freeze({ ...next, populationScale: synchronizePopulationScale(next) });
     if (pulseTick % next.config.societyYearTicks === 0 && next.development.tick < pulseTick) {
@@ -2142,7 +2232,20 @@ export function stepWorld(state: WorldState, ticks = 1): WorldState {
     }
     if (pulseTick % next.config.societyYearTicks === 0 && next.civilizations.tick < pulseTick)
       next = applyCivilizationsYear(next, pulseTick);
-    next = Object.freeze({ ...next, populationScale: synchronizePopulationScale(next) });
+    next = Object.freeze({
+      ...next,
+      civilizations: reconcileCivilizationResidencies(next),
+    });
+    next = Object.freeze({
+      ...next,
+      populationScale: reconcilePopulationLod(
+        reconcileSettlementPopulationAuthority({
+          ...next,
+          populationScale: synchronizePopulationScale(next),
+        }),
+        Math.trunc(pulseTick / SETTLEMENT_ACTION_PULSE_TICKS),
+      ),
+    });
     next = synchronizeSettlementPopulation(next);
     assertWorldInvariants(next);
     pulseTick += SETTLEMENT_ACTION_PULSE_TICKS;
@@ -2418,9 +2521,11 @@ export function assertWorldInvariants(state: WorldState): void {
   assertPopulationScaleInvariants(state.populationScale);
   assertPathCacheInvariants(state.pathCache);
   if (state.populationScale.tick !== state.tick)
-    throw new Error('Population scale must be synchronized to world time.');
+    throw new Error(
+      'World invariant violation: population scale must be synchronized to world time.',
+    );
   if (state.pathCache.logicalTick !== state.tick)
-    throw new Error('Path cache must be synchronized to world time.');
+    throw new Error('World invariant violation: path cache must be synchronized to world time.');
   if (state.development.tick > state.tick)
     throw new Error('World invariant violation: development cannot be ahead of world time.');
   if (state.civilizations.tick > state.tick)
@@ -2434,6 +2539,48 @@ export function assertWorldInvariants(state: WorldState): void {
     const resident = detailedById.get(person.id);
     if (resident === undefined || resident.importance <= 0)
       throw new Error('Alive named people must remain protected detailed scale residents.');
+  }
+  const namedPersonIds = new Set(state.civilization.society.people.map((person) => person.id));
+  const scaleSettlements = new Map(
+    state.civilizations.settlements.map((settlement) => [settlement.id, settlement] as const),
+  );
+  for (const resident of state.populationScale.detailedResidents) {
+    if (namedPersonIds.has(resident.id)) continue;
+    const settlement = scaleSettlements.get(resident.settlementId);
+    if (
+      resident.householdId !== 0 ||
+      resident.id < FIRST_ORDINARY_RESIDENT_ID ||
+      resident.importance !== 0 ||
+      resident.relationshipIds.length > 0 ||
+      resident.familyIds.length > 0 ||
+      resident.eventIds.length > 0 ||
+      settlement === undefined ||
+      settlement.status === 'abandoned' ||
+      resident.civilizationId !== settlement.civilizationId ||
+      resident.cultureId !== settlement.cultureId ||
+      resident.tileIndex !== settlement.centerTileIndex
+    ) {
+      throw new Error(
+        'Anonymous detailed residents must retain exact active-settlement unsalient provenance.',
+      );
+    }
+  }
+  for (const cohort of state.populationScale.cohorts) {
+    const settlement = scaleSettlements.get(cohort.classification.settlementId);
+    if (
+      cohort.classification.householdId !== 0 ||
+      cohort.householdCount !== 0 ||
+      settlement === undefined ||
+      settlement.status === 'abandoned' ||
+      cohort.classification.civilizationId !== settlement.civilizationId ||
+      cohort.classification.cultureId !== settlement.cultureId ||
+      cohort.classification.tileIndex !== settlement.centerTileIndex ||
+      cohort.residentIds.some(
+        (residentId) => residentId < FIRST_ORDINARY_RESIDENT_ID || namedPersonIds.has(residentId),
+      )
+    ) {
+      throw new Error('World aggregate cohorts must retain exact active-settlement provenance.');
+    }
   }
   const scalePopulationBySettlement = new Map<number, number>();
   for (const resident of state.populationScale.detailedResidents)

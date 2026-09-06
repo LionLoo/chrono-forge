@@ -18,7 +18,7 @@ import {
 
 const WIDTH = 40;
 
-function terrain(): SettlementTerrain {
+function terrain(blockedTile = -1): SettlementTerrain {
   return {
     width: WIDTH,
     height: 1,
@@ -28,7 +28,7 @@ function terrain(): SettlementTerrain {
     stone: new Uint16Array(WIDTH).fill(100),
     habitability: new Uint8Array(WIDTH).fill(100),
     hazard: new Uint8Array(WIDTH),
-    isWalkable: (tileIndex) => tileIndex >= 0 && tileIndex < WIDTH,
+    isWalkable: (tileIndex) => tileIndex >= 0 && tileIndex < WIDTH && tileIndex !== blockedTile,
   };
 }
 
@@ -129,6 +129,23 @@ describe('settlement path-cache routing', () => {
     );
     expect(hit.civilization.agents.every((agent) => agent.tileIndex === 1)).toBe(true);
     expect(() => assertPathCacheInvariants(hit.pathCache)).not.toThrow();
+  });
+
+  it('never follows a retained route onto a newly unwalkable tile', () => {
+    const initial = waitingCivilization();
+    const routed: CivilizationState = {
+      ...initial,
+      agents: initial.agents.map((agent) => ({
+        ...agent,
+        route: Object.freeze([0, 1, 2]),
+        routeCursor: 0,
+      })),
+    };
+    const result = advanceCivilizationWithPathCache(routed, terrain(1), 1, createPathCacheState());
+
+    expect(result.civilization.agents.every((agent) => agent.tileIndex === 0)).toBe(true);
+    expect(result.civilization.agents.every((agent) => agent.route.length === 0)).toBe(true);
+    expect(result.pathCache.completed[0]?.status).toBe('no-path');
   });
 
   it('is deterministic and partition-equivalent from equal cache checkpoints', () => {

@@ -16,6 +16,7 @@ import {
 import { ACCELERATED_YEAR_TICKS } from '../../src/simulation/society';
 import { interpersonalDto } from '../../src/simulation/relationships';
 import { createInitialDevelopment, developmentDto } from '../../src/simulation/development';
+import { advancePathCache, requestPath } from '../../src/simulation/pathfinding/cache';
 import legacyWorldV0 from '../fixtures/saves/world-v0.json';
 
 function legacySnapshot(worldJson: string): string {
@@ -27,6 +28,39 @@ function legacySnapshot(worldJson: string): string {
     worldJson,
   });
 }
+
+it('round-trips a deferred direct path fallback without losing its bounded work offset', () => {
+  const initial = createInitialWorld([13, 17, 19, 23]);
+  const queued = requestPath(
+    initial.pathCache,
+    {
+      width: 6,
+      height: 8,
+      chunkSize: 2,
+      start: { x: 0, y: 0 },
+      goal: { x: 5, y: 0 },
+      maxExpansions: 12,
+      revision: 0,
+    },
+    0,
+  ).state;
+  const attempted = advancePathCache(
+    queued,
+    { isPassable: (x, y) => !(x === 2 && y < 6) },
+    1,
+    0,
+  ).state;
+  const world = Object.freeze({ ...initial, pathCache: attempted });
+
+  expect(attempted.pending[0]).toMatchObject({
+    stage: 'direct-fallback',
+    fallbackExpansionOffset: 10,
+    fallbackEligibleTick: 1,
+  });
+  expect(deserializeWorldSnapshot(serializeWorldSnapshot(world)).pathCache).toStrictEqual(
+    attempted,
+  );
+});
 
 function versionOneSnapshot(worldJson: string): string {
   return JSON.stringify({

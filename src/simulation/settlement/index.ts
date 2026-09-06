@@ -779,12 +779,16 @@ function moveAgentWithPathCache(
 ): readonly [SettlementAgent, PathCacheState] {
   if (!agent.alive || agent.targetTileIndex === agent.tileIndex) return [agent, pathCache];
   const routeNext = agent.route[agent.routeCursor + 1];
-  if (routeNext !== undefined) {
+  if (routeNext !== undefined && terrain.isWalkable(routeNext)) {
     return [
       Object.freeze({ ...agent, tileIndex: routeNext, routeCursor: agent.routeCursor + 1 }),
       pathCache,
     ];
   }
+  const reroutingAgent =
+    routeNext === undefined
+      ? agent
+      : Object.freeze({ ...agent, route: Object.freeze([]), routeCursor: 0 });
   const outcome = requestPath(
     pathCache,
     {
@@ -792,12 +796,12 @@ function moveAgentWithPathCache(
       height: terrain.height,
       chunkSize: terrain.chunkSize ?? SETTLEMENT_PATH_CACHE_CHUNK_SIZE,
       start: Object.freeze({
-        x: agent.tileIndex % terrain.width,
-        y: Math.trunc(agent.tileIndex / terrain.width),
+        x: reroutingAgent.tileIndex % terrain.width,
+        y: Math.trunc(reroutingAgent.tileIndex / terrain.width),
       }),
       goal: Object.freeze({
-        x: agent.targetTileIndex % terrain.width,
-        y: Math.trunc(agent.targetTileIndex / terrain.width),
+        x: reroutingAgent.targetTileIndex % terrain.width,
+        y: Math.trunc(reroutingAgent.targetTileIndex / terrain.width),
       }),
       maxExpansions: SETTLEMENT_PATH_EXPANSION_QUOTA,
       revision: pathCache.terrainRevision,
@@ -805,13 +809,13 @@ function moveAgentWithPathCache(
     tick,
   );
   if (outcome.kind !== 'cache-hit' || outcome.result?.status !== 'complete') {
-    return [agent, outcome.state];
+    return [reroutingAgent, outcome.state];
   }
   const route = outcome.result.tilePath;
   const next = route[1];
   return next === undefined
-    ? [Object.freeze({ ...agent, route, routeCursor: 0 }), outcome.state]
-    : [Object.freeze({ ...agent, route, routeCursor: 1, tileIndex: next }), outcome.state];
+    ? [Object.freeze({ ...reroutingAgent, route, routeCursor: 0 }), outcome.state]
+    : [Object.freeze({ ...reroutingAgent, route, routeCursor: 1, tileIndex: next }), outcome.state];
 }
 
 function addDemand(pathDemand: Uint16Array, tileIndex: number): void {

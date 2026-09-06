@@ -1,4 +1,5 @@
 import {
+  MAX_PENDING_PATH_REQUESTS,
   MAX_PATH_CACHE_ENTRIES,
   advancePathCache,
   assertPathCacheInvariants,
@@ -8,6 +9,7 @@ import {
   toCanonicalPathCacheDto,
   type PathCacheRequest,
 } from '../../src/simulation/pathfinding/cache';
+import { findLocalPath } from '../../src/simulation/pathfinding';
 
 const request = (overrides: Partial<PathCacheRequest> = {}): PathCacheRequest => ({
   width: 8,
@@ -46,6 +48,87 @@ describe('deterministic hierarchical path cache', () => {
     expect(toCanonicalPathCacheDto(hit.state)).toStrictEqual(toCanonicalPathCacheDto(hit.state));
   });
 
+  it('uses a coarse chunk route to constrain local search before producing flow steps', () => {
+    const entry = request({
+      width: 8,
+      height: 20,
+      chunkSize: 2,
+      goal: { x: 7, y: 0 },
+      maxExpansions: 40,
+    });
+    const movementCost = (fromX: number, _fromY: number, toX: number, toY: number) =>
+      fromX === toX || toY >= 18 ? 1 : 1_000;
+    const direct = findLocalPath({ ...entry, movementCost });
+    const completed = advancePathCache(
+      requestPath(createPathCacheState(), entry, 1).state,
+      { movementCost },
+      1,
+      1,
+    ).completed[0]!;
+
+    expect(direct.status).toBe('quota-exhausted');
+    expect(completed.status).toBe('complete');
+    expect(completed.chunkRoute).toStrictEqual([0, 1, 2, 3]);
+    expect(completed.tilePath.every((tile) => Math.trunc(tile / entry.width) < 2)).toBe(true);
+    expect(completed.flowDirections).toHaveLength(completed.tilePath.length);
+    expect(completed.expansions).toBe(31);
+  });
+
+  it('preserves a reachable route when coarse work would consume part of its direct-search quota', () => {
+    const entry = request({
+      width: 65,
+      height: 1,
+      chunkSize: 32,
+      goal: { x: 64, y: 0 },
+      maxExpansions: 64,
+    });
+    const completed = advancePathCache(
+      requestPath(createPathCacheState(), entry, 1).state,
+      {},
+      1,
+      1,
+    ).completed[0]!;
+
+    expect(completed.status).toBe('complete');
+    expect(completed.tilePath).toHaveLength(65);
+    expect(completed.tilePath[0]).toBe(0);
+    expect(completed.tilePath.at(-1)).toBe(64);
+    expect(completed.chunkRoute).toStrictEqual([0, 1, 2]);
+    expect(completed.expansions).toBe(66);
+  });
+
+  it('does not mislabel a bounded direct search when the preferred corridor has no gateway', () => {
+    const entry = request({
+      width: 6,
+      height: 8,
+      chunkSize: 2,
+      goal: { x: 5, y: 0 },
+      maxExpansions: 12,
+    });
+    const isPassable = (x: number, y: number) => !(x === 2 && y < 6);
+    const direct = findLocalPath({ ...entry, isPassable });
+    const first = advancePathCache(
+      requestPath(createPathCacheState(), entry, 1).state,
+      { isPassable },
+      1,
+      1,
+    );
+    const second = advancePathCache(first.state, { isPassable }, 1, 2);
+    const completed = second.completed[0]!;
+
+    expect(first.completed).toStrictEqual([]);
+    expect(first.state.pending[0]).toMatchObject({
+      stage: 'direct-fallback',
+      fallbackExpansionOffset: 10,
+      fallbackEligibleTick: 2,
+    });
+    expect(direct.status).toBe('quota-exhausted');
+    expect(completed.status).toBe('quota-exhausted');
+    expect(completed.chunkRoute).toStrictEqual([]);
+    expect(completed.tilePath).toStrictEqual([]);
+    expect(completed.expansions).toBeGreaterThan(direct.expansions);
+  });
+
   it('sorts pending work by logical tick and stable key, then respects a fixed request quota and telemetry', () => {
     let state = createPathCacheState();
     state = requestPath(state, request({ start: { x: 1, y: 0 }, goal: { x: 7, y: 0 } }), 2).state;
@@ -67,6 +150,41 @@ describe('deterministic hierarchical path cache', () => {
     });
   });
 
+  it('bounds sustained unique demand, coalesces repeats, and retries after quota frees capacity', () => {
+    let state = createPathCacheState();
+    const outcomes: string[] = [];
+    const uniqueRequest = (index: number) =>
+      request({
+        width: 256,
+        height: 1,
+        chunkSize: 8,
+        start: { x: index, y: 0 },
+        goal: { x: 255, y: 0 },
+        maxExpansions: 300,
+      });
+    for (let index = 0; index < MAX_PENDING_PATH_REQUESTS + 8; index += 1) {
+      const outcome = requestPath(state, uniqueRequest(index), 1);
+      outcomes.push(outcome.kind);
+      state = outcome.state;
+    }
+
+    expect(state.pending).toHaveLength(MAX_PENDING_PATH_REQUESTS);
+    expect(state.backlog).toBe(MAX_PENDING_PATH_REQUESTS);
+    expect(state.nextRequestId).toBe(MAX_PENDING_PATH_REQUESTS + 1);
+    expect(outcomes.slice(-8)).toStrictEqual(Array.from({ length: 8 }, () => 'saturated'));
+
+    const repeated = requestPath(state, uniqueRequest(0), 2);
+    expect(repeated.kind).toBe('queued');
+    expect(repeated.state.pending).toHaveLength(MAX_PENDING_PATH_REQUESTS);
+    expect(repeated.state.nextRequestId).toBe(MAX_PENDING_PATH_REQUESTS + 1);
+
+    state = advancePathCache(repeated.state, {}, 32, 2).state;
+    const retried = requestPath(state, uniqueRequest(MAX_PENDING_PATH_REQUESTS), 2);
+    expect(retried.kind).toBe('queued');
+    expect(retried.state.pending).toHaveLength(MAX_PENDING_PATH_REQUESTS - 31);
+    expect(() => assertPathCacheInvariants(retried.state)).not.toThrow();
+  });
+
   it('is exactly equivalent when a scheduled request budget is partitioned at the same logical tick', () => {
     const initial = createPathCacheState();
     const queued = [
@@ -78,6 +196,76 @@ describe('deterministic hierarchical path cache', () => {
     const whole = advancePathCache(queued, {}, 3, 9).state;
     const partitioned = advancePathCache(advancePathCache(queued, {}, 1, 9).state, {}, 2, 9).state;
     expect(toCanonicalPathCacheDto(partitioned)).toStrictEqual(toCanonicalPathCacheDto(whole));
+  });
+
+  it('keeps deferred fallbacks partition-equivalent and ineligible until the next tick', () => {
+    const traversal = { isPassable: (x: number, y: number) => !(x === 2 && y < 6) };
+    const entries = [
+      request({
+        width: 6,
+        height: 8,
+        chunkSize: 2,
+        goal: { x: 5, y: 0 },
+        maxExpansions: 12,
+      }),
+      request({
+        width: 6,
+        height: 8,
+        chunkSize: 2,
+        start: { x: 0, y: 1 },
+        goal: { x: 5, y: 1 },
+        maxExpansions: 12,
+      }),
+    ];
+    const queued = entries.reduce(
+      (state, entry) => requestPath(state, entry, 5).state,
+      createPathCacheState(),
+    );
+
+    const wholeDeferred = advancePathCache(queued, traversal, 2, 5).state;
+    const partitionedDeferred = advancePathCache(
+      advancePathCache(queued, traversal, 1, 5).state,
+      traversal,
+      1,
+      5,
+    ).state;
+    expect(toCanonicalPathCacheDto(partitionedDeferred)).toStrictEqual(
+      toCanonicalPathCacheDto(wholeDeferred),
+    );
+    expect(wholeDeferred.pending).toHaveLength(2);
+    expect(wholeDeferred.pending.every((entry) => entry.fallbackEligibleTick === 6)).toBe(true);
+
+    const wholeCompleted = advancePathCache(wholeDeferred, traversal, 2, 6).state;
+    const partitionedCompleted = advancePathCache(
+      advancePathCache(partitionedDeferred, traversal, 1, 6).state,
+      traversal,
+      1,
+      6,
+    ).state;
+    expect(toCanonicalPathCacheDto(partitionedCompleted)).toStrictEqual(
+      toCanonicalPathCacheDto(wholeCompleted),
+    );
+  });
+
+  it('resolves a needed fallback coherently at the terminal logical tick', () => {
+    const entry = request({
+      width: 6,
+      height: 8,
+      chunkSize: 2,
+      goal: { x: 5, y: 0 },
+      maxExpansions: 12,
+    });
+    const traversal = { isPassable: (x: number, y: number) => !(x === 2 && y < 6) };
+    const queued = requestPath(createPathCacheState(), entry, Number.MAX_SAFE_INTEGER).state;
+    const resolved = advancePathCache(queued, traversal, 1, Number.MAX_SAFE_INTEGER).state;
+
+    expect(resolved.pending).toStrictEqual([]);
+    expect(resolved.completed[0]).toMatchObject({
+      status: 'quota-exhausted',
+      expansions: 22,
+      completedAtTick: Number.MAX_SAFE_INTEGER,
+    });
+    expect(() => assertPathCacheInvariants(resolved)).not.toThrow();
   });
 
   it('invalidates stale paths on a monotonic terrain revision and rejects nonmonotonic revision changes', () => {
@@ -129,18 +317,21 @@ describe('deterministic hierarchical path cache', () => {
 
   it('retains deterministic no-path and quota-exhausted results without callbacks in state', () => {
     const blocked = request({ width: 3, height: 1, goal: { x: 2, y: 0 } });
-    const noPath = advancePathCache(
+    const noPathAttempt = advancePathCache(
       requestPath(createPathCacheState(), blocked, 1).state,
       {
         isPassable: (x) => x === 0,
       },
       1,
       1,
-    ).state.completed[0];
-    const quota = resolve(
+    );
+    const noPath = advancePathCache(noPathAttempt.state, { isPassable: (x) => x === 0 }, 1, 2).state
+      .completed[0];
+    const quotaAttempt = resolve(
       createPathCacheState(),
       request({ width: 3, height: 1, goal: { x: 2, y: 0 }, maxExpansions: 1 }),
     );
+    const quota = advancePathCache(quotaAttempt, {}, 1, 2).state;
 
     expect(noPath).toMatchObject({
       status: 'no-path',

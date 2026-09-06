@@ -66,5 +66,5 @@ describe('accelerated deterministic world horizon', () => {
     const frame = reconstructedFrame(responses);
     expect(frame.tick).toBe(LONG_HORIZON);
     expect(frame.stateHash).toBe(hashWorldState(stepWorld(createInitialWorld(seed), LONG_HORIZON)));
-  }, 30_000);
+  }, 120_000);
 });

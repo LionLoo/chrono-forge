@@ -4,14 +4,18 @@ import { Xoshiro128StarStar, type Xoshiro128State } from '../random';
 export const MAX_DETAILED_RESIDENTS = 5_000;
 export const MAX_AGGREGATE_RESIDENTS = 100_000;
 export const MAX_SCALE_COHORTS = 256;
+export const MAX_SCALE_COHORT_RESIDENTS = 1_000;
 export const MAX_SCALE_TRANSFER_DELTAS = 256;
 export const MAX_SCALE_WORK_PER_TICK = 128;
-export const DETAILED_UPDATE_PERIOD_TICKS = 4;
+export const MAX_LOD_TRANSFERS_PER_RECONCILE = 1;
+export const DETAILED_UPDATE_PERIOD_TICKS = 64;
 export const AGGREGATE_UPDATE_PERIOD_TICKS = 16;
 export const MAX_SOCIAL_REFERENCE_IDS = 24;
 export const MAX_FAMILY_REFERENCE_IDS = 16;
 export const MAX_EVENT_REFERENCE_IDS = 16;
 export const MAX_SCALE_BACKLOG = MAX_DETAILED_RESIDENTS + MAX_SCALE_COHORTS;
+/** Disjoint from v1's bounded named-person IDs; persisted allocation prevents identity reuse. */
+export const FIRST_ORDINARY_RESIDENT_ID = 1_000_000_000;
 
 export interface DetailedResidentState {
   readonly id: number;
@@ -40,6 +44,7 @@ export interface AggregateClassification {
   readonly settlementId: number;
   readonly civilizationId: number;
   readonly cultureId: number;
+  /** Zero is reserved for anonymous settlement-level provenance, never a named household. */
   readonly householdId: number;
   readonly tileIndex: number;
 }
@@ -61,12 +66,14 @@ export interface AggregateCohortState {
   readonly totals: AggregateTotals;
   readonly nextUpdateTick: number;
   readonly updateCount: number;
+  /** Persisted member cursor; independent of cadence so every resident is eventually sampled. */
+  readonly promotionCursor: number;
 }
 
 export interface ScaleTransferDelta {
   readonly id: number;
   readonly tick: number;
-  readonly kind: 'aggregated' | 'deaggregated';
+  readonly kind: 'aggregated' | 'deaggregated' | 'materialized' | 'removed';
   readonly cohortId: number;
   readonly residentCount: number;
   readonly firstResidentId: number;
@@ -82,6 +89,7 @@ export interface ScaleBacklog {
 
 export interface PopulationScaleState {
   readonly tick: number;
+  readonly nextResidentId: number;
   readonly nextCohortId: number;
   readonly nextTransferId: number;
   readonly rng: Xoshiro128State;
@@ -95,6 +103,14 @@ export interface PopulationScaleState {
 export interface PopulationScaleInitialization {
   readonly detailedResidents: readonly DetailedResidentState[];
   readonly cohorts?: readonly AggregateCohortState[];
+}
+
+export interface AnonymousPopulationTarget {
+  readonly settlementId: number;
+  readonly civilizationId: number;
+  readonly cultureId: number;
+  readonly tileIndex: number;
+  readonly residentCount: number;
 }
 
 const TOTAL_KEYS = ['age', 'health', 'foodNeed', 'waterNeed', 'safety', 'skill'] as const;
@@ -137,7 +153,7 @@ function assertClassification(classification: AggregateClassification): void {
   assertPositiveId(classification.settlementId, 'classification.settlementId');
   assertPositiveId(classification.civilizationId, 'classification.civilizationId');
   assertPositiveId(classification.cultureId, 'classification.cultureId');
-  assertPositiveId(classification.householdId, 'classification.householdId');
+  assertNonNegativeInteger(classification.householdId, 'classification.householdId');
   assertNonNegativeInteger(classification.tileIndex, 'classification.tileIndex');
 }
 
@@ -275,8 +291,12 @@ function restoredResidentRngState(id: number): Xoshiro128State {
   return [id >>> 0, (id ^ 0x9e3779b9) >>> 0, (id ^ 0x243f6a88) >>> 0, (id ^ 0xb7e15162) >>> 0];
 }
 
-export function assertPopulationScaleInvariants(state: PopulationScaleState): void {
+function assertPopulationScaleInvariantsWithCohortLimit(
+  state: PopulationScaleState,
+  maximumCohortResidents: number,
+): void {
   assertNonNegativeInteger(state.tick, 'tick');
+  assertPositiveId(state.nextResidentId, 'nextResidentId');
   assertPositiveId(state.nextCohortId, 'nextCohortId');
   assertPositiveId(state.nextTransferId, 'nextTransferId');
   assertRng(state.rng, 'rng');
@@ -317,25 +337,33 @@ export function assertPopulationScaleInvariants(state: PopulationScaleState): vo
     previousCohortId = cohort.id;
     assertClassification(cohort.classification);
     if (cohort.residentIds.length === 0) throw new RangeError('Cohorts must not be empty.');
-    sortedUnique(cohort.residentIds, 'cohort.residentIds', MAX_AGGREGATE_RESIDENTS);
+    sortedUnique(cohort.residentIds, 'cohort.residentIds', maximumCohortResidents);
     for (const id of cohort.residentIds) {
       if (residentIds.has(id))
         throw new RangeError('Resident identity appears in detail and aggregate state.');
       residentIds.add(id);
     }
     aggregateResidentCount += cohort.residentIds.length;
-    assertPositiveId(cohort.householdCount, 'cohort.householdCount');
-    if (cohort.householdCount !== 1)
-      throw new RangeError('A cohort must retain exactly one household identity.');
+    assertNonNegativeInteger(cohort.householdCount, 'cohort.householdCount');
+    const expectedHouseholdCount = cohort.classification.householdId === 0 ? 0 : 1;
+    if (cohort.householdCount !== expectedHouseholdCount)
+      throw new RangeError('A cohort household count must match its provenance classification.');
     assertTotals(cohort.totals, 'cohort.totals');
     assertNonNegativeInteger(cohort.nextUpdateTick, 'cohort.nextUpdateTick');
     assertNonNegativeInteger(cohort.updateCount, 'cohort.updateCount');
+    assertNonNegativeInteger(cohort.promotionCursor, 'cohort.promotionCursor');
   }
   if (state.nextCohortId <= previousCohortId) {
     throw new RangeError('nextCohortId must exceed every retained cohort ID.');
   }
   if (aggregateResidentCount > MAX_AGGREGATE_RESIDENTS) {
     throw new RangeError('Aggregate resident capacity exceeded.');
+  }
+  if (state.nextResidentId < FIRST_ORDINARY_RESIDENT_ID) {
+    throw new RangeError('nextResidentId must remain in the ordinary-resident identity range.');
+  }
+  if ([...residentIds].some((id) => id >= state.nextResidentId)) {
+    throw new RangeError('nextResidentId must exceed every allocated ordinary resident ID.');
   }
 
   let previousTransferId = 0;
@@ -345,7 +373,12 @@ export function assertPopulationScaleInvariants(state: PopulationScaleState): vo
       throw new RangeError('Transfer deltas must be ID sorted.');
     previousTransferId = transfer.id;
     assertNonNegativeInteger(transfer.tick, 'transfer.tick');
-    if (transfer.kind !== 'aggregated' && transfer.kind !== 'deaggregated') {
+    if (
+      transfer.kind !== 'aggregated' &&
+      transfer.kind !== 'deaggregated' &&
+      transfer.kind !== 'materialized' &&
+      transfer.kind !== 'removed'
+    ) {
       throw new RangeError('Transfer kind is invalid.');
     }
     assertPositiveId(transfer.cohortId, 'transfer.cohortId');
@@ -369,6 +402,15 @@ export function assertPopulationScaleInvariants(state: PopulationScaleState): vo
   }
 }
 
+export function assertPopulationScaleInvariants(state: PopulationScaleState): void {
+  assertPopulationScaleInvariantsWithCohortLimit(state, MAX_SCALE_COHORT_RESIDENTS);
+}
+
+/** Validates the retired v8 shape before its one-way split and provenance migration. */
+export function assertVersionEightPopulationScaleInvariants(state: PopulationScaleState): void {
+  assertPopulationScaleInvariantsWithCohortLimit(state, MAX_AGGREGATE_RESIDENTS);
+}
+
 export function createPopulationScale(
   rng: Xoshiro128State,
   tick: number,
@@ -376,6 +418,13 @@ export function createPopulationScale(
 ): PopulationScaleState {
   const provisional: PopulationScaleState = {
     tick,
+    nextResidentId: Math.max(
+      FIRST_ORDINARY_RESIDENT_ID,
+      ...initialization.detailedResidents.map((resident) => resident.id + 1),
+      ...(initialization.cohorts?.flatMap((cohort) =>
+        cohort.residentIds.map((residentId) => residentId + 1),
+      ) ?? []),
+    ),
     nextCohortId: Math.max(0, ...(initialization.cohorts?.map((cohort) => cohort.id) ?? [])) + 1,
     nextTransferId: 1,
     rng,
@@ -411,13 +460,23 @@ export function advancePopulationScale(
     const due = [
       ...state.detailedResidents
         .filter((resident) => resident.nextUpdateTick <= tick)
-        .map((resident) => ({ kind: 'detail' as const, id: resident.id })),
+        .map((resident) => ({
+          kind: 'detail' as const,
+          id: resident.id,
+          scheduledTick: resident.nextUpdateTick,
+        })),
       ...state.cohorts
         .filter((cohort) => cohort.nextUpdateTick <= tick)
-        .map((cohort) => ({ kind: 'cohort' as const, id: cohort.id })),
+        .map((cohort) => ({
+          kind: 'cohort' as const,
+          id: cohort.id,
+          scheduledTick: cohort.nextUpdateTick,
+        })),
     ].sort(
       (left, right) =>
-        left.id - right.id || (left.kind === right.kind ? 0 : left.kind === 'detail' ? -1 : 1),
+        left.scheduledTick - right.scheduledTick ||
+        left.id - right.id ||
+        (left.kind === right.kind ? 0 : left.kind === 'detail' ? -1 : 1),
     );
     if (due.length === 0) {
       state = { ...state, tick, rng };
@@ -463,11 +522,10 @@ export function advancePopulationScale(
   return state;
 }
 
-export function aggregateResidents(
+function aggregateResidentsUnchecked(
   input: PopulationScaleState,
   residentIds: readonly number[],
 ): PopulationScaleState {
-  assertPopulationScaleInvariants(input);
   sortedUnique(residentIds, 'residentIds', MAX_DETAILED_RESIDENTS);
   if (residentIds.length === 0) throw new RangeError('Aggregation requires at least one resident.');
   const selectedIds = new Set(residentIds);
@@ -486,80 +544,118 @@ export function aggregateResidents(
       'Aggregation requires one preserved settlement/culture/household/tile classification.',
     );
   }
-  if (input.cohorts.length >= MAX_SCALE_COHORTS)
+  if (residentIds.length > MAX_SCALE_COHORT_RESIDENTS)
+    throw new RangeError('Aggregation exceeds the bounded cohort size.');
+  const existingCohort = input.cohorts
+    .filter(
+      (cohort) =>
+        sameClassification(cohort.classification, classification) &&
+        cohort.residentIds.length + residentIds.length <= MAX_SCALE_COHORT_RESIDENTS,
+    )
+    .sort(
+      (left, right) => left.residentIds.length - right.residentIds.length || left.id - right.id,
+    )[0];
+  if (existingCohort === undefined && input.cohorts.length >= MAX_SCALE_COHORTS)
     throw new RangeError('Scale cohort capacity exceeded.');
-  const cohort: AggregateCohortState = {
-    id: input.nextCohortId,
-    classification,
-    residentIds: [...residentIds],
-    householdCount: 1,
-    totals: totalsForResidents(selected),
-    nextUpdateTick: input.tick,
-    updateCount: 0,
-  };
+  const selectedTotals = totalsForResidents(selected);
+  const cohort: AggregateCohortState =
+    existingCohort === undefined
+      ? {
+          id: input.nextCohortId,
+          classification,
+          residentIds: [...residentIds],
+          householdCount: classification.householdId === 0 ? 0 : 1,
+          totals: selectedTotals,
+          nextUpdateTick: input.tick,
+          updateCount: 0,
+          promotionCursor: 0,
+        }
+      : {
+          ...existingCohort,
+          residentIds: [...existingCohort.residentIds, ...residentIds].sort(
+            (left, right) => left - right,
+          ),
+          totals: addTotals(existingCohort.totals, selectedTotals),
+        };
   const detailedResidents = input.detailedResidents.filter(
     (resident) => !selectedIds.has(resident.id),
   );
-  const cohorts = [...input.cohorts, cohort].sort((left, right) => left.id - right.id);
+  const cohorts =
+    existingCohort === undefined
+      ? [...input.cohorts, cohort].sort((left, right) => left.id - right.id)
+      : input.cohorts.map((candidate) => (candidate.id === cohort.id ? cohort : candidate));
   const transfers = appendTransfer(input, {
     tick: input.tick,
     kind: 'aggregated',
     cohortId: cohort.id,
-    residentCount: cohort.residentIds.length,
-    firstResidentId: cohort.residentIds[0]!,
-    lastResidentId: cohort.residentIds.at(-1)!,
-    totals: cohort.totals,
+    residentCount: residentIds.length,
+    firstResidentId: residentIds[0]!,
+    lastResidentId: residentIds.at(-1)!,
+    totals: selectedTotals,
   });
   const state: PopulationScaleState = {
     ...input,
-    nextCohortId: cohort.id + 1,
+    nextCohortId:
+      existingCohort === undefined
+        ? Math.max(input.nextCohortId, cohort.id + 1)
+        : input.nextCohortId,
     nextTransferId: input.nextTransferId + 1,
     detailedResidents,
     cohorts,
     transfers,
     backlog: normalizeBacklog(input.tick, detailedResidents, cohorts),
   };
+  return state;
+}
+
+export function aggregateResidents(
+  input: PopulationScaleState,
+  residentIds: readonly number[],
+): PopulationScaleState {
+  assertPopulationScaleInvariants(input);
+  const state = aggregateResidentsUnchecked(input, residentIds);
   assertPopulationScaleInvariants(state);
   return state;
 }
 
-export function deaggregateCohort(
+function deaggregateResidents(
   input: PopulationScaleState,
   cohortId: number,
-  residentCount: number,
+  selectedIds: readonly number[],
 ): PopulationScaleState {
-  assertPopulationScaleInvariants(input);
   assertPositiveId(cohortId, 'cohortId');
-  assertPositiveId(residentCount, 'residentCount');
+  sortedUnique(selectedIds, 'selectedIds', MAX_DETAILED_RESIDENTS);
+  if (selectedIds.length === 0) throw new RangeError('Deaggregation requires a resident.');
   const cohort = input.cohorts.find((candidate) => candidate.id === cohortId);
   if (!cohort) throw new RangeError('Unknown aggregate cohort.');
-  if (residentCount > cohort.residentIds.length)
-    throw new RangeError('Cannot deaggregate more residents than the cohort contains.');
-  if (input.detailedResidents.length + residentCount > MAX_DETAILED_RESIDENTS) {
+  const selectedSet = new Set(selectedIds);
+  if (selectedIds.some((id) => !cohort.residentIds.includes(id)))
+    throw new RangeError('Cannot deaggregate a resident outside the cohort.');
+  if (input.detailedResidents.length + selectedIds.length > MAX_DETAILED_RESIDENTS) {
     throw new RangeError('Detailed resident capacity exceeded.');
   }
-  const selectedIds = cohort.residentIds.slice(0, residentCount);
-  const restoredTotals = TOTAL_KEYS.reduce<AggregateTotals>(
-    (totals, key) => ({
-      ...totals,
-      [key]: selectedIds.reduce(
-        (sum, _id, index) => sum + distribute(cohort.totals[key], cohort.residentIds.length, index),
-        0,
-      ),
-    }),
-    zeroTotals(),
-  );
-  const detailedResidents = [
-    ...input.detailedResidents,
-    ...selectedIds.map((id, index): DetailedResidentState => ({
-      id,
-      ...cohort.classification,
+  const restoredTotals = { ...zeroTotals() };
+  const restoredResidents: DetailedResidentState[] = [];
+  const remainingIds: number[] = [];
+  for (let index = 0; index < cohort.residentIds.length; index += 1) {
+    const id = cohort.residentIds[index]!;
+    if (!selectedSet.has(id)) {
+      remainingIds.push(id);
+      continue;
+    }
+    const totals = {
       age: distribute(cohort.totals.age, cohort.residentIds.length, index),
       health: distribute(cohort.totals.health, cohort.residentIds.length, index),
       foodNeed: distribute(cohort.totals.foodNeed, cohort.residentIds.length, index),
       waterNeed: distribute(cohort.totals.waterNeed, cohort.residentIds.length, index),
       safety: distribute(cohort.totals.safety, cohort.residentIds.length, index),
       skill: distribute(cohort.totals.skill, cohort.residentIds.length, index),
+    };
+    for (const key of TOTAL_KEYS) restoredTotals[key] += totals[key];
+    restoredResidents.push({
+      id,
+      ...cohort.classification,
+      ...totals,
       importance: 0,
       nextUpdateTick: input.tick,
       updateCount: 0,
@@ -567,9 +663,11 @@ export function deaggregateCohort(
       relationshipIds: [],
       familyIds: [],
       eventIds: [],
-    })),
-  ].sort((left, right) => left.id - right.id);
-  const remainingIds = cohort.residentIds.slice(residentCount);
+    });
+  }
+  const detailedResidents = [...input.detailedResidents, ...restoredResidents].sort(
+    (left, right) => left.id - right.id,
+  );
   const cohorts = input.cohorts
     .flatMap((candidate) =>
       candidate.id !== cohortId
@@ -581,6 +679,7 @@ export function deaggregateCohort(
                 ...candidate,
                 residentIds: remainingIds,
                 totals: subtractTotals(candidate.totals, restoredTotals),
+                promotionCursor: candidate.promotionCursor + 1,
               },
             ],
     )
@@ -589,7 +688,7 @@ export function deaggregateCohort(
     tick: input.tick,
     kind: 'deaggregated',
     cohortId,
-    residentCount,
+    residentCount: selectedIds.length,
     firstResidentId: selectedIds[0]!,
     lastResidentId: selectedIds.at(-1)!,
     totals: restoredTotals,
@@ -602,6 +701,340 @@ export function deaggregateCohort(
     transfers,
     backlog: normalizeBacklog(input.tick, detailedResidents, cohorts),
   };
+  return state;
+}
+
+export function deaggregateCohort(
+  input: PopulationScaleState,
+  cohortId: number,
+  residentCount: number,
+): PopulationScaleState {
+  assertPopulationScaleInvariants(input);
+  assertPositiveId(residentCount, 'residentCount');
+  const cohort = input.cohorts.find((candidate) => candidate.id === cohortId);
+  if (!cohort) throw new RangeError('Unknown aggregate cohort.');
+  if (residentCount > cohort.residentIds.length)
+    throw new RangeError('Cannot deaggregate more residents than the cohort contains.');
+  const state = deaggregateResidents(input, cohortId, cohort.residentIds.slice(0, residentCount));
+  assertPopulationScaleInvariants(state);
+  return state;
+}
+
+/**
+ * Reconciles only population already owned by settlement authority but not represented by named
+ * people. Zero household provenance explicitly means no household or relationship history was
+ * inferred. The disjoint persisted allocator prevents future named births from colliding with
+ * these stable ordinary identities.
+ */
+export function reconcileAnonymousPopulation(
+  input: PopulationScaleState,
+  targets: readonly AnonymousPopulationTarget[],
+): PopulationScaleState {
+  assertPopulationScaleInvariants(input);
+  const orderedTargets = [...targets].sort((left, right) => left.settlementId - right.settlementId);
+  for (let index = 0; index < orderedTargets.length; index += 1) {
+    const target = orderedTargets[index]!;
+    assertPositiveId(target.settlementId, 'anonymous target settlementId');
+    assertPositiveId(target.civilizationId, 'anonymous target civilizationId');
+    assertPositiveId(target.cultureId, 'anonymous target cultureId');
+    assertNonNegativeInteger(target.tileIndex, 'anonymous target tileIndex');
+    assertNonNegativeInteger(target.residentCount, 'anonymous target residentCount');
+    if (index > 0 && orderedTargets[index - 1]!.settlementId === target.settlementId) {
+      throw new RangeError('Anonymous population targets must have unique settlement IDs.');
+    }
+  }
+
+  let state = input;
+  const ordinaryDetailGroups = new Map<string, number[]>();
+  for (const resident of state.detailedResidents) {
+    if (resident.householdId !== 0) continue;
+    if (isProtected(resident))
+      throw new RangeError('Anonymous settlement population cannot retain salient references.');
+    const classification = classificationFor(resident);
+    const key = [
+      classification.settlementId,
+      classification.civilizationId,
+      classification.cultureId,
+      classification.tileIndex,
+    ].join(':');
+    const ids = ordinaryDetailGroups.get(key) ?? [];
+    ids.push(resident.id);
+    ordinaryDetailGroups.set(key, ids);
+  }
+  for (const ids of [...ordinaryDetailGroups.values()].sort(
+    (left, right) => left[0]! - right[0]!,
+  )) {
+    state = aggregateResidentsUnchecked(state, ids);
+  }
+
+  const targetBySettlement = new Map(
+    orderedTargets.map((target) => [target.settlementId, target] as const),
+  );
+  const reclassifiedCohorts = state.cohorts.map((cohort) => {
+    if (cohort.classification.householdId !== 0) return cohort;
+    const target = targetBySettlement.get(cohort.classification.settlementId);
+    if (target === undefined) return cohort;
+    return {
+      ...cohort,
+      classification: {
+        settlementId: target.settlementId,
+        civilizationId: target.civilizationId,
+        cultureId: target.cultureId,
+        householdId: 0,
+        tileIndex: target.tileIndex,
+      },
+    };
+  });
+  if (reclassifiedCohorts.some((cohort, index) => cohort !== state.cohorts[index])) {
+    state = {
+      ...state,
+      cohorts: reclassifiedCohorts,
+      backlog: normalizeBacklog(state.tick, state.detailedResidents, reclassifiedCohorts),
+    };
+  }
+
+  const allSettlementIds = [
+    ...new Set([
+      ...orderedTargets.map((target) => target.settlementId),
+      ...state.cohorts
+        .filter((cohort) => cohort.classification.householdId === 0)
+        .map((cohort) => cohort.classification.settlementId),
+    ]),
+  ].sort((left, right) => left - right);
+  for (const settlementId of allSettlementIds) {
+    const target = targetBySettlement.get(settlementId);
+    const targetCount = target?.residentCount ?? 0;
+    let currentCount = state.cohorts
+      .filter(
+        (cohort) =>
+          cohort.classification.householdId === 0 &&
+          cohort.classification.settlementId === settlementId,
+      )
+      .reduce((total, cohort) => total + cohort.residentIds.length, 0);
+    if (currentCount < targetCount) {
+      if (target === undefined) throw new RangeError('Missing anonymous population target.');
+      const addCount = targetCount - currentCount;
+      const aggregateCount = state.cohorts.reduce(
+        (total, cohort) => total + cohort.residentIds.length,
+        0,
+      );
+      if (aggregateCount + addCount > MAX_AGGREGATE_RESIDENTS)
+        throw new RangeError('Aggregate resident capacity exceeded.');
+      if (state.nextResidentId + addCount - 1 > Number.MAX_SAFE_INTEGER)
+        throw new RangeError('Ordinary resident identity range exhausted.');
+      const classification: AggregateClassification = {
+        settlementId: target.settlementId,
+        civilizationId: target.civilizationId,
+        cultureId: target.cultureId,
+        householdId: 0,
+        tileIndex: target.tileIndex,
+      };
+      let remainingToAdd = addCount;
+      while (remainingToAdd > 0) {
+        const existing = state.cohorts
+          .filter(
+            (cohort) =>
+              sameClassification(cohort.classification, classification) &&
+              cohort.residentIds.length < MAX_SCALE_COHORT_RESIDENTS,
+          )
+          .sort(
+            (left, right) =>
+              left.residentIds.length - right.residentIds.length || left.id - right.id,
+          )[0];
+        if (existing === undefined && state.cohorts.length >= MAX_SCALE_COHORTS)
+          throw new RangeError('Scale cohort capacity exceeded.');
+        const capacity = MAX_SCALE_COHORT_RESIDENTS - (existing?.residentIds.length ?? 0);
+        const batchCount = Math.min(remainingToAdd, capacity);
+        const residentIds = Array.from(
+          { length: batchCount },
+          (_, index) => state.nextResidentId + index,
+        );
+        const cohort: AggregateCohortState =
+          existing === undefined
+            ? {
+                id: state.nextCohortId,
+                classification,
+                residentIds,
+                householdCount: 0,
+                totals: zeroTotals(),
+                nextUpdateTick: state.tick,
+                updateCount: 0,
+                promotionCursor: 0,
+              }
+            : {
+                ...existing,
+                residentIds: [...existing.residentIds, ...residentIds],
+              };
+        const cohorts =
+          existing === undefined
+            ? [...state.cohorts, cohort].sort((left, right) => left.id - right.id)
+            : state.cohorts.map((candidate) => (candidate.id === cohort.id ? cohort : candidate));
+        const transfers = appendTransfer(state, {
+          tick: state.tick,
+          kind: 'materialized',
+          cohortId: cohort.id,
+          residentCount: residentIds.length,
+          firstResidentId: residentIds[0]!,
+          lastResidentId: residentIds.at(-1)!,
+          totals: zeroTotals(),
+        });
+        state = {
+          ...state,
+          nextResidentId: state.nextResidentId + batchCount,
+          nextCohortId: existing === undefined ? state.nextCohortId + 1 : state.nextCohortId,
+          nextTransferId: state.nextTransferId + 1,
+          cohorts,
+          transfers,
+          backlog: normalizeBacklog(state.tick, state.detailedResidents, cohorts),
+        };
+        remainingToAdd -= batchCount;
+      }
+      currentCount += addCount;
+    }
+    if (currentCount <= targetCount) continue;
+
+    let removeCount = currentCount - targetCount;
+    const candidateCohorts = state.cohorts
+      .filter(
+        (cohort) =>
+          cohort.classification.householdId === 0 &&
+          cohort.classification.settlementId === settlementId,
+      )
+      .sort((left, right) => right.id - left.id);
+    for (const selectedCohort of candidateCohorts) {
+      if (removeCount === 0) break;
+      const cohort = state.cohorts.find((candidate) => candidate.id === selectedCohort.id);
+      if (cohort === undefined) continue;
+      const count = Math.min(removeCount, cohort.residentIds.length);
+      const firstRemovedIndex = cohort.residentIds.length - count;
+      const removedIds = cohort.residentIds.slice(firstRemovedIndex);
+      const remainingIds = cohort.residentIds.slice(0, firstRemovedIndex);
+      const removedTotals = TOTAL_KEYS.reduce<AggregateTotals>(
+        (totals, key) => ({
+          ...totals,
+          [key]: removedIds.reduce(
+            (sum, _id, offset) =>
+              sum +
+              distribute(cohort.totals[key], cohort.residentIds.length, firstRemovedIndex + offset),
+            0,
+          ),
+        }),
+        zeroTotals(),
+      );
+      const cohorts = state.cohorts.flatMap((candidate) =>
+        candidate.id !== cohort.id
+          ? [candidate]
+          : remainingIds.length === 0
+            ? []
+            : [
+                {
+                  ...candidate,
+                  residentIds: remainingIds,
+                  totals: subtractTotals(candidate.totals, removedTotals),
+                },
+              ],
+      );
+      const transfers = appendTransfer(state, {
+        tick: state.tick,
+        kind: 'removed',
+        cohortId: cohort.id,
+        residentCount: removedIds.length,
+        firstResidentId: removedIds[0]!,
+        lastResidentId: removedIds.at(-1)!,
+        totals: removedTotals,
+      });
+      state = {
+        ...state,
+        nextTransferId: state.nextTransferId + 1,
+        cohorts,
+        transfers,
+        backlog: normalizeBacklog(state.tick, state.detailedResidents, cohorts),
+      };
+      removeCount -= count;
+    }
+    if (removeCount !== 0) throw new RangeError('Anonymous population reconciliation failed.');
+  }
+  assertPopulationScaleInvariants(state);
+  return state;
+}
+
+/**
+ * Applies bounded, camera-independent production LOD. Updated ordinary detail records collapse
+ * into classification cohorts; a rotating sample from mature cohorts is promoted for the next
+ * detailed pulse. Persisted cohort update counts and the pulse ordinal are the only cursors.
+ */
+export function reconcilePopulationLod(
+  input: PopulationScaleState,
+  pulseOrdinal: number,
+): PopulationScaleState {
+  assertPopulationScaleInvariants(input);
+  assertNonNegativeInteger(pulseOrdinal, 'pulseOrdinal');
+  let state = input;
+  const groups = new Map<string, number[]>();
+  for (const resident of state.detailedResidents) {
+    if (isProtected(resident) || resident.updateCount === 0) continue;
+    const classification = classificationFor(resident);
+    const key = [
+      classification.settlementId,
+      classification.civilizationId,
+      classification.cultureId,
+      classification.householdId,
+      classification.tileIndex,
+    ].join(':');
+    const ids = groups.get(key) ?? [];
+    ids.push(resident.id);
+    groups.set(key, ids);
+  }
+  const orderedGroups = [...groups.values()].sort((left, right) => left[0]! - right[0]!);
+  const aggregationStart =
+    orderedGroups.length === 0
+      ? 0
+      : (pulseOrdinal * MAX_LOD_TRANSFERS_PER_RECONCILE) % orderedGroups.length;
+  const selectedGroups = Array.from(
+    { length: Math.min(MAX_LOD_TRANSFERS_PER_RECONCILE, orderedGroups.length) },
+    (_, index) => orderedGroups[(aggregationStart + index) % orderedGroups.length]!,
+  );
+  for (const group of selectedGroups) {
+    const residentIds = group.slice(0, MAX_SCALE_COHORT_RESIDENTS);
+    const resident = state.detailedResidents.find((candidate) => candidate.id === residentIds[0]);
+    if (resident === undefined) continue;
+    const hasMatchingCohort = state.cohorts.some((cohort) =>
+      sameClassification(cohort.classification, classificationFor(resident)),
+    );
+    if (!hasMatchingCohort && state.cohorts.length >= MAX_SCALE_COHORTS) continue;
+    const aggregatePopulation = state.cohorts.reduce(
+      (total, cohort) => total + cohort.residentIds.length,
+      0,
+    );
+    if (aggregatePopulation + residentIds.length > MAX_AGGREGATE_RESIDENTS) continue;
+    state = aggregateResidentsUnchecked(state, residentIds);
+  }
+
+  const promotable = state.cohorts.filter((cohort) => cohort.updateCount > 0);
+  if (promotable.length === 0) {
+    assertPopulationScaleInvariants(state);
+    return state;
+  }
+  const promotionCount = Math.min(
+    MAX_LOD_TRANSFERS_PER_RECONCILE,
+    promotable.length,
+    MAX_DETAILED_RESIDENTS - state.detailedResidents.length,
+  );
+  if (promotionCount === 0) {
+    assertPopulationScaleInvariants(state);
+    return state;
+  }
+  const start = (pulseOrdinal * MAX_LOD_TRANSFERS_PER_RECONCILE) % promotable.length;
+  const selected = Array.from(
+    { length: promotionCount },
+    (_, index) => promotable[(start + index) % promotable.length]!,
+  );
+  for (const selectedCohort of selected) {
+    const cohort = state.cohorts.find((candidate) => candidate.id === selectedCohort.id);
+    if (cohort === undefined || cohort.residentIds.length === 0) continue;
+    const residentId = cohort.residentIds[cohort.promotionCursor % cohort.residentIds.length]!;
+    state = deaggregateResidents(state, cohort.id, [residentId]);
+  }
   assertPopulationScaleInvariants(state);
   return state;
 }

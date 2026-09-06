@@ -15,7 +15,13 @@ import {
 } from '../civilizations';
 import type { Xoshiro128State } from '../random';
 import {
+  FIRST_ORDINARY_RESIDENT_ID,
+  MAX_AGGREGATE_RESIDENTS,
+  MAX_DETAILED_RESIDENTS,
+  MAX_SCALE_COHORT_RESIDENTS,
   assertPopulationScaleInvariants,
+  assertVersionEightPopulationScaleInvariants,
+  createPopulationScale,
   type AggregateCohortState,
   type AggregateTotals,
   type DetailedResidentState,
@@ -103,13 +109,14 @@ export const WORLD_SNAPSHOT_FORMAT = 'chrono-forge-world';
 // A strict persisted-payload shape change must increment all three values and retain a
 // parser for the prior format below. This keeps development saves from silently being
 // reinterpreted as a newer schema.
-export const WORLD_SNAPSHOT_FORMAT_VERSION = 8;
-export const WORLD_ENGINE_VERSION = 8;
-export const WORLD_CONTENT_VERSION = 8;
+export const WORLD_SNAPSHOT_FORMAT_VERSION = 9;
+export const WORLD_ENGINE_VERSION = 9;
+export const WORLD_CONTENT_VERSION = 9;
 
 const WORLD_SNAPSHOT_VERSION_SIX = 6;
 const WORLD_SNAPSHOT_VERSION_SEVEN = 7;
 const WORLD_SNAPSHOT_VERSION_EIGHT = 8;
+const WORLD_SNAPSHOT_VERSION_NINE = 9;
 const MAX_WORLD_TILES = 1_000_000;
 const MAX_WORLD_SNAPSHOT_BYTES = 50 * 1024 * 1024;
 const MAX_EVENT_KIND_LENGTH = 64;
@@ -3708,7 +3715,7 @@ function parseVersionFiveWorldPayload(value: unknown, validate = true): WorldSta
   return current;
 }
 
-function parseVersionSixWorldPayload(value: unknown): WorldState {
+function parseVersionSixWorldPayload(value: unknown, validate = true): WorldState {
   if (!isRecord(value)) throw new Error('Snapshot payload must be an object.');
   assertExactKeys(
     value,
@@ -3728,7 +3735,7 @@ function parseVersionSixWorldPayload(value: unknown): WorldState {
     civilizations,
     ...initializeM8WorldAuthority({ ...world, civilizations }),
   });
-  assertWorldInvariants(current);
+  if (validate) assertWorldInvariants(current);
   return current;
 }
 
@@ -3750,7 +3757,11 @@ function parseScaleTotals(value: unknown, name: string): AggregateTotals {
   });
 }
 
-function parsePopulationScale(value: unknown, worldTick: number): PopulationScaleState {
+function parsePopulationScale(
+  value: unknown,
+  worldTick: number,
+  includesResidentAllocator: boolean,
+): PopulationScaleState {
   if (!isRecord(value)) throw new Error('Snapshot population scale must be an object.');
   assertExactKeys(
     value,
@@ -3759,6 +3770,7 @@ function parsePopulationScale(value: unknown, worldTick: number): PopulationScal
       'cohorts',
       'detailedResidents',
       'nextCohortId',
+      ...(includesResidentAllocator ? ['nextResidentId'] : []),
       'nextTransferId',
       'operationCount',
       'rng',
@@ -3822,7 +3834,7 @@ function parsePopulationScale(value: unknown, worldTick: number): PopulationScal
         householdId: safeInteger(
           candidate.householdId,
           `Snapshot detailed resident ${index} household`,
-          1,
+          includesResidentAllocator ? 0 : 1,
         ),
         tileIndex: safeInteger(candidate.tileIndex, `Snapshot detailed resident ${index} tile`),
         age: safeInteger(candidate.age, `Snapshot detailed resident ${index} age`),
@@ -3867,6 +3879,7 @@ function parsePopulationScale(value: unknown, worldTick: number): PopulationScal
           'householdCount',
           'id',
           'nextUpdateTick',
+          ...(includesResidentAllocator ? ['promotionCursor'] : []),
           'residentIds',
           'totals',
           'updateCount',
@@ -3899,7 +3912,7 @@ function parsePopulationScale(value: unknown, worldTick: number): PopulationScal
           householdId: safeInteger(
             candidate.classification.householdId,
             `Snapshot scale cohort ${index} household`,
-            1,
+            includesResidentAllocator ? 0 : 1,
           ),
           tileIndex: safeInteger(
             candidate.classification.tileIndex,
@@ -3913,7 +3926,7 @@ function parsePopulationScale(value: unknown, worldTick: number): PopulationScal
         householdCount: safeInteger(
           candidate.householdCount,
           `Snapshot scale cohort ${index} household count`,
-          1,
+          includesResidentAllocator ? 0 : 1,
         ),
         totals: parseScaleTotals(candidate.totals, `Snapshot scale cohort ${index} totals`),
         nextUpdateTick: safeInteger(
@@ -3921,6 +3934,12 @@ function parsePopulationScale(value: unknown, worldTick: number): PopulationScal
           `Snapshot scale cohort ${index} next update`,
         ),
         updateCount: safeInteger(candidate.updateCount, `Snapshot scale cohort ${index} updates`),
+        promotionCursor: includesResidentAllocator
+          ? safeInteger(
+              candidate.promotionCursor,
+              `Snapshot scale cohort ${index} promotion cursor`,
+            )
+          : 0,
       });
     }),
   );
@@ -3942,7 +3961,12 @@ function parsePopulationScale(value: unknown, worldTick: number): PopulationScal
         ],
         `Snapshot scale transfer ${index}`,
       );
-      if (candidate.kind !== 'aggregated' && candidate.kind !== 'deaggregated')
+      if (
+        candidate.kind !== 'aggregated' &&
+        candidate.kind !== 'deaggregated' &&
+        (!includesResidentAllocator ||
+          (candidate.kind !== 'materialized' && candidate.kind !== 'removed'))
+      )
         throw new Error(`Snapshot scale transfer ${index} kind is invalid.`);
       return Object.freeze({
         id: safeInteger(candidate.id, `Snapshot scale transfer ${index} id`, 1),
@@ -3976,6 +4000,17 @@ function parsePopulationScale(value: unknown, worldTick: number): PopulationScal
   );
   const state: PopulationScaleState = Object.freeze({
     tick: safeInteger(value.tick, 'Snapshot population scale tick', 0, worldTick),
+    nextResidentId: includesResidentAllocator
+      ? safeInteger(
+          value.nextResidentId,
+          'Snapshot population scale next resident',
+          FIRST_ORDINARY_RESIDENT_ID,
+        )
+      : Math.max(
+          FIRST_ORDINARY_RESIDENT_ID,
+          ...detailedResidents.map((resident) => resident.id + 1),
+          ...cohorts.flatMap((cohort) => cohort.residentIds.map((residentId) => residentId + 1)),
+        ),
     nextCohortId: safeInteger(value.nextCohortId, 'Snapshot population scale next cohort', 1),
     nextTransferId: safeInteger(value.nextTransferId, 'Snapshot population scale next transfer', 1),
     rng: parseRng(value.rng, 'Snapshot population scale rng'),
@@ -3989,7 +4024,8 @@ function parsePopulationScale(value: unknown, worldTick: number): PopulationScal
     }),
     operationCount: safeInteger(value.operationCount, 'Snapshot population scale operations'),
   });
-  assertPopulationScaleInvariants(state);
+  if (includesResidentAllocator) assertPopulationScaleInvariants(state);
+  else assertVersionEightPopulationScaleInvariants(state);
   return state;
 }
 
@@ -4020,7 +4056,11 @@ function parsePathRequest(value: unknown, name: string): PathCacheRequest {
   });
 }
 
-function parsePathCache(value: unknown, worldTick: number): PathCacheState {
+function parsePathCache(
+  value: unknown,
+  worldTick: number,
+  allowsDeferredFallback: boolean,
+): PathCacheState {
   if (!isRecord(value)) throw new Error('Snapshot path cache must be an object.');
   assertExactKeys(
     value,
@@ -4042,18 +4082,47 @@ function parsePathCache(value: unknown, worldTick: number): PathCacheState {
     value.pending.map((candidate, index): PendingPathRequest => {
       if (!isRecord(candidate))
         throw new Error(`Snapshot pending path ${index} must be an object.`);
+      const hasDeferredFallback =
+        'stage' in candidate ||
+        'fallbackExpansionOffset' in candidate ||
+        'fallbackEligibleTick' in candidate;
       assertExactKeys(
         candidate,
-        ['key', 'queuedAtTick', 'request', 'requestId'],
+        hasDeferredFallback && allowsDeferredFallback
+          ? [
+              'fallbackEligibleTick',
+              'fallbackExpansionOffset',
+              'key',
+              'queuedAtTick',
+              'request',
+              'requestId',
+              'stage',
+            ]
+          : ['key', 'queuedAtTick', 'request', 'requestId'],
         `Snapshot pending path ${index}`,
       );
       if (typeof candidate.key !== 'string')
         throw new Error(`Snapshot pending path ${index} key is invalid.`);
+      if (hasDeferredFallback && candidate.stage !== 'direct-fallback')
+        throw new Error(`Snapshot pending path ${index} stage is invalid.`);
       return Object.freeze({
         requestId: safeInteger(candidate.requestId, `Snapshot pending path ${index} id`, 1),
         key: candidate.key,
         queuedAtTick: safeInteger(candidate.queuedAtTick, `Snapshot pending path ${index} tick`),
         request: parsePathRequest(candidate.request, `Snapshot pending path ${index} request`),
+        ...(hasDeferredFallback
+          ? {
+              stage: 'direct-fallback' as const,
+              fallbackExpansionOffset: safeInteger(
+                candidate.fallbackExpansionOffset,
+                `Snapshot pending path ${index} fallback expansions`,
+              ),
+              fallbackEligibleTick: safeInteger(
+                candidate.fallbackEligibleTick,
+                `Snapshot pending path ${index} fallback eligible tick`,
+              ),
+            }
+          : {}),
       });
     }),
   );
@@ -4140,7 +4209,10 @@ function parsePathCache(value: unknown, worldTick: number): PathCacheState {
   return state;
 }
 
-function parseVersionEightWorldPayload(value: unknown): WorldState {
+function parseVersionEightOrNineWorldPayload(
+  value: unknown,
+  includesResidentAllocator: boolean,
+): WorldState {
   if (!isRecord(value)) throw new Error('Snapshot payload must be an object.');
   assertExactKeys(
     value,
@@ -4157,14 +4229,26 @@ function parseVersionEightWorldPayload(value: unknown): WorldState {
   const legacyPayload = { ...value };
   delete legacyPayload.populationScale;
   delete legacyPayload.pathCache;
-  const base = parseVersionSixWorldPayload(legacyPayload);
+  const base = parseVersionSixWorldPayload(legacyPayload, false);
   const current: WorldState = Object.freeze({
     ...base,
-    populationScale: parsePopulationScale(value.populationScale, base.tick),
-    pathCache: parsePathCache(value.pathCache, base.tick),
+    populationScale: parsePopulationScale(
+      value.populationScale,
+      base.tick,
+      includesResidentAllocator,
+    ),
+    pathCache: parsePathCache(value.pathCache, base.tick, includesResidentAllocator),
   });
-  assertWorldInvariants(current);
+  if (includesResidentAllocator) assertWorldInvariants(current);
   return current;
+}
+
+function parseVersionEightWorldPayload(value: unknown): WorldState {
+  return parseVersionEightOrNineWorldPayload(value, false);
+}
+
+function parseVersionNineWorldPayload(value: unknown): WorldState {
+  return parseVersionEightOrNineWorldPayload(value, true);
 }
 
 function parseEnvelope(snapshot: string): UnknownRecord {
@@ -4380,6 +4464,177 @@ function deserializeVersionSeven(envelope: UnknownRecord): WorldState {
   return deserializeVersionedWorld(envelope, WORLD_SNAPSHOT_VERSION_SEVEN);
 }
 
+const SCALE_TOTAL_KEYS = ['age', 'health', 'foodNeed', 'waterNeed', 'safety', 'skill'] as const;
+
+function versionEightPopulationScalePayload(state: PopulationScaleState): UnknownRecord {
+  assertVersionEightPopulationScaleInvariants(state);
+  return {
+    tick: state.tick,
+    nextCohortId: state.nextCohortId,
+    nextTransferId: state.nextTransferId,
+    rng: [...state.rng],
+    detailedResidents: state.detailedResidents.map((resident) => ({
+      ...resident,
+      rng: [...resident.rng],
+      relationshipIds: [...resident.relationshipIds],
+      familyIds: [...resident.familyIds],
+      eventIds: [...resident.eventIds],
+    })),
+    cohorts: state.cohorts.map((cohort) => ({
+      id: cohort.id,
+      classification: { ...cohort.classification },
+      residentIds: [...cohort.residentIds],
+      householdCount: cohort.householdCount,
+      totals: { ...cohort.totals },
+      nextUpdateTick: cohort.nextUpdateTick,
+      updateCount: cohort.updateCount,
+    })),
+    transfers: state.transfers.map((transfer) => ({
+      ...transfer,
+      totals: { ...transfer.totals },
+    })),
+    backlog: { ...state.backlog },
+    operationCount: state.operationCount,
+  };
+}
+
+function canonicalVersionEightWorldJson(world: WorldState): string {
+  const currentPopulationScale = initializeM8WorldAuthority(world).populationScale;
+  const payload = JSON.parse(
+    canonicalWorldJson({ ...world, populationScale: currentPopulationScale }),
+  ) as UnknownRecord;
+  payload.populationScale = versionEightPopulationScalePayload(world.populationScale);
+  return JSON.stringify(payload);
+}
+
+function legacyScaleTotalPortion(
+  total: number,
+  sourceCount: number,
+  startIndex: number,
+  length: number,
+): number {
+  const quotient = Math.floor(total / sourceCount);
+  const remainder = total % sourceCount;
+  const endIndex = startIndex + length;
+  return quotient * length + Math.max(0, Math.min(endIndex, remainder) - startIndex);
+}
+
+/**
+ * Normalizes every valid v8 population into v9's bounded anonymous settlement cohorts. Named
+ * living people retain their identity; every ordinary identity moves to the disjoint persisted
+ * allocator range. Splitting conserves every aggregate total without inventing history.
+ */
+function upgradeVersionEightPopulation(world: WorldState): WorldState {
+  const settlements = new Map(
+    world.civilizations.settlements.map((settlement) => [settlement.id, settlement] as const),
+  );
+  const livingNamedIds = new Set(
+    world.civilization.society.people.filter((person) => person.alive).map((person) => person.id),
+  );
+  const ordinaryIds = [
+    ...world.populationScale.detailedResidents
+      .filter((resident) => !livingNamedIds.has(resident.id))
+      .map((resident) => resident.id),
+    ...world.populationScale.cohorts.flatMap((cohort) => cohort.residentIds),
+  ].sort((left, right) => left - right);
+  if (ordinaryIds.length > MAX_AGGREGATE_RESIDENTS + MAX_DETAILED_RESIDENTS)
+    throw new Error('Version 8 population exceeds migration capacity.');
+  const ordinaryIdMap = new Map(
+    ordinaryIds.map(
+      (residentId, index) => [residentId, FIRST_ORDINARY_RESIDENT_ID + index] as const,
+    ),
+  );
+  const settlementFor = (settlementId: number) => {
+    const settlement = settlements.get(settlementId);
+    if (settlement === undefined || settlement.status === 'abandoned')
+      throw new Error('Version 8 population references an inactive settlement.');
+    return settlement;
+  };
+  const detailedResidents = world.populationScale.detailedResidents
+    .map((resident): DetailedResidentState => {
+      if (livingNamedIds.has(resident.id)) return resident;
+      const settlement = settlementFor(resident.settlementId);
+      return Object.freeze({
+        ...resident,
+        id: ordinaryIdMap.get(resident.id)!,
+        settlementId: settlement.id,
+        civilizationId: settlement.civilizationId,
+        cultureId: settlement.cultureId,
+        householdId: 0,
+        tileIndex: settlement.centerTileIndex,
+        importance: 0,
+        relationshipIds: Object.freeze([]),
+        familyIds: Object.freeze([]),
+        eventIds: Object.freeze([]),
+      });
+    })
+    .sort((left, right) => left.id - right.id);
+
+  let nextCohortId = world.populationScale.nextCohortId;
+  const cohorts: AggregateCohortState[] = [];
+  for (const legacy of world.populationScale.cohorts) {
+    const settlement = settlementFor(legacy.classification.settlementId);
+    const sourceCount = legacy.residentIds.length;
+    for (let start = 0; start < sourceCount; start += MAX_SCALE_COHORT_RESIDENTS) {
+      const residentIds = legacy.residentIds
+        .slice(start, start + MAX_SCALE_COHORT_RESIDENTS)
+        .map((residentId) => ordinaryIdMap.get(residentId)!);
+      const length = residentIds.length;
+      const totals = Object.fromEntries(
+        SCALE_TOTAL_KEYS.map((key) => [
+          key,
+          legacyScaleTotalPortion(legacy.totals[key], sourceCount, start, length),
+        ]),
+      ) as unknown as AggregateTotals;
+      cohorts.push(
+        Object.freeze({
+          id: start === 0 ? legacy.id : nextCohortId++,
+          classification: Object.freeze({
+            settlementId: settlement.id,
+            civilizationId: settlement.civilizationId,
+            cultureId: settlement.cultureId,
+            householdId: 0,
+            tileIndex: settlement.centerTileIndex,
+          }),
+          residentIds: Object.freeze(residentIds),
+          householdCount: 0,
+          totals: Object.freeze(totals),
+          nextUpdateTick: legacy.nextUpdateTick,
+          updateCount: legacy.updateCount,
+          promotionCursor: 0,
+        }),
+      );
+    }
+  }
+  cohorts.sort((left, right) => left.id - right.id);
+
+  const base = createPopulationScale(world.populationScale.rng, world.populationScale.tick, {
+    detailedResidents,
+    cohorts,
+  });
+  const transfers = world.populationScale.transfers.map((transfer) => {
+    const firstResidentId = ordinaryIdMap.get(transfer.firstResidentId) ?? transfer.firstResidentId;
+    const lastResidentId = ordinaryIdMap.get(transfer.lastResidentId) ?? transfer.lastResidentId;
+    return Object.freeze({
+      ...transfer,
+      firstResidentId: Math.min(firstResidentId, lastResidentId),
+      lastResidentId: Math.max(firstResidentId, lastResidentId),
+    });
+  });
+  const populationScale: PopulationScaleState = Object.freeze({
+    ...base,
+    nextResidentId: FIRST_ORDINARY_RESIDENT_ID + ordinaryIds.length,
+    nextCohortId,
+    nextTransferId: world.populationScale.nextTransferId,
+    transfers: Object.freeze(transfers),
+    operationCount: world.populationScale.operationCount,
+  });
+  assertPopulationScaleInvariants(populationScale);
+  const upgraded = Object.freeze({ ...world, populationScale });
+  assertWorldInvariants(upgraded);
+  return upgraded;
+}
+
 /** Parses the strict v8 payload shape including population and cache authority. */
 function deserializeVersionEight(envelope: UnknownRecord): WorldState {
   assertExactKeys(
@@ -4399,8 +4654,39 @@ function deserializeVersionEight(envelope: UnknownRecord): WorldState {
   if (hashCanonicalJson(payloadJson) !== envelope.checksum)
     throw new Error('World snapshot checksum does not match its payload.');
   const world = parseVersionEightWorldPayload(envelope.payload);
-  if (canonicalWorldJson(world) !== payloadJson) {
-    const canonical = canonicalWorldJson(world);
+  const canonical = canonicalVersionEightWorldJson(world);
+  if (canonical !== payloadJson) {
+    let difference = 0;
+    while (difference < canonical.length && canonical[difference] === payloadJson[difference])
+      difference += 1;
+    throw new Error(
+      `World snapshot payload is not canonical at byte ${difference}: ${payloadJson.slice(difference, difference + 80)} != ${canonical.slice(difference, difference + 80)}.`,
+    );
+  }
+  return upgradeVersionEightPopulation(world);
+}
+
+/** Parses the strict v9 payload shape including the persisted ordinary-resident allocator. */
+function deserializeVersionNine(envelope: UnknownRecord): WorldState {
+  assertExactKeys(
+    envelope,
+    ['checksum', 'contentVersion', 'engineVersion', 'format', 'formatVersion', 'payload'],
+    'World snapshot envelope',
+  );
+  if (
+    envelope.formatVersion !== WORLD_SNAPSHOT_VERSION_NINE ||
+    envelope.engineVersion !== WORLD_SNAPSHOT_VERSION_NINE ||
+    envelope.contentVersion !== WORLD_SNAPSHOT_VERSION_NINE ||
+    typeof envelope.checksum !== 'string'
+  ) {
+    throw new Error('World snapshot version metadata is invalid.');
+  }
+  const payloadJson = JSON.stringify(envelope.payload);
+  if (hashCanonicalJson(payloadJson) !== envelope.checksum)
+    throw new Error('World snapshot checksum does not match its payload.');
+  const world = parseVersionNineWorldPayload(envelope.payload);
+  const canonical = canonicalWorldJson(world);
+  if (canonical !== payloadJson) {
     let difference = 0;
     while (difference < canonical.length && canonical[difference] === payloadJson[difference])
       difference += 1;
@@ -4512,6 +4798,9 @@ export function migrateWorldSnapshot(snapshot: string): string {
   if (formatVersion > WORLD_SNAPSHOT_FORMAT_VERSION) {
     throw new Error(`World snapshot version ${formatVersion} is newer than this application.`);
   }
+  if (formatVersion === WORLD_SNAPSHOT_VERSION_NINE) {
+    return serializeWorldSnapshot(deserializeVersionNine(envelope));
+  }
   if (formatVersion === WORLD_SNAPSHOT_VERSION_EIGHT) {
     return serializeWorldSnapshot(deserializeVersionEight(envelope));
   }
@@ -4568,5 +4857,5 @@ export function migrateWorldSnapshot(snapshot: string): string {
 /** Loads and validates a supported snapshot without mutating its input. */
 export function deserializeWorldSnapshot(snapshot: string): WorldState {
   const migrated = migrateWorldSnapshot(snapshot);
-  return deserializeVersionEight(parseEnvelope(migrated));
+  return deserializeVersionNine(parseEnvelope(migrated));
 }

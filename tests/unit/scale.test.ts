@@ -1,8 +1,10 @@
 import { describe, expect, it } from 'vitest';
 
 import {
+  FIRST_ORDINARY_RESIDENT_ID,
   MAX_AGGREGATE_RESIDENTS,
   MAX_DETAILED_RESIDENTS,
+  MAX_SCALE_COHORT_RESIDENTS,
   MAX_SCALE_TRANSFER_DELTAS,
   advancePopulationScale,
   aggregateResidents,
@@ -10,6 +12,8 @@ import {
   createPopulationScale,
   deaggregateCohort,
   populationScaleDto,
+  reconcileAnonymousPopulation,
+  reconcilePopulationLod,
   type AggregateCohortState,
   type DetailedResidentState,
 } from '../../src/simulation/scale';
@@ -66,7 +70,18 @@ function cohort(count: number, id = 1, firstResidentId = 10_001): AggregateCohor
     },
     nextUpdateTick: 0,
     updateCount: 0,
+    promotionCursor: 0,
   };
+}
+
+function fullAggregateCohorts(firstResidentId = MAX_DETAILED_RESIDENTS + 1) {
+  return Array.from({ length: MAX_AGGREGATE_RESIDENTS / MAX_SCALE_COHORT_RESIDENTS }, (_, index) =>
+    cohort(
+      MAX_SCALE_COHORT_RESIDENTS,
+      index + 1,
+      firstResidentId + index * MAX_SCALE_COHORT_RESIDENTS,
+    ),
+  );
 }
 
 function allTotals(state: ReturnType<typeof createPopulationScale>) {
@@ -89,12 +104,15 @@ describe('M8 deterministic population scale authority', () => {
       detailedResidents: Array.from({ length: MAX_DETAILED_RESIDENTS }, (_, index) =>
         resident(index + 1),
       ),
-      cohorts: [cohort(MAX_AGGREGATE_RESIDENTS, 1, MAX_DETAILED_RESIDENTS + 1)],
+      cohorts: fullAggregateCohorts(),
     });
 
     expect(state.detailedResidents).toHaveLength(MAX_DETAILED_RESIDENTS);
-    expect(state.cohorts[0]?.residentIds).toHaveLength(MAX_AGGREGATE_RESIDENTS);
-    expect(state.backlog).toStrictEqual({ detailedDue: 5_000, cohortDue: 1, totalDue: 5_001 });
+    expect(state.cohorts).toHaveLength(100);
+    expect(state.cohorts.flatMap((entry) => entry.residentIds)).toHaveLength(
+      MAX_AGGREGATE_RESIDENTS,
+    );
+    expect(state.backlog).toStrictEqual({ detailedDue: 5_000, cohortDue: 100, totalDue: 5_100 });
   });
 
   it('is partition-equivalent with deterministic fixed-quota schedule and isolated RNGs', () => {
@@ -109,6 +127,20 @@ describe('M8 deterministic population scale authority', () => {
     expect(populationScaleDto(partitioned)).toStrictEqual(populationScaleDto(oneShot));
     expect(oneShot.operationCount).toBeGreaterThan(0);
     expect(oneShot.backlog.totalDue).toBeLessThanOrEqual(5_256);
+  });
+
+  it('services every detailed resident under the full fixed-quota backlog without ID starvation', () => {
+    const initial = createPopulationScale(SEED, 0, {
+      detailedResidents: Array.from({ length: MAX_DETAILED_RESIDENTS }, (_, index) =>
+        resident(index + 1),
+      ),
+    });
+    const advanced = advancePopulationScale(initial, 40);
+
+    expect(advanced.operationCount).toBe(MAX_DETAILED_RESIDENTS);
+    expect(advanced.backlog.totalDue).toBe(0);
+    expect(advanced.detailedResidents[0]?.updateCount).toBe(1);
+    expect(advanced.detailedResidents.at(-1)?.updateCount).toBe(1);
   });
 
   it('rejects protected historical, social, family, and event records from aggregation', () => {
@@ -140,6 +172,149 @@ describe('M8 deterministic population scale authority', () => {
       'aggregated',
       'deaggregated',
     ]);
+  });
+
+  it('reports only the newly merged residents and totals in an aggregation transfer', () => {
+    const initial = createPopulationScale(SEED, 10, {
+      detailedResidents: [resident(1), resident(2)],
+    });
+    const first = aggregateResidents(initial, [1]);
+    const merged = aggregateResidents(first, [2]);
+
+    expect(merged.cohorts[0]?.residentIds).toStrictEqual([1, 2]);
+    expect(merged.transfers.at(-1)).toMatchObject({
+      kind: 'aggregated',
+      residentCount: 1,
+      firstResidentId: 2,
+      lastResidentId: 2,
+      totals: {
+        age: resident(2).age,
+        health: resident(2).health,
+        foodNeed: resident(2).foodNeed,
+        waterNeed: resident(2).waterNeed,
+        safety: resident(2).safety,
+        skill: resident(2).skill,
+      },
+    });
+  });
+
+  it('rotates an ordinary detailed sample through mature cohorts without touching protected lives', () => {
+    const initial = createPopulationScale(SEED, 0, {
+      detailedResidents: [
+        resident(1, { importance: 1, updateCount: 1 }),
+        resident(2, { updateCount: 1 }),
+        resident(3, { updateCount: 1 }),
+        resident(4, { updateCount: 1 }),
+      ],
+    });
+    const beforeTotals = allTotals(initial);
+    const collapsed = reconcilePopulationLod(initial, 0);
+
+    expect(collapsed.detailedResidents.map((value) => value.id)).toStrictEqual([1]);
+    expect(collapsed.cohorts[0]?.residentIds).toStrictEqual([2, 3, 4]);
+
+    const mature = advancePopulationScale(collapsed, 16);
+    const promoted = reconcilePopulationLod(mature, 1);
+    expect(promoted.detailedResidents.map((value) => value.id)).toStrictEqual([1, 2]);
+    expect(promoted.cohorts[0]?.residentIds).toStrictEqual([3, 4]);
+    expect(allTotals(promoted)).toStrictEqual(beforeTotals);
+
+    const rotated = reconcilePopulationLod(advancePopulationScale(promoted, 64), 2);
+    expect(rotated.detailedResidents.map((value) => value.id)).toStrictEqual([1, 3]);
+    expect(rotated.cohorts[0]?.residentIds).toStrictEqual([2, 4]);
+    expect(allTotals(rotated)).toStrictEqual(beforeTotals);
+    expect(() => assertPopulationScaleInvariants(rotated)).not.toThrow();
+  });
+
+  it('services more than one aggregation quota of classifications without starvation', () => {
+    const initial = createPopulationScale(SEED, 0, {
+      detailedResidents: Array.from({ length: 33 }, (_, index) =>
+        resident(index + 1, { householdId: index + 1, updateCount: 1 }),
+      ),
+    });
+    const first = reconcilePopulationLod(initial, 0);
+    const second = reconcilePopulationLod(first, 1);
+    let completed = second;
+    for (let pulse = 2; pulse < 33; pulse += 1) {
+      completed = reconcilePopulationLod(completed, pulse);
+    }
+
+    expect(first.cohorts).toHaveLength(1);
+    expect(second.cohorts).toHaveLength(2);
+    expect(completed.cohorts).toHaveLength(33);
+    expect(completed.detailedResidents).toStrictEqual([]);
+    expect(
+      completed.cohorts.flatMap((entry) => entry.residentIds).sort((left, right) => left - right),
+    ).toStrictEqual(Array.from({ length: 33 }, (_, index) => index + 1));
+  });
+
+  it('leaves valid authority at detail and aggregate capacity instead of over-promoting or collapsing', () => {
+    const fullDetail = createPopulationScale(SEED, 0, {
+      detailedResidents: Array.from({ length: MAX_DETAILED_RESIDENTS }, (_, index) =>
+        resident(index + 1, { importance: 1 }),
+      ),
+      cohorts: [cohort(1, 1, MAX_DETAILED_RESIDENTS + 1)],
+    });
+    const fullAggregate = createPopulationScale(SEED, 0, {
+      detailedResidents: [resident(1, { updateCount: 1 })],
+      cohorts: fullAggregateCohorts(10_001),
+    });
+
+    expect(reconcilePopulationLod(fullDetail, 0)).toStrictEqual(fullDetail);
+    expect(reconcilePopulationLod(fullAggregate, 0)).toStrictEqual(fullAggregate);
+  });
+
+  it('promotes every member even when cohort size shares a divisor with update cadence', () => {
+    let state = createPopulationScale(SEED, 0, {
+      detailedResidents: [],
+      cohorts: [cohort(6)],
+    });
+    const promotedIds: number[] = [];
+
+    for (let pulse = 0; pulse < 6; pulse += 1) {
+      state = advancePopulationScale(state, pulse === 0 ? 16 : 64);
+      state = reconcilePopulationLod(state, pulse);
+      promotedIds.push(state.transfers.at(-1)!.firstResidentId);
+    }
+
+    expect(promotedIds).toStrictEqual([10_001, 10_002, 10_003, 10_004, 10_005, 10_006]);
+    expect(() => assertPopulationScaleInvariants(state)).not.toThrow();
+  });
+
+  it('materializes and removes anonymous settlement surplus without reusing identities', () => {
+    const initial = createPopulationScale(SEED, 0, { detailedResidents: [resident(1)] });
+    const target = {
+      settlementId: 1,
+      civilizationId: 1,
+      cultureId: 1,
+      tileIndex: 9,
+      residentCount: 5,
+    };
+    const materialized = reconcileAnonymousPopulation(initial, [target]);
+    expect(materialized.cohorts[0]).toMatchObject({
+      classification: { householdId: 0 },
+      householdCount: 0,
+      residentIds: Array.from({ length: 5 }, (_, index) => FIRST_ORDINARY_RESIDENT_ID + index),
+    });
+    expect(materialized.transfers.at(-1)?.kind).toBe('materialized');
+
+    const reduced = reconcileAnonymousPopulation(materialized, [{ ...target, residentCount: 2 }]);
+    expect(reduced.cohorts[0]?.residentIds).toStrictEqual([
+      FIRST_ORDINARY_RESIDENT_ID,
+      FIRST_ORDINARY_RESIDENT_ID + 1,
+    ]);
+    expect(reduced.transfers.at(-1)?.kind).toBe('removed');
+
+    const regrown = reconcileAnonymousPopulation(reduced, [target]);
+    expect(regrown.cohorts[0]?.residentIds).toStrictEqual([
+      FIRST_ORDINARY_RESIDENT_ID,
+      FIRST_ORDINARY_RESIDENT_ID + 1,
+      FIRST_ORDINARY_RESIDENT_ID + 5,
+      FIRST_ORDINARY_RESIDENT_ID + 6,
+      FIRST_ORDINARY_RESIDENT_ID + 7,
+    ]);
+    expect(regrown.nextResidentId).toBe(FIRST_ORDINARY_RESIDENT_ID + 8);
+    expect(() => assertPopulationScaleInvariants(regrown)).not.toThrow();
   });
 
   it('bounds structured transfers and reports deterministic due-work backlog', () => {
