@@ -1,4 +1,9 @@
-import { WORKER_PROTOCOL_VERSION, type WorkerToUiMessage } from '../../src/protocol';
+import {
+  WORKER_PROTOCOL_VERSION,
+  type WorkerToUiMessage,
+  type WorldFrameProjection,
+} from '../../src/protocol';
+import { applyWorldFrameDelta } from '../../src/protocol/frame-delta';
 import { createInitialWorld, hashWorldState, stepWorld } from '../../src/simulation/world';
 import {
   createSimulationRuntime,
@@ -6,6 +11,19 @@ import {
 } from '../../src/workers/simulation-runtime';
 
 describe('worker runtime determinism', () => {
+  function reconstructedFrame(messages: readonly WorkerToUiMessage[]): WorldFrameProjection {
+    let frame: WorldFrameProjection | undefined;
+    for (const message of messages) {
+      if (message.type === 'ready') frame = message.frame;
+      if (message.type === 'frameDelta') {
+        if (frame === undefined) throw new Error('Worker sent a delta before ready.');
+        frame = applyWorldFrameDelta(frame, message.delta);
+      }
+    }
+    if (frame === undefined) throw new Error('Worker did not emit a frame.');
+    return frame;
+  }
+
   it('preserves the M6 projection across equivalent Worker tick partitions', () => {
     const run = (partitions: readonly number[]) => {
       const responses: WorkerToUiMessage[] = [];
@@ -25,9 +43,7 @@ describe('worker runtime determinism', () => {
           ticks,
         });
       }
-      const frame = responses.filter((message) => message.type === 'frameDelta').at(-1);
-      if (frame?.type !== 'frameDelta') throw new Error('Worker runtime did not emit an M6 frame.');
-      return frame.frame;
+      return reconstructedFrame(responses);
     };
 
     const direct = run([25_000]);
@@ -56,12 +72,7 @@ describe('worker runtime determinism', () => {
       ticks: 250,
     });
 
-    const frame = responses.find((message) => message.type === 'frameDelta');
-    expect(frame?.type).toBe('frameDelta');
-    if (frame?.type !== 'frameDelta') {
-      throw new Error('Worker runtime did not emit a frame delta.');
-    }
-    expect(frame.frame.stateHash).toBe(mainRuntimeHash);
+    expect(reconstructedFrame(responses).stateHash).toBe(mainRuntimeHash);
   });
 
   it('produces identical offline events, hashes, and snapshots for identical explicit inputs', () => {

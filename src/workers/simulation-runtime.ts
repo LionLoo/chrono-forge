@@ -9,7 +9,6 @@ import {
   type AdvanceTicksRequest,
   type CivilizationsProjection,
   type DevelopmentProjection,
-  type FrameDeltaResponse,
   type InitializeRequest,
   type LoadRequest,
   type PerformOfflineCatchUpRequest,
@@ -26,6 +25,11 @@ import {
   type WorkerToUiMessage,
   type WorldFrameProjection,
 } from '../protocol';
+import {
+  createWorldFrameDelta,
+  estimateFrameDeltaPayloadBytes,
+  frameDeltaTransferables,
+} from '../protocol/frame-delta';
 import {
   MAX_ACTIVE_CIVILIZATIONS,
   MAX_ACTIVE_CONFLICTS,
@@ -920,13 +924,45 @@ export function projectWorldFrame(state: WorldState): WorldFrameProjection {
 export function createSimulationRuntime(post: RuntimePost): SimulationRuntime {
   let world: WorldState | undefined;
   let runMode: RunMode = 'paused';
+  // Transport-only base. It is never returned to UI code or used as world authority.
+  let lastEmittedFrame: WorldFrameProjection | undefined;
 
   function emit(message: WorkerToUiMessage): void {
     const transfer =
-      message.type === 'ready' || message.type === 'frameDelta'
+      message.type === 'ready'
         ? projectionTransferables(message.frame)
-        : [];
+        : message.type === 'frameDelta'
+          ? frameDeltaTransferables(message.delta)
+          : [];
     post(message, transfer);
+  }
+
+  function emitReady(requestId: string): void {
+    if (world === undefined) throw new Error('Cannot emit a ready frame before initialization.');
+    // The ready frame's buffers transfer to the UI. Keep a separate immutable full
+    // projection so the next delta never reads detached transfer buffers.
+    lastEmittedFrame = projectWorldFrame(world);
+    emit({
+      type: 'ready',
+      protocolVersion: WORKER_PROTOCOL_VERSION,
+      requestId,
+      frame: projectWorldFrame(world),
+    });
+  }
+
+  function emitOrderedFrameDelta(requestId: string): void {
+    if (world === undefined || lastEmittedFrame === undefined)
+      throw new Error('Cannot emit a frame delta before a ready frame establishes its base.');
+    const nextFrame = projectWorldFrame(world);
+    const delta = createWorldFrameDelta(lastEmittedFrame, nextFrame);
+    lastEmittedFrame = nextFrame;
+    emit({
+      type: 'frameDelta',
+      protocolVersion: WORKER_PROTOCOL_VERSION,
+      requestId,
+      delta,
+      payloadBytes: estimateFrameDeltaPayloadBytes(delta),
+    });
   }
 
   function fault(requestId: string, code: WorkerFaultCode, message: string): void {
@@ -975,12 +1011,8 @@ export function createSimulationRuntime(post: RuntimePost): SimulationRuntime {
   function initialize(request: InitializeRequest): void {
     world = createInitialWorld(request.seed, request.config);
     runMode = 'paused';
-    emit({
-      type: 'ready',
-      protocolVersion: WORKER_PROTOCOL_VERSION,
-      requestId: request.requestId,
-      frame: projectWorldFrame(world),
-    });
+    lastEmittedFrame = undefined;
+    emitReady(request.requestId);
     emitEvents(request.requestId, world.eventLog);
     metrics(request.requestId);
   }
@@ -993,13 +1025,7 @@ export function createSimulationRuntime(post: RuntimePost): SimulationRuntime {
     assertValidTicks(request.ticks);
     const priorEventCount = world.eventLog.length;
     world = stepWorld(world, request.ticks);
-    const response: FrameDeltaResponse = {
-      type: 'frameDelta',
-      protocolVersion: WORKER_PROTOCOL_VERSION,
-      requestId: request.requestId,
-      frame: projectWorldFrame(world),
-    };
-    emit(response);
+    emitOrderedFrameDelta(request.requestId);
     emitEvents(request.requestId, world.eventLog.slice(priorEventCount));
     metrics(request.requestId);
   }
@@ -1007,12 +1033,8 @@ export function createSimulationRuntime(post: RuntimePost): SimulationRuntime {
   function load(request: LoadRequest): void {
     world = deserializeWorldSnapshot(request.snapshot);
     runMode = 'paused';
-    emit({
-      type: 'ready',
-      protocolVersion: WORKER_PROTOCOL_VERSION,
-      requestId: request.requestId,
-      frame: projectWorldFrame(world),
-    });
+    lastEmittedFrame = undefined;
+    emitReady(request.requestId);
     emitEvents(request.requestId, world.eventLog);
     metrics(request.requestId);
   }
@@ -1111,12 +1133,7 @@ export function createSimulationRuntime(post: RuntimePost): SimulationRuntime {
         summary: `Bounded offline progression reached tick ${world.tick}.`,
       });
     }
-    emit({
-      type: 'frameDelta',
-      protocolVersion: WORKER_PROTOCOL_VERSION,
-      requestId: request.requestId,
-      frame: projectWorldFrame(world),
-    });
+    emitOrderedFrameDelta(request.requestId);
     emitEvents(request.requestId, world.eventLog.slice(priorEventCount));
     metrics(request.requestId);
   }

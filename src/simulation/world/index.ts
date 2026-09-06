@@ -29,6 +29,24 @@ import {
 } from '../development';
 import { deriveXoshiro128State, Xoshiro128StarStar } from '../random';
 import {
+  FIRST_ORDINARY_RESIDENT_ID,
+  advancePopulationScale,
+  assertPopulationScaleInvariants,
+  createPopulationScale,
+  populationScaleDto,
+  reconcileAnonymousPopulation,
+  reconcilePopulationLod,
+  type DetailedResidentState,
+  type PopulationScaleState,
+} from '../scale';
+import {
+  assertPathCacheInvariants,
+  createPathCacheState,
+  invalidatePathCache,
+  toCanonicalPathCacheDto,
+  type PathCacheState,
+} from '../pathfinding/cache';
+import {
   childArrivalEligibilityEvidenceMatchesRecord,
   childArrivalEligibilityEventMatches,
   findActiveRelationship,
@@ -47,7 +65,7 @@ import {
   type SocietyAuthoritativeEvent,
 } from '../society';
 import {
-  advanceCivilization,
+  advanceCivilizationWithPathCache,
   assertCivilizationInvariants,
   attachFactualMemories,
   civilizationDto,
@@ -137,6 +155,10 @@ export interface WorldState extends WorldTileFields {
   readonly civilization: CivilizationState;
   readonly civilizations: CivilizationsState;
   readonly development: DevelopmentState;
+  /** Camera-independent detailed and aggregate population authority. */
+  readonly populationScale: PopulationScaleState;
+  /** Persisted deterministic cache authority; live request scheduling is separate. */
+  readonly pathCache: PathCacheState;
   /** Compatibility projection; it aliases the root-level authoritative fields. */
   readonly tiles: WorldTileFields;
 }
@@ -412,6 +434,234 @@ export function civilizationsInitializationForWorld(
   });
 }
 
+function sortedBoundedIds(ids: Iterable<number>, maximum: number): readonly number[] {
+  return Object.freeze(
+    [...new Set(ids)]
+      .filter((id) => Number.isSafeInteger(id) && id > 0)
+      .sort((left, right) => left - right)
+      .slice(0, maximum),
+  );
+}
+
+function namedScaleResidents(
+  state: Pick<WorldState, 'civilization' | 'civilizations' | 'config' | 'tick'>,
+): readonly DetailedResidentState[] {
+  const society = state.civilization.society;
+  const agentsById = new Map(state.civilization.agents.map((agent) => [agent.id, agent]));
+  const residencyByPersonId = new Map(
+    state.civilizations.residencies
+      .filter((residency) => residency.subjectKind === 'person' && residency.endedTick === null)
+      .map((residency) => [residency.subjectId, residency]),
+  );
+  const settlementsById = new Map(
+    state.civilizations.settlements.map((settlement) => [settlement.id, settlement]),
+  );
+  const primarySettlement = state.civilizations.settlements[0];
+  if (primarySettlement === undefined) throw new Error('World requires a primary settlement.');
+  const interpersonal = society.interpersonal;
+  return Object.freeze(
+    society.people
+      .filter((person) => person.alive)
+      .map((person): DetailedResidentState => {
+        const agent = agentsById.get(person.id);
+        if (agent === undefined)
+          throw new Error('Alive named people must retain a detailed agent record.');
+        const settlement =
+          settlementsById.get(residencyByPersonId.get(person.id)?.settlementId ?? -1) ??
+          primarySettlement;
+        const relationshipIds = sortedBoundedIds(
+          [...interpersonal.active, ...interpersonal.archived]
+            .filter(
+              (relationship) =>
+                relationship.firstPersonId === person.id ||
+                relationship.secondPersonId === person.id,
+            )
+            .map((relationship) => relationship.id),
+          24,
+        );
+        const familyIds = sortedBoundedIds(
+          interpersonal.familyBonds
+            .filter((bond) => bond.parentId === person.id || bond.childId === person.id)
+            .flatMap((bond) => [bond.parentId, bond.childId]),
+          16,
+        );
+        const eventIds = sortedBoundedIds(
+          [
+            ...person.biographyEventIds,
+            ...agent.memories.map((memory) => memory.eventId),
+            ...interpersonal.active.flatMap((relationship) =>
+              relationship.firstPersonId === person.id || relationship.secondPersonId === person.id
+                ? relationship.sharedEvents.map((event) => event.eventId)
+                : [],
+            ),
+            ...interpersonal.familyBonds.flatMap((bond) =>
+              bond.parentId === person.id || bond.childId === person.id
+                ? bond.sharedEvents.map((event) => event.eventId)
+                : [],
+            ),
+          ],
+          16,
+        );
+        return Object.freeze({
+          id: person.id,
+          settlementId: settlement.id,
+          civilizationId: settlement.civilizationId,
+          cultureId: person.cultureId,
+          householdId: person.householdId,
+          tileIndex: agent.tileIndex,
+          age: Math.trunc(agent.ageTicks / state.config.societyYearTicks),
+          health: agent.health,
+          foodNeed: agent.hunger,
+          waterNeed: agent.thirst,
+          safety: agent.safety,
+          skill: agent.skills.reduce((total, skill) => total + skill, 0),
+          // Society remains authoritative for these people; this makes every live named life
+          // ineligible for generic aggregation even before it acquires a social reference.
+          importance: 1,
+          nextUpdateTick: state.tick,
+          updateCount: 0,
+          rng: agent.rng,
+          relationshipIds,
+          familyIds,
+          eventIds,
+        });
+      })
+      .sort((left, right) => left.id - right.id),
+  );
+}
+
+function reconcileSettlementPopulationAuthority(
+  state: Pick<WorldState, 'civilization' | 'civilizations' | 'config' | 'populationScale' | 'tick'>,
+): PopulationScaleState {
+  const named = namedScaleResidents(state);
+  const namedBySettlement = new Map<number, number>();
+  for (const resident of named) {
+    namedBySettlement.set(
+      resident.settlementId,
+      (namedBySettlement.get(resident.settlementId) ?? 0) + 1,
+    );
+  }
+  return reconcileAnonymousPopulation(
+    state.populationScale,
+    [...state.civilizations.settlements]
+      .sort((left, right) => left.id - right.id)
+      .map((settlement) => ({
+        settlementId: settlement.id,
+        civilizationId: settlement.civilizationId,
+        cultureId: settlement.cultureId,
+        tileIndex: settlement.centerTileIndex,
+        residentCount:
+          settlement.status === 'abandoned'
+            ? 0
+            : Math.max(0, settlement.population - (namedBySettlement.get(settlement.id) ?? 0)),
+      })),
+  );
+}
+
+/** Initializes M8 state at a saved tick without replaying population or cache history. */
+export function initializeM8WorldAuthority(
+  state: Pick<WorldState, 'seed' | 'civilization' | 'civilizations' | 'config' | 'tick'>,
+): Pick<WorldState, 'populationScale' | 'pathCache'> {
+  const populationScale = createPopulationScale(
+    deriveXoshiro128State(state.seed, 'population-scale'),
+    state.tick,
+    { detailedResidents: namedScaleResidents(state) },
+  );
+  const reconciledPopulationScale = reconcileSettlementPopulationAuthority({
+    ...state,
+    populationScale,
+  });
+  const pathCache = Object.freeze({ ...createPathCacheState(0), logicalTick: state.tick });
+  assertPathCacheInvariants(pathCache);
+  return Object.freeze({ populationScale: reconciledPopulationScale, pathCache });
+}
+
+function synchronizePopulationScale(state: WorldState): PopulationScaleState {
+  const named = namedScaleResidents(state);
+  const namedIds = new Set(named.map((resident) => resident.id));
+  const societyPersonIds = new Set(state.civilization.society.people.map((person) => person.id));
+  const existingById = new Map(
+    state.populationScale.detailedResidents.map((resident) => [resident.id, resident]),
+  );
+  for (const cohort of state.populationScale.cohorts)
+    for (const residentId of cohort.residentIds)
+      if (namedIds.has(residentId))
+        throw new Error('Named residents cannot also appear in aggregate population authority.');
+  const detailedResidents = [
+    ...state.populationScale.detailedResidents.filter(
+      (resident) => !societyPersonIds.has(resident.id),
+    ),
+    ...named.map((resident) => {
+      const existing = existingById.get(resident.id);
+      return existing === undefined
+        ? resident
+        : Object.freeze({
+            ...resident,
+            nextUpdateTick: existing.nextUpdateTick,
+            updateCount: existing.updateCount,
+            rng: existing.rng,
+          });
+    }),
+  ].sort((left, right) => left.id - right.id);
+  const provisional = {
+    ...state.populationScale,
+    detailedResidents: Object.freeze(detailedResidents),
+  };
+  // The scale module keeps this denormalized telemetry intentionally explicit.
+  const rebuilt = createPopulationScale(provisional.rng, provisional.tick, {
+    detailedResidents: provisional.detailedResidents,
+    cohorts: provisional.cohorts,
+  });
+  const synchronized: PopulationScaleState = Object.freeze({
+    ...provisional,
+    backlog: rebuilt.backlog,
+  });
+  assertPopulationScaleInvariants(synchronized);
+  return synchronized;
+}
+
+function synchronizeSettlementPopulation(state: WorldState): WorldState {
+  const populationBySettlement = new Map<number, number>();
+  for (const resident of state.populationScale.detailedResidents)
+    populationBySettlement.set(
+      resident.settlementId,
+      (populationBySettlement.get(resident.settlementId) ?? 0) + 1,
+    );
+  for (const cohort of state.populationScale.cohorts)
+    populationBySettlement.set(
+      cohort.classification.settlementId,
+      (populationBySettlement.get(cohort.classification.settlementId) ?? 0) +
+        cohort.residentIds.length,
+    );
+  return Object.freeze({
+    ...state,
+    civilizations: Object.freeze({
+      ...state.civilizations,
+      settlements: Object.freeze(
+        state.civilizations.settlements.map((settlement) =>
+          Object.freeze({
+            ...settlement,
+            population: populationBySettlement.get(settlement.id) ?? 0,
+          }),
+        ),
+      ),
+    }),
+  });
+}
+
+/**
+ * Adopts an already-authoritative settlement population change into M8 scale authority. This is
+ * the only bridge for anonymous population; it never creates society people or relationship data.
+ */
+export function reconcileWorldPopulationAuthority(state: WorldState): WorldState {
+  return synchronizeSettlementPopulation(
+    Object.freeze({
+      ...state,
+      populationScale: reconcileSettlementPopulationAuthority(state),
+    }),
+  );
+}
+
 /** Builds an immutable world snapshot from only a seed and integer configuration. */
 export function createInitialWorld(
   seed: WorldSeed,
@@ -608,6 +858,13 @@ export function createInitialWorld(
       civilization: foundedCivilization,
     }),
   );
+  const m8 = initializeM8WorldAuthority({
+    seed: normalizedSeed,
+    config,
+    tick: 0,
+    civilization: foundedCivilization,
+    civilizations,
+  });
 
   return Object.freeze({
     seed: Object.freeze(normalizedSeed),
@@ -619,6 +876,7 @@ export function createInitialWorld(
     civilization: foundedCivilization,
     civilizations,
     development: createInitialDevelopment(normalizedSeed, 0),
+    ...m8,
     ...tiles,
     tiles,
   });
@@ -1026,6 +1284,34 @@ function applyDevelopmentResult(
     ...tileFields,
     tiles: tileFields,
   });
+  const changedWalkabilityTiles: number[] = [];
+  for (let index = 0; index < state.hazard.length; index += 1) {
+    if (isWalkableTile(state, index) !== isWalkableTile(next, index)) {
+      changedWalkabilityTiles.push(index);
+    }
+  }
+  if (changedWalkabilityTiles.length > 0) {
+    const changed = new Set(changedWalkabilityTiles);
+    const agentsWithValidRoutes = Object.freeze(
+      next.civilization.agents.map((agent) =>
+        agent.route.slice(agent.routeCursor + 1).some((tile) => changed.has(tile))
+          ? Object.freeze({ ...agent, route: Object.freeze([]), routeCursor: 0 })
+          : agent,
+      ),
+    );
+    next = Object.freeze({
+      ...next,
+      pathCache: invalidatePathCache(
+        next.pathCache,
+        next.pathCache.terrainRevision + 1,
+        changedWalkabilityTiles,
+      ),
+      civilization: Object.freeze({
+        ...next.civilization,
+        agents: agentsWithValidRoutes,
+      }),
+    });
+  }
   const created: WorldEvent[] = [];
   for (const event of result.events) {
     next = appendWorldEvent(next, event.kind, tick, {
@@ -1072,6 +1358,7 @@ function settlementTerrain(state: WorldState): SettlementTerrain {
   return Object.freeze({
     width: state.config.width,
     height: state.config.height,
+    chunkSize: state.config.chunkSize,
     food: state.food,
     freshWater: state.freshWater,
     timber: state.timber,
@@ -1809,61 +2096,52 @@ function reconcileCivilizationResidencies(state: WorldState): CivilizationsState
     nextEntityId += 1;
     operations += 1;
   }
-  const namedPopulation = new Map<number, number>();
-  for (const residency of residencies)
-    if (residency.subjectKind === 'person' && residency.endedTick === null)
-      namedPopulation.set(
-        residency.settlementId,
-        (namedPopulation.get(residency.settlementId) ?? 0) + 1,
-      );
   return Object.freeze({
     ...state.civilizations,
     nextEntityId,
     residencies: Object.freeze(residencies),
-    settlements: Object.freeze(
-      state.civilizations.settlements.map((settlement) =>
-        Object.freeze({
-          ...settlement,
-          population: namedPopulation.get(settlement.id) ?? 0,
-        }),
-      ),
-    ),
+    settlements: state.civilizations.settlements,
     operationCount: state.civilizations.operationCount + operations,
   });
 }
 
 function applyCivilizationsYear(state: WorldState, tick: number): WorldState {
   const reconciled = reconcileCivilizationResidencies(state);
-  const primarySettlementId = reconciled.settlements[0]!.id;
+  let source = Object.freeze({ ...state, civilizations: reconciled });
+  source = Object.freeze({ ...source, populationScale: synchronizePopulationScale(source) });
+  source = synchronizeSettlementPopulation(source);
+  const primarySettlementId = source.civilizations.settlements[0]!.id;
   const synchronizedCivilizations = Object.freeze({
-    ...reconciled,
+    ...source.civilizations,
     settlements: Object.freeze(
-      reconciled.settlements.map((settlement) =>
+      source.civilizations.settlements.map((settlement) =>
         settlement.id === primarySettlementId
           ? Object.freeze({
               ...settlement,
-              stability: state.civilization.society.stability,
-              reserves: communityReservesFromFounding(state),
+              stability: source.civilization.society.stability,
+              reserves: communityReservesFromFounding(source),
             })
           : settlement,
       ),
     ),
   });
-  const source = Object.freeze({ ...state, civilizations: synchronizedCivilizations });
   const result = advanceCivilizations(
     synchronizedCivilizations,
-    createCivilizationsContext(source, tick),
+    createCivilizationsContext(
+      Object.freeze({ ...source, civilizations: synchronizedCivilizations }),
+      tick,
+    ),
   );
   const delta = result.foundingReserveDelta;
   const stockpile = Object.freeze({
-    food: Math.max(0, state.civilization.stockpile.food + delta.food),
-    water: Math.max(0, state.civilization.stockpile.water + delta.water),
-    timber: Math.max(0, state.civilization.stockpile.timber + delta.timber),
-    stone: Math.max(0, state.civilization.stockpile.stone + delta.stone),
+    food: Math.max(0, source.civilization.stockpile.food + delta.food),
+    water: Math.max(0, source.civilization.stockpile.water + delta.water),
+    timber: Math.max(0, source.civilization.stockpile.timber + delta.timber),
+    stone: Math.max(0, source.civilization.stockpile.stone + delta.stone),
   });
   const primaryReserves = Object.freeze({ ...stockpile, metal: 0 });
   let next: WorldState = Object.freeze({
-    ...state,
+    ...source,
     civilizations: Object.freeze({
       ...result.state,
       settlements: Object.freeze(
@@ -1874,7 +2152,7 @@ function applyCivilizationsYear(state: WorldState, tick: number): WorldState {
         ),
       ),
     }),
-    civilization: Object.freeze({ ...state.civilization, stockpile }),
+    civilization: Object.freeze({ ...source.civilization, stockpile }),
   });
   for (const event of result.events)
     next = appendWorldEvent(next, event.kind, tick, civilizationEventDetails(next, event));
@@ -1895,9 +2173,24 @@ export function stepWorld(state: WorldState, ticks = 1): WorldState {
   let pulseTick =
     (Math.floor(state.tick / SETTLEMENT_ACTION_PULSE_TICKS) + 1) * SETTLEMENT_ACTION_PULSE_TICKS;
   while (pulseTick <= endingTick) {
+    const populationScale = advancePopulationScale(
+      next.populationScale,
+      pulseTick - next.populationScale.tick,
+    );
     const terrain = settlementTerrain(next);
-    const pulse = advanceCivilization(next.civilization, terrain, pulseTick);
-    next = Object.freeze({ ...next, tick: pulseTick, civilization: pulse.civilization });
+    const pulse = advanceCivilizationWithPathCache(
+      next.civilization,
+      terrain,
+      pulseTick,
+      next.pathCache,
+    );
+    next = Object.freeze({
+      ...next,
+      tick: pulseTick,
+      civilization: pulse.civilization,
+      populationScale,
+      pathCache: pulse.pathCache,
+    });
     const createdEvents: WorldEvent[] = [];
     for (const draft of pulse.events) {
       next = appendWorldEvent(next, draft.kind, pulseTick, draft);
@@ -1915,6 +2208,11 @@ export function stepWorld(state: WorldState, ticks = 1): WorldState {
         ),
       }),
     });
+    next = Object.freeze({
+      ...next,
+      civilizations: reconcileCivilizationResidencies(next),
+    });
+    next = Object.freeze({ ...next, populationScale: synchronizePopulationScale(next) });
     if (pulseTick % next.config.societyYearTicks === 0 && next.development.tick < pulseTick) {
       const development = advanceDevelopment(next.development, developmentContext(next, pulseTick));
       const applied = applyDevelopmentResult(next, development, pulseTick);
@@ -1934,10 +2232,37 @@ export function stepWorld(state: WorldState, ticks = 1): WorldState {
     }
     if (pulseTick % next.config.societyYearTicks === 0 && next.civilizations.tick < pulseTick)
       next = applyCivilizationsYear(next, pulseTick);
+    next = Object.freeze({
+      ...next,
+      civilizations: reconcileCivilizationResidencies(next),
+    });
+    next = Object.freeze({
+      ...next,
+      populationScale: reconcilePopulationLod(
+        reconcileSettlementPopulationAuthority({
+          ...next,
+          populationScale: synchronizePopulationScale(next),
+        }),
+        Math.trunc(pulseTick / SETTLEMENT_ACTION_PULSE_TICKS),
+      ),
+    });
+    next = synchronizeSettlementPopulation(next);
     assertWorldInvariants(next);
     pulseTick += SETTLEMENT_ACTION_PULSE_TICKS;
   }
-  return next.tick === endingTick ? next : Object.freeze({ ...next, tick: endingTick });
+  if (next.tick === endingTick) return next;
+  const populationScale = advancePopulationScale(
+    next.populationScale,
+    endingTick - next.populationScale.tick,
+  );
+  return synchronizeSettlementPopulation(
+    Object.freeze({
+      ...next,
+      tick: endingTick,
+      populationScale,
+      pathCache: Object.freeze({ ...next.pathCache, logicalTick: endingTick }),
+    }),
+  );
 }
 
 /** Appends one factual event with the next stable id to an immutable world snapshot. */
@@ -2193,11 +2518,85 @@ export function assertWorldInvariants(state: WorldState): void {
   assertCivilizationInvariants(state.civilization, settlementTerrain(state));
   assertCivilizationsInvariants(state.civilizations);
   assertDevelopmentInvariants(state.development);
+  assertPopulationScaleInvariants(state.populationScale);
+  assertPathCacheInvariants(state.pathCache);
+  if (state.populationScale.tick !== state.tick)
+    throw new Error(
+      'World invariant violation: population scale must be synchronized to world time.',
+    );
+  if (state.pathCache.logicalTick !== state.tick)
+    throw new Error('World invariant violation: path cache must be synchronized to world time.');
   if (state.development.tick > state.tick)
     throw new Error('World invariant violation: development cannot be ahead of world time.');
   if (state.civilizations.tick > state.tick)
     throw new Error('World invariant violation: civilizations cannot be ahead of world time.');
   const agentIds = new Set(state.civilization.agents.map((agent) => agent.id));
+  const detailedById = new Map(
+    state.populationScale.detailedResidents.map((resident) => [resident.id, resident]),
+  );
+  for (const person of state.civilization.society.people) {
+    if (!person.alive) continue;
+    const resident = detailedById.get(person.id);
+    if (resident === undefined || resident.importance <= 0)
+      throw new Error('Alive named people must remain protected detailed scale residents.');
+  }
+  const namedPersonIds = new Set(state.civilization.society.people.map((person) => person.id));
+  const scaleSettlements = new Map(
+    state.civilizations.settlements.map((settlement) => [settlement.id, settlement] as const),
+  );
+  for (const resident of state.populationScale.detailedResidents) {
+    if (namedPersonIds.has(resident.id)) continue;
+    const settlement = scaleSettlements.get(resident.settlementId);
+    if (
+      resident.householdId !== 0 ||
+      resident.id < FIRST_ORDINARY_RESIDENT_ID ||
+      resident.importance !== 0 ||
+      resident.relationshipIds.length > 0 ||
+      resident.familyIds.length > 0 ||
+      resident.eventIds.length > 0 ||
+      settlement === undefined ||
+      settlement.status === 'abandoned' ||
+      resident.civilizationId !== settlement.civilizationId ||
+      resident.cultureId !== settlement.cultureId ||
+      resident.tileIndex !== settlement.centerTileIndex
+    ) {
+      throw new Error(
+        'Anonymous detailed residents must retain exact active-settlement unsalient provenance.',
+      );
+    }
+  }
+  for (const cohort of state.populationScale.cohorts) {
+    const settlement = scaleSettlements.get(cohort.classification.settlementId);
+    if (
+      cohort.classification.householdId !== 0 ||
+      cohort.householdCount !== 0 ||
+      settlement === undefined ||
+      settlement.status === 'abandoned' ||
+      cohort.classification.civilizationId !== settlement.civilizationId ||
+      cohort.classification.cultureId !== settlement.cultureId ||
+      cohort.classification.tileIndex !== settlement.centerTileIndex ||
+      cohort.residentIds.some(
+        (residentId) => residentId < FIRST_ORDINARY_RESIDENT_ID || namedPersonIds.has(residentId),
+      )
+    ) {
+      throw new Error('World aggregate cohorts must retain exact active-settlement provenance.');
+    }
+  }
+  const scalePopulationBySettlement = new Map<number, number>();
+  for (const resident of state.populationScale.detailedResidents)
+    scalePopulationBySettlement.set(
+      resident.settlementId,
+      (scalePopulationBySettlement.get(resident.settlementId) ?? 0) + 1,
+    );
+  for (const cohort of state.populationScale.cohorts)
+    scalePopulationBySettlement.set(
+      cohort.classification.settlementId,
+      (scalePopulationBySettlement.get(cohort.classification.settlementId) ?? 0) +
+        cohort.residentIds.length,
+    );
+  for (const settlement of state.civilizations.settlements)
+    if (settlement.population !== (scalePopulationBySettlement.get(settlement.id) ?? 0))
+      throw new Error('Settlement population must conserve scale residents.');
   const structureIds = new Set(state.civilization.structures.map((structure) => structure.id));
   const householdIds = new Set(
     state.civilization.society.households.map((household) => household.id),
@@ -2368,6 +2767,8 @@ export function canonicalWorldJson(state: WorldState): string {
     moisture: arrayDto(state.moisture),
     nextEventId: state.nextEventId,
     plants: arrayDto(state.plants),
+    populationScale: populationScaleDto(state.populationScale),
+    pathCache: toCanonicalPathCacheDto(state.pathCache),
     seed: [...state.seed],
     stone: arrayDto(state.stone),
     temperature: arrayDto(state.temperature),

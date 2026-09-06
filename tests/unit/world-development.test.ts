@@ -4,6 +4,7 @@ import {
   canonicalWorldJson,
   createInitialWorld,
   findResourceDepletionAt,
+  isWalkableTile,
   stepWorld,
 } from '../../src/simulation/world';
 import { deserializeWorldSnapshot, serializeWorldSnapshot } from '../../src/simulation/persistence';
@@ -72,6 +73,34 @@ describe('M5 world development integration', () => {
     }
     const reloaded = deserializeWorldSnapshot(serializeWorldSnapshot(after));
     expect(canonicalWorldJson(reloaded)).toBe(canonicalWorldJson(after));
+  });
+
+  it('invalidates persisted routes exactly when a modeled crisis changes walkability', () => {
+    const initial = createInitialWorld([37, 41, 43, 47], CONFIG);
+    const center = initial.civilization.centerTileIndex;
+    const hazard = initial.hazard.slice();
+    hazard[center] = 179;
+    const prepared = Object.freeze({
+      ...initial,
+      hazard,
+      tiles: Object.freeze({ ...initial.tiles, hazard }),
+      development: Object.freeze({
+        ...initial.development,
+        conditions: Object.freeze({ ...initial.development.conditions, diseasePressure: 100 }),
+      }),
+    });
+
+    expect(isWalkableTile(prepared, center)).toBe(true);
+    const after = stepWorld(prepared, YEAR);
+
+    expect(isWalkableTile(after, center)).toBe(false);
+    expect(after.pathCache).toMatchObject({
+      terrainRevision: 1,
+      logicalTick: YEAR,
+      pending: [],
+      completed: [],
+      backlog: 0,
+    });
   });
 
   it('looks up sparse resource depletion by tile identity rather than array position', () => {

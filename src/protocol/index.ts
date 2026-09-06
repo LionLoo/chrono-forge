@@ -1,4 +1,5 @@
 import type { WorldConfig, WorldSeed } from '../simulation/world';
+import type { WorldFrameDelta } from './frame-delta';
 import type {
   ConditionId,
   DisasterKind,
@@ -8,7 +9,7 @@ import type {
 } from '../simulation/development';
 import { ACCELERATED_YEAR_TICKS, NORMAL_YEAR_TICKS } from '../simulation/society';
 
-export const WORKER_PROTOCOL_VERSION = 6;
+export const WORKER_PROTOCOL_VERSION = 7;
 export const MAX_ADVANCE_TICKS_PER_REQUEST = 1_000_000;
 
 export type WorkerProtocolVersion = typeof WORKER_PROTOCOL_VERSION;
@@ -738,7 +739,10 @@ export interface CommandAcceptedResponse extends ResponseBase {
 
 export interface FrameDeltaResponse extends ResponseBase {
   readonly type: 'frameDelta';
-  readonly frame: WorldFrameProjection;
+  /** Ordered patch applied to the full frame carried by ready or a prior delta. */
+  readonly delta: WorldFrameDelta;
+  /** Exact bytes transferred plus structured delta metadata, counted once. */
+  readonly payloadBytes: number;
 }
 
 export interface EventBatchResponse extends ResponseBase {

@@ -11,6 +11,7 @@ import {
   type WorkerToUiMessage,
   type WorldFrameProjection,
 } from '../protocol';
+import { applyWorldFrameDelta } from '../protocol/frame-delta';
 import type { WorldConfig, WorldSeed } from '../simulation/world';
 import {
   MAX_RECENT_WORKER_EVENTS,
@@ -117,6 +118,7 @@ export function useWorldSimulation(
     WorldSimulationView['relationshipEventPage']
   >({ personId: null, relationshipId: null, offset: 0, total: 0, events: [] });
   const [error, setError] = useState<string | null>(null);
+  const frameRef = useRef<WorldFrameProjection | null>(null);
   const workerRef = useRef<SimulationWorkerPort | null>(null);
   const requestSequenceRef = useRef(0);
   const pendingSavesRef = useRef(new Map<string, PendingSaveRequest>());
@@ -180,6 +182,7 @@ export function useWorldSimulation(
       pendingCommands.clear();
     };
     const applyFrame = (nextFrame: WorldFrameProjection, replaceEvents: boolean) => {
+      frameRef.current = nextFrame;
       setFrame(nextFrame);
       // A page belongs to an earlier authoritative state and must never be displayed as current.
       setRelationshipPage({ personId: null, offset: 0, total: 0, relationships: [] });
@@ -219,7 +222,18 @@ export function useWorldSimulation(
           return;
         }
         case 'frameDelta': {
-          applyFrame(message.frame, false);
+          try {
+            if (frameRef.current === null)
+              throw new Error('Received a frame delta before a ready frame.');
+            applyFrame(applyWorldFrameDelta(frameRef.current, message.delta), false);
+          } catch (deltaError) {
+            const reason =
+              deltaError instanceof Error
+                ? deltaError
+                : new Error('The simulation worker sent an invalid frame delta.');
+            rejectAll(reason);
+            setError(reason.message);
+          }
           return;
         }
         case 'eventBatch':

@@ -21,7 +21,7 @@ export const M5_SCENARIOS: readonly M5Scenario[] = Object.freeze([
     seed: Object.freeze([7, 11, 13, 17] as const),
     yearTicks: 5_000,
     checkpointYears: Object.freeze([5, 25, 60] as const),
-    expectedHashes: Object.freeze(['4cc24c6d', 'b6662df2', 'f1e35f26'] as const),
+    expectedHashes: Object.freeze(['87149440', '22003533', '6eb5c162'] as const),
   }),
   Object.freeze({
     name: 'ore-council',
@@ -29,7 +29,7 @@ export const M5_SCENARIOS: readonly M5Scenario[] = Object.freeze([
     seed: Object.freeze([19, 23, 29, 31] as const),
     yearTicks: 5_000,
     checkpointYears: Object.freeze([5, 25, 60] as const),
-    expectedHashes: Object.freeze(['efe2c640', '58f89c87', 'a0465247'] as const),
+    expectedHashes: Object.freeze(['df940aae', '23b35b01', '9e58eba8'] as const),
   }),
   Object.freeze({
     name: 'storm-kin',
@@ -37,7 +37,7 @@ export const M5_SCENARIOS: readonly M5Scenario[] = Object.freeze([
     seed: Object.freeze([37, 41, 43, 47] as const),
     yearTicks: 5_000,
     checkpointYears: Object.freeze([5, 25, 60] as const),
-    expectedHashes: Object.freeze(['822c317d', '1bd134dd', '3135639c'] as const),
+    expectedHashes: Object.freeze(['f02937f3', '5e58412b', '554fde46'] as const),
   }),
   Object.freeze({
     name: 'renewed-observatory',
@@ -45,6 +45,6 @@ export const M5_SCENARIOS: readonly M5Scenario[] = Object.freeze([
     seed: Object.freeze([53, 59, 61, 67] as const),
     yearTicks: 5_000,
     checkpointYears: Object.freeze([5, 25, 60] as const),
-    expectedHashes: Object.freeze(['e1e02d78', 'dd8fa1ff', '47c11bd6'] as const),
+    expectedHashes: Object.freeze(['5d37d1e2', '991a295a', 'e023d1e6'] as const),
   }),
 ]);

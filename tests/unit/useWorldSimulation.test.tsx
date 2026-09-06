@@ -1,10 +1,14 @@
 import { act, renderHook, waitFor } from '@testing-library/react';
 
 import type { UiToWorkerMessage, WorkerToUiMessage } from '../../src/protocol';
+import {
+  createWorldFrameDelta,
+  estimateFrameDeltaPayloadBytes,
+} from '../../src/protocol/frame-delta';
 import { serializeWorldSnapshot } from '../../src/simulation/persistence';
 import { createInitialWorld, stepWorld } from '../../src/simulation/world';
 import { useWorldSimulation, type SimulationWorkerPort } from '../../src/ui/useWorldSimulation';
-import { createSimulationRuntime } from '../../src/workers/simulation-runtime';
+import { createSimulationRuntime, projectWorldFrame } from '../../src/workers/simulation-runtime';
 
 function createRuntimeWorker(): SimulationWorkerPort {
   let active = true;
@@ -85,7 +89,68 @@ function createLoadReadyOnlyWorker(): SimulationWorkerPort {
   return port;
 }
 
+function createStaleDeltaWorker(): SimulationWorkerPort {
+  const initial = createInitialWorld([2, 3, 5, 7]);
+  const initialFrame = projectWorldFrame(initial);
+  const nextFrame = projectWorldFrame(stepWorld(initial, 1));
+  const delta = createWorldFrameDelta(initialFrame, nextFrame);
+  let active = true;
+  const port: SimulationWorkerPort = {
+    onerror: null,
+    onmessage: null,
+    postMessage(message: UiToWorkerMessage) {
+      if (message.type === 'initialize') {
+        queueMicrotask(() => {
+          if (active)
+            port.onmessage?.(
+              new MessageEvent('message', {
+                data: {
+                  type: 'ready',
+                  protocolVersion: message.protocolVersion,
+                  requestId: message.requestId,
+                  frame: initialFrame,
+                } satisfies WorkerToUiMessage,
+              }),
+            );
+        });
+        return;
+      }
+      if (message.type === 'advanceTicks') {
+        queueMicrotask(() => {
+          if (active)
+            port.onmessage?.(
+              new MessageEvent('message', {
+                data: {
+                  type: 'frameDelta',
+                  protocolVersion: message.protocolVersion,
+                  requestId: message.requestId,
+                  delta: { ...delta, baseTick: delta.baseTick + 1 },
+                  payloadBytes: estimateFrameDeltaPayloadBytes(delta),
+                } satisfies WorkerToUiMessage,
+              }),
+            );
+        });
+      }
+    },
+    terminate() {
+      active = false;
+    },
+  };
+  return port;
+}
+
 describe('world simulation UI gateway', () => {
+  it('rejects a stale frame delta without replacing the authoritative UI projection', async () => {
+    const { result } = renderHook(() => useWorldSimulation(createStaleDeltaWorker));
+    await waitFor(() => expect(result.current.status).toBe('ready'));
+    expect(result.current.frame?.tick).toBe(0);
+
+    act(() => result.current.advanceTicks(1));
+    await waitFor(() => expect(result.current.status).toBe('faulted'));
+    expect(result.current.error).toMatch(/base tick/i);
+    expect(result.current.frame?.tick).toBe(0);
+  });
+
   it('queues a closed intervention and resolves only after Worker acceptance', async () => {
     const { result } = renderHook(() => useWorldSimulation(createRuntimeWorker));
     await waitFor(() => expect(result.current.status).toBe('ready'));

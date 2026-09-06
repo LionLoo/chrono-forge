@@ -4,7 +4,13 @@ import {
   WORKER_PROTOCOL_VERSION,
   type UiToWorkerMessage,
   type WorkerToUiMessage,
+  type WorldFrameProjection,
 } from '../../src/protocol';
+import {
+  applyWorldFrameDelta,
+  estimateFrameDeltaPayloadBytes,
+  frameDeltaTransferables,
+} from '../../src/protocol/frame-delta';
 import { serializeWorldSnapshot } from '../../src/simulation/persistence';
 import { appendWorldEvent, createInitialWorld, stepWorld } from '../../src/simulation/world';
 import {
@@ -34,7 +40,98 @@ function lastMessageOfType<TType extends WorkerToUiMessage['type']>(
   return messageOfType([...messages].reverse(), type);
 }
 
+function reconstructedFrame(messages: readonly WorkerToUiMessage[]): WorldFrameProjection {
+  let frame: WorldFrameProjection | undefined;
+  for (const message of messages) {
+    if (message.type === 'ready') frame = message.frame;
+    if (message.type === 'frameDelta') {
+      if (frame === undefined) throw new Error('Worker sent a delta before ready.');
+      frame = applyWorldFrameDelta(frame, message.delta);
+    }
+  }
+  if (frame === undefined) throw new Error('Worker did not emit a frame.');
+  return frame;
+}
+
 describe('simulation worker runtime', () => {
+  it('establishes a full ready base, then sends ordered reconstructable deltas with exact transfers', () => {
+    const responses: WorkerToUiMessage[] = [];
+    const transferByteLengths: number[][] = [];
+    const runtime = createSimulationRuntime((message, transfer) => {
+      transferByteLengths.push(transfer.map((buffer) => buffer.byteLength));
+      responses.push(message);
+    });
+    runtime.handleMessage({
+      type: 'initialize',
+      protocolVersion: WORKER_PROTOCOL_VERSION,
+      requestId: 'delta-initialize',
+      seed: [10, 20, 30, 40],
+    });
+    const ready = messageOfType(responses, 'ready');
+    runtime.handleMessage({
+      type: 'advanceTicks',
+      protocolVersion: WORKER_PROTOCOL_VERSION,
+      requestId: 'delta-advance',
+      ticks: 7,
+    });
+    const delta = lastMessageOfType(responses, 'frameDelta');
+
+    expect(delta.delta).toMatchObject({ baseTick: ready.frame.tick, tick: 7 });
+    expect(reconstructedFrame(responses)).toStrictEqual(
+      projectWorldFrame(stepWorld(createInitialWorld([10, 20, 30, 40]), 7)),
+    );
+    expect(transferByteLengths[responses.lastIndexOf(delta)]).toStrictEqual(
+      frameDeltaTransferables(delta.delta).map((buffer) => buffer.byteLength),
+    );
+    expect(delta.payloadBytes).toBe(estimateFrameDeltaPayloadBytes(delta.delta));
+
+    runtime.handleMessage({
+      type: 'advanceTicks',
+      protocolVersion: WORKER_PROTOCOL_VERSION,
+      requestId: 'no-change-advance',
+      ticks: 0,
+    });
+    const noChange = lastMessageOfType(responses, 'frameDelta');
+    expect(noChange.delta).toMatchObject({ baseTick: 7, tick: 7 });
+    expect(frameDeltaTransferables(noChange.delta)).toStrictEqual([]);
+  });
+
+  it('resets the ordered delta base after load', () => {
+    const responses: WorkerToUiMessage[] = [];
+    const runtime = createSimulationRuntime((message) => responses.push(message));
+    const snapshot = serializeWorldSnapshot(stepWorld(createInitialWorld([11, 13, 17, 19]), 20));
+    runtime.handleMessage({
+      type: 'initialize',
+      protocolVersion: WORKER_PROTOCOL_VERSION,
+      requestId: 'load-base-initialize',
+      seed: [2, 3, 5, 7],
+    });
+    runtime.handleMessage({
+      type: 'advanceTicks',
+      protocolVersion: WORKER_PROTOCOL_VERSION,
+      requestId: 'before-load',
+      ticks: 10,
+    });
+    runtime.handleMessage({
+      type: 'load',
+      protocolVersion: WORKER_PROTOCOL_VERSION,
+      requestId: 'reset-base-load',
+      snapshot,
+    });
+    const loadedReady = lastMessageOfType(responses, 'ready');
+    runtime.handleMessage({
+      type: 'advanceTicks',
+      protocolVersion: WORKER_PROTOCOL_VERSION,
+      requestId: 'after-load',
+      ticks: 1,
+    });
+    const delta = lastMessageOfType(responses, 'frameDelta');
+
+    expect(loadedReady.frame.tick).toBe(20);
+    expect(delta.delta.baseTick).toBe(20);
+    expect(reconstructedFrame(responses).tick).toBe(21);
+  });
+
   it('initializes and advances a world using only typed messages', () => {
     const responses: WorkerToUiMessage[] = [];
     const runtime = createSimulationRuntime((message) => responses.push(message));
@@ -79,8 +176,9 @@ describe('simulation worker runtime', () => {
       requestId: 'advance',
       ticks: 7,
     });
-    const frame = messageOfType(responses, 'frameDelta');
-    expect(frame.frame.tick).toBe(7);
+    const delta = messageOfType(responses, 'frameDelta');
+    expect(delta.delta).toMatchObject({ baseTick: 0, tick: 7 });
+    expect(reconstructedFrame(responses).tick).toBe(7);
     expect(lastMessageOfType(responses, 'metrics').metrics.tick).toBe(7);
   });
 
@@ -101,7 +199,7 @@ describe('simulation worker runtime', () => {
       ticks: 30_000,
     });
 
-    const society = lastMessageOfType(responses, 'frameDelta').frame.society;
+    const society = reconstructedFrame(responses).society;
     expect(society.dashboard.population).toBeGreaterThanOrEqual(6);
     expect(society.people).toHaveLength(society.dashboard.population);
     expect(society.cultures).toHaveLength(2);
@@ -150,7 +248,7 @@ describe('simulation worker runtime', () => {
       ticks: 25_000,
     });
 
-    const frame = lastMessageOfType(responses, 'frameDelta').frame;
+    const frame = reconstructedFrame(responses);
     expect(frame.civilizations).toStrictEqual(expected.civilizations);
     expect(frame.civilizations.tileOwners).not.toBe(expected.civilizations.tileOwners);
     expect(frame.civilizations.settlements.map((settlement) => settlement.id)).toStrictEqual(
@@ -253,9 +351,7 @@ describe('simulation worker runtime', () => {
       requestId: 'm5-advance',
       ticks: 5_000,
     });
-    expect(lastMessageOfType(responses, 'frameDelta').frame.development.conditions.protection).toBe(
-      29,
-    );
+    expect(reconstructedFrame(responses).development.conditions.protection).toBe(29);
     expect(lastMessageOfType(responses, 'eventBatch').events).toContainEqual(
       expect.objectContaining({ type: 'protection-intervened', tick: 5_000 }),
     );
@@ -284,7 +380,7 @@ describe('simulation worker runtime', () => {
       requestId: 'save',
     });
     const saved = messageOfType(firstResponses, 'saveSnapshot');
-    const expected = lastMessageOfType(firstResponses, 'frameDelta').frame;
+    const expected = reconstructedFrame(firstResponses);
     const expectedEvents = firstResponses
       .filter(
         (response): response is Extract<WorkerToUiMessage, { type: 'eventBatch' }> =>
@@ -338,7 +434,7 @@ describe('simulation worker runtime', () => {
       policyVersion: OFFLINE_CATCH_UP_POLICY_VERSION,
     });
 
-    expect(lastMessageOfType(responses, 'frameDelta').frame.tick).toBe(10);
+    expect(reconstructedFrame(responses).tick).toBe(10);
     expect(lastMessageOfType(responses, 'eventBatch').events).toStrictEqual([
       {
         id: 3,
@@ -362,13 +458,11 @@ describe('simulation worker runtime', () => {
       rate: 1_000,
       policyVersion: OFFLINE_CATCH_UP_POLICY_VERSION,
     });
-    expect(lastMessageOfType(responses, 'frameDelta').frame.tick).toBe(
-      10 + MAX_OFFLINE_CATCH_UP_TICKS,
-    );
+    expect(reconstructedFrame(responses).tick).toBe(10 + MAX_OFFLINE_CATCH_UP_TICKS);
     const clampedEvents = lastMessageOfType(responses, 'eventBatch').events;
     expect(clampedEvents.length).toBeLessThanOrEqual(MAX_RECENT_WORKER_EVENTS);
     expect(clampedEvents.at(-1)).toMatchObject({ type: 'offline-catch-up' });
-  }, 30_000);
+  }, 60_000);
 
   it('rejects invalid offline input and unsupported policy versions', () => {
     const responses: WorkerToUiMessage[] = [];

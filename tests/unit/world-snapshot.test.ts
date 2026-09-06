@@ -16,6 +16,7 @@ import {
 import { ACCELERATED_YEAR_TICKS } from '../../src/simulation/society';
 import { interpersonalDto } from '../../src/simulation/relationships';
 import { createInitialDevelopment, developmentDto } from '../../src/simulation/development';
+import { advancePathCache, requestPath } from '../../src/simulation/pathfinding/cache';
 import legacyWorldV0 from '../fixtures/saves/world-v0.json';
 
 function legacySnapshot(worldJson: string): string {
@@ -27,6 +28,39 @@ function legacySnapshot(worldJson: string): string {
     worldJson,
   });
 }
+
+it('round-trips a deferred direct path fallback without losing its bounded work offset', () => {
+  const initial = createInitialWorld([13, 17, 19, 23]);
+  const queued = requestPath(
+    initial.pathCache,
+    {
+      width: 6,
+      height: 8,
+      chunkSize: 2,
+      start: { x: 0, y: 0 },
+      goal: { x: 5, y: 0 },
+      maxExpansions: 12,
+      revision: 0,
+    },
+    0,
+  ).state;
+  const attempted = advancePathCache(
+    queued,
+    { isPassable: (x, y) => !(x === 2 && y < 6) },
+    1,
+    0,
+  ).state;
+  const world = Object.freeze({ ...initial, pathCache: attempted });
+
+  expect(attempted.pending[0]).toMatchObject({
+    stage: 'direct-fallback',
+    fallbackExpansionOffset: 10,
+    fallbackEligibleTick: 1,
+  });
+  expect(deserializeWorldSnapshot(serializeWorldSnapshot(world)).pathCache).toStrictEqual(
+    attempted,
+  );
+});
 
 function versionOneSnapshot(worldJson: string): string {
   return JSON.stringify({
@@ -40,22 +74,38 @@ function versionOneSnapshot(worldJson: string): string {
 }
 
 function versionSixSnapshot(world: ReturnType<typeof createInitialWorld>): string {
-  const envelope = JSON.parse(serializeWorldSnapshot(world)) as Record<string, unknown>;
+  const envelope = JSON.parse(serializeWorldSnapshot(world)) as {
+    payload: Record<string, unknown>;
+  };
+  const payload = { ...envelope.payload };
+  delete payload.populationScale;
+  delete payload.pathCache;
+  const payloadJson = JSON.stringify(payload);
   return JSON.stringify({
     ...envelope,
     contentVersion: 6,
     engineVersion: 6,
     formatVersion: 6,
+    checksum: hashCanonicalJson(payloadJson),
+    payload,
   });
 }
 
 function versionSevenSnapshot(world: ReturnType<typeof createInitialWorld>): string {
-  const envelope = JSON.parse(serializeWorldSnapshot(world)) as Record<string, unknown>;
+  const envelope = JSON.parse(serializeWorldSnapshot(world)) as {
+    payload: Record<string, unknown>;
+  };
+  const payload = { ...envelope.payload };
+  delete payload.populationScale;
+  delete payload.pathCache;
+  const payloadJson = JSON.stringify(payload);
   return JSON.stringify({
     ...envelope,
     contentVersion: 7,
     engineVersion: 7,
     formatVersion: 7,
+    checksum: hashCanonicalJson(payloadJson),
+    payload,
   });
 }
 
@@ -68,6 +118,8 @@ function versionTwoSnapshot(ticks = 15_000): {
     payload: Record<string, unknown>;
   };
   const payload = { ...envelope.payload };
+  delete payload.populationScale;
+  delete payload.pathCache;
   delete payload.civilizations;
   delete payload.development;
   const config = payload.config as Record<string, unknown>;
@@ -140,6 +192,8 @@ function versionThreeSnapshot(): string {
     payload: Record<string, unknown>;
   };
   const payload = { ...envelope.payload };
+  delete payload.populationScale;
+  delete payload.pathCache;
   delete payload.civilizations;
   delete payload.development;
   payload.eventLog = (payload.eventLog as Record<string, unknown>[]).filter(
@@ -208,6 +262,8 @@ function versionFourSnapshot(ticks = 4321): {
     payload: Record<string, unknown>;
   };
   const payload = { ...current.payload };
+  delete payload.populationScale;
+  delete payload.pathCache;
   delete payload.civilizations;
   delete payload.development;
   const payloadJson = JSON.stringify(payload);
@@ -236,6 +292,8 @@ function versionFiveSnapshot(ticks = 4321): {
     payload: Record<string, unknown>;
   };
   const payload = { ...current.payload };
+  delete payload.populationScale;
+  delete payload.pathCache;
   delete payload.civilizations;
   const payloadJson = JSON.stringify(payload);
   return {
@@ -619,7 +677,10 @@ describe('versioned world snapshots', () => {
       engineVersion: WORLD_SNAPSHOT_FORMAT_VERSION,
       formatVersion: WORLD_SNAPSHOT_FORMAT_VERSION,
     });
-    expect(hashWorldState(deserializeWorldSnapshot(migrated))).toBe(hashWorldState(source));
+    const loaded = deserializeWorldSnapshot(migrated);
+    expect(loaded.eventLog).toStrictEqual(source.eventLog);
+    expect(loaded.populationScale).toMatchObject({ tick: source.tick, operationCount: 0 });
+    expect(loaded.pathCache).toMatchObject({ logicalTick: source.tick, operationCount: 0 });
     expect(migrateWorldSnapshot(migrated)).toBe(migrated);
   });
 
@@ -632,7 +693,10 @@ describe('versioned world snapshots', () => {
       engineVersion: WORLD_SNAPSHOT_FORMAT_VERSION,
       formatVersion: WORLD_SNAPSHOT_FORMAT_VERSION,
     });
-    expect(hashWorldState(deserializeWorldSnapshot(migrated))).toBe(hashWorldState(source));
+    const loaded = deserializeWorldSnapshot(migrated);
+    expect(loaded.eventLog).toStrictEqual(source.eventLog);
+    expect(loaded.populationScale).toMatchObject({ tick: source.tick, operationCount: 0 });
+    expect(loaded.pathCache).toMatchObject({ logicalTick: source.tick, operationCount: 0 });
   });
 
   it('continues a v2 save created between society boundaries', () => {

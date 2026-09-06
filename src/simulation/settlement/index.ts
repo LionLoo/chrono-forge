@@ -1,4 +1,5 @@
 import { findLocalPath } from '../pathfinding';
+import { advancePathCache, requestPath, type PathCacheState } from '../pathfinding/cache';
 import { deriveXoshiro128State, type Xoshiro128State, Xoshiro128StarStar } from '../random';
 import type { ChildArrivalEligibilityEvidence } from '../relationships';
 import { relationshipDecisionInfluence } from '../relationships/lifecycle';
@@ -20,6 +21,10 @@ export const SETTLEMENT_ACTION_PULSE_TICKS = 100;
 export const MAX_AGENT_KNOWN_TILES = 16;
 export const MAX_AGENT_MEMORIES = 12;
 export const SETTLEMENT_PATH_EXPANSION_QUOTA = 64;
+/** Fixed authoritative rebuild budget; requests beyond it remain in the cache backlog. */
+export const SETTLEMENT_PATH_CACHE_REQUEST_QUOTA = 32;
+/** Matches the deterministic world-config default for standalone settlement terrain. */
+export const SETTLEMENT_PATH_CACHE_CHUNK_SIZE = 32;
 export const MAX_AGENT_PLAN_STEPS = 2;
 export const MAX_AGENT_ROUTE_LENGTH = SETTLEMENT_PATH_EXPANSION_QUOTA + 1;
 
@@ -146,6 +151,8 @@ export interface CivilizationState {
 export interface SettlementTerrain {
   readonly width: number;
   readonly height: number;
+  /** Optional for legacy callers; cached routing falls back to a fixed chunk size. */
+  readonly chunkSize?: number;
   readonly food: Uint16Array;
   readonly freshWater: Uint16Array;
   readonly timber: Uint16Array;
@@ -170,6 +177,11 @@ export interface SettlementEventDraft {
 export interface SettlementPulseResult {
   readonly civilization: CivilizationState;
   readonly events: readonly SettlementEventDraft[];
+}
+
+/** Settlement pulse result paired with the authoritative revisioned route cache. */
+export interface SettlementPathCachePulseResult extends SettlementPulseResult {
+  readonly pathCache: PathCacheState;
 }
 
 export interface SettlementSummary {
@@ -755,6 +767,57 @@ function moveAgent(
     : [Object.freeze({ ...agent, route, routeCursor: 1, tileIndex: next }), path.expansions];
 }
 
+/**
+ * Uses only an already-completed cache entry for movement. A newly queued
+ * request is deliberately not visible until a later settlement pulse.
+ */
+function moveAgentWithPathCache(
+  agent: SettlementAgent,
+  terrain: SettlementTerrain,
+  pathCache: PathCacheState,
+  tick: number,
+): readonly [SettlementAgent, PathCacheState] {
+  if (!agent.alive || agent.targetTileIndex === agent.tileIndex) return [agent, pathCache];
+  const routeNext = agent.route[agent.routeCursor + 1];
+  if (routeNext !== undefined && terrain.isWalkable(routeNext)) {
+    return [
+      Object.freeze({ ...agent, tileIndex: routeNext, routeCursor: agent.routeCursor + 1 }),
+      pathCache,
+    ];
+  }
+  const reroutingAgent =
+    routeNext === undefined
+      ? agent
+      : Object.freeze({ ...agent, route: Object.freeze([]), routeCursor: 0 });
+  const outcome = requestPath(
+    pathCache,
+    {
+      width: terrain.width,
+      height: terrain.height,
+      chunkSize: terrain.chunkSize ?? SETTLEMENT_PATH_CACHE_CHUNK_SIZE,
+      start: Object.freeze({
+        x: reroutingAgent.tileIndex % terrain.width,
+        y: Math.trunc(reroutingAgent.tileIndex / terrain.width),
+      }),
+      goal: Object.freeze({
+        x: reroutingAgent.targetTileIndex % terrain.width,
+        y: Math.trunc(reroutingAgent.targetTileIndex / terrain.width),
+      }),
+      maxExpansions: SETTLEMENT_PATH_EXPANSION_QUOTA,
+      revision: pathCache.terrainRevision,
+    },
+    tick,
+  );
+  if (outcome.kind !== 'cache-hit' || outcome.result?.status !== 'complete') {
+    return [reroutingAgent, outcome.state];
+  }
+  const route = outcome.result.tilePath;
+  const next = route[1];
+  return next === undefined
+    ? [Object.freeze({ ...reroutingAgent, route, routeCursor: 0 }), outcome.state]
+    : [Object.freeze({ ...reroutingAgent, route, routeCursor: 1, tileIndex: next }), outcome.state];
+}
+
 function addDemand(pathDemand: Uint16Array, tileIndex: number): void {
   const current = pathDemand[tileIndex] ?? 0;
   pathDemand[tileIndex] = Math.min(0xffff, current + 1);
@@ -1195,19 +1258,27 @@ function applySocietyPulse(
   return Object.freeze({ civilization: next, events: Object.freeze(events) });
 }
 
-/** Advances one fixed settlement action pulse. Call only at deterministic pulse boundaries. */
-export function advanceCivilization(
+interface SettlementAdvanceInternalResult extends SettlementPulseResult {
+  readonly pathCache?: PathCacheState;
+}
+
+function advanceCivilizationInternal(
   civilization: CivilizationState,
   terrain: SettlementTerrain,
   tick: number,
-): SettlementPulseResult {
+  initialPathCache?: PathCacheState,
+): SettlementAdvanceInternalResult {
   assertSafeInteger(tick, 'Settlement pulse tick');
   const stockpile: MutableStockpile = { ...civilization.stockpile };
   const pathDemand = civilization.pathDemand.slice();
   let depletion = regrowFood(civilization.resourceDepletion);
   let pathExpansions = 0;
+  let pathCache = initialPathCache;
   const systemRng = new Xoshiro128StarStar(civilization.systemRng);
-  let agents = civilization.agents.map((agent) => needsAndHealth(agent, stockpile));
+  let agents =
+    pathCache === undefined
+      ? civilization.agents.map((agent) => needsAndHealth(agent, stockpile))
+      : sortedAgents(civilization.agents).map((agent) => needsAndHealth(agent, stockpile));
   const events: SettlementEventDraft[] = [];
   const newStructure = plannedStructure(civilization, terrain, tick);
   const lifecycle = lifecycleStructures(civilization.structures, tick);
@@ -1277,9 +1348,15 @@ export function advanceCivilization(
       plan,
       planIndex,
     });
-    const [moved, expansions] = moveAgent(updated, terrain);
-    pathExpansions += expansions;
-    updated = moved;
+    if (pathCache === undefined) {
+      const [moved, expansions] = moveAgent(updated, terrain);
+      pathExpansions += expansions;
+      updated = moved;
+    } else {
+      const [moved, nextPathCache] = moveAgentWithPathCache(updated, terrain, pathCache, tick);
+      pathCache = nextPathCache;
+      updated = moved;
+    }
     addDemand(pathDemand, updated.tileIndex);
     const knownTiles = updated.knownTiles.includes(updated.tileIndex)
       ? updated.knownTiles
@@ -1414,6 +1491,20 @@ export function advanceCivilization(
       routeCursor: 0,
     });
   });
+  let completedPathExpansions = 0;
+  if (pathCache !== undefined) {
+    const cacheAdvance = advancePathCache(
+      pathCache,
+      { isPassable: (x, y) => terrain.isWalkable(y * terrain.width + x) },
+      SETTLEMENT_PATH_CACHE_REQUEST_QUOTA,
+      tick,
+    );
+    pathCache = cacheAdvance.state;
+    completedPathExpansions = cacheAdvance.completed.reduce(
+      (total, entry) => total + entry.expansions,
+      0,
+    );
+  }
   let next: CivilizationState = Object.freeze({
     ...civilization,
     nextStructureId,
@@ -1423,7 +1514,10 @@ export function advanceCivilization(
     resourceDepletion: depletion,
     pathDemand,
     systemRng: systemRng.save(),
-    operationCount: civilization.operationCount + civilization.agents.length + pathExpansions,
+    operationCount:
+      civilization.operationCount +
+      civilization.agents.length +
+      (initialPathCache === undefined ? pathExpansions : completedPathExpansions),
   });
   let nextSocietyTick =
     (Math.floor(next.society.lastTick / SOCIETY_PULSE_TICKS) + 1) * SOCIETY_PULSE_TICKS;
@@ -1434,7 +1528,39 @@ export function advanceCivilization(
     nextSocietyTick += SOCIETY_PULSE_TICKS;
   }
   assertCivilizationInvariants(next, terrain);
-  return Object.freeze({ civilization: next, events: Object.freeze(events) });
+  return pathCache === undefined
+    ? Object.freeze({ civilization: next, events: Object.freeze(events) })
+    : Object.freeze({ civilization: next, events: Object.freeze(events), pathCache });
+}
+
+/** Advances one fixed settlement action pulse using the legacy direct path function. */
+export function advanceCivilization(
+  civilization: CivilizationState,
+  terrain: SettlementTerrain,
+  tick: number,
+): SettlementPulseResult {
+  const result = advanceCivilizationInternal(civilization, terrain, tick);
+  return Object.freeze({ civilization: result.civilization, events: result.events });
+}
+
+/**
+ * Advances one deterministic settlement pulse through the authoritative cache.
+ * Requests are collected by stable agent ID, then the fixed cache budget runs.
+ */
+export function advanceCivilizationWithPathCache(
+  civilization: CivilizationState,
+  terrain: SettlementTerrain,
+  tick: number,
+  pathCache: PathCacheState,
+): SettlementPathCachePulseResult {
+  const result = advanceCivilizationInternal(civilization, terrain, tick, pathCache);
+  if (result.pathCache === undefined)
+    throw new Error('Cached settlement pulse lost path cache state.');
+  return Object.freeze({
+    civilization: result.civilization,
+    events: result.events,
+    pathCache: result.pathCache,
+  });
 }
 
 export function attachFactualMemories(

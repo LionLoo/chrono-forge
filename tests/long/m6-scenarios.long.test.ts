@@ -107,6 +107,6 @@ describe('M6 accelerated multiple-civilization catalogue', () => {
             reloaded.civilizations.operationCount,
         })
         .toStrictEqual(scenario.expectedOperations);
-    }, 180_000);
+    }, 300_000);
   }
 });

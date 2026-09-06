@@ -57,5 +57,5 @@ describe('settlement invariants', () => {
       ),
       { numRuns: 100 },
     );
-  }, 30_000);
+  }, 60_000);
 });

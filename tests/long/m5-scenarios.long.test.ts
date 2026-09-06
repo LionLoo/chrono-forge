@@ -29,7 +29,9 @@ describe('M5 accelerated scenario acceptance', () => {
         assertWorldInvariants(world);
         expect(world.development.tick).toBe(year * scenario.yearTicks);
         expect(world.development.operationCount).toBe(year);
-        expect(hashWorldState(world)).toBe(scenario.expectedHashes[index]);
+        expect
+          .soft(hashWorldState(world), `${scenario.name} year ${year} hash`)
+          .toBe(scenario.expectedHashes[index]);
         scenarioCheckpoints.push(world);
       }
       checkpoints.set(scenario.name, Object.freeze(scenarioCheckpoints));

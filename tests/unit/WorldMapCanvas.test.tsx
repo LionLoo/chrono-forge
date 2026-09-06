@@ -195,7 +195,7 @@ describe('Pixi world projection', () => {
       });
     const world = createInitialWorld([1, 2, 3, 4]);
     const initial = projectWorldFrame(world);
-    const advanced = projectWorldFrame(stepWorld(world, 100));
+    const advanced = projectWorldFrame(stepWorld(world, 200));
     const movedAgentIndex = [...initial.agentTiles].findIndex(
       (tile, index) => tile !== advanced.agentTiles[index],
     );
@@ -248,7 +248,7 @@ describe('Pixi world projection', () => {
     const requestAnimationFrame = vi.spyOn(window, 'requestAnimationFrame');
     const world = createInitialWorld([1, 2, 3, 4]);
     const initial = projectWorldFrame(world);
-    const advanced = projectWorldFrame(stepWorld(world, 100));
+    const advanced = projectWorldFrame(stepWorld(world, 200));
     const movedAgentIndex = [...initial.agentTiles].findIndex(
       (tile, index) => tile !== advanced.agentTiles[index],
     );

@@ -15,6 +15,27 @@ import {
 } from '../civilizations';
 import type { Xoshiro128State } from '../random';
 import {
+  FIRST_ORDINARY_RESIDENT_ID,
+  MAX_AGGREGATE_RESIDENTS,
+  MAX_DETAILED_RESIDENTS,
+  MAX_SCALE_COHORT_RESIDENTS,
+  assertPopulationScaleInvariants,
+  assertVersionEightPopulationScaleInvariants,
+  createPopulationScale,
+  type AggregateCohortState,
+  type AggregateTotals,
+  type DetailedResidentState,
+  type PopulationScaleState,
+  type ScaleTransferDelta,
+} from '../scale';
+import {
+  assertPathCacheInvariants,
+  type CachedPathResult,
+  type PathCacheRequest,
+  type PathCacheState,
+  type PendingPathRequest,
+} from '../pathfinding/cache';
+import {
   DISASTER_KINDS,
   KNOWLEDGE_DEFINITIONS,
   assertDevelopmentInvariants,
@@ -75,6 +96,7 @@ import {
   assertWorldInvariants,
   canonicalWorldJson,
   civilizationsInitializationForWorld,
+  initializeM8WorldAuthority,
   type WorldChunk,
   type WorldConfig,
   type WorldEvent,
@@ -87,12 +109,14 @@ export const WORLD_SNAPSHOT_FORMAT = 'chrono-forge-world';
 // A strict persisted-payload shape change must increment all three values and retain a
 // parser for the prior format below. This keeps development saves from silently being
 // reinterpreted as a newer schema.
-export const WORLD_SNAPSHOT_FORMAT_VERSION = 7;
-export const WORLD_ENGINE_VERSION = 7;
-export const WORLD_CONTENT_VERSION = 7;
+export const WORLD_SNAPSHOT_FORMAT_VERSION = 9;
+export const WORLD_ENGINE_VERSION = 9;
+export const WORLD_CONTENT_VERSION = 9;
 
 const WORLD_SNAPSHOT_VERSION_SIX = 6;
 const WORLD_SNAPSHOT_VERSION_SEVEN = 7;
+const WORLD_SNAPSHOT_VERSION_EIGHT = 8;
+const WORLD_SNAPSHOT_VERSION_NINE = 9;
 const MAX_WORLD_TILES = 1_000_000;
 const MAX_WORLD_SNAPSHOT_BYTES = 50 * 1024 * 1024;
 const MAX_EVENT_KIND_LENGTH = 64;
@@ -169,7 +193,7 @@ interface VersionTwoWorldState extends Omit<LegacyWorldState, 'eventLog'> {
   readonly civilization: LegacyCivilizationState;
 }
 
-type PreM6WorldState = Omit<WorldState, 'civilizations'>;
+type PreM6WorldState = Omit<WorldState, 'civilizations' | 'populationScale' | 'pathCache'>;
 
 function migratePreM6World(state: PreM6WorldState, validate = true): WorldState {
   const civilizations = migrateSingleSettlementCivilizations(
@@ -177,7 +201,11 @@ function migratePreM6World(state: PreM6WorldState, validate = true): WorldState 
     state.tick,
     civilizationsInitializationForWorld(state),
   );
-  const world: WorldState = Object.freeze({ ...state, civilizations });
+  const world: WorldState = Object.freeze({
+    ...state,
+    civilizations,
+    ...initializeM8WorldAuthority({ ...state, civilizations }),
+  });
   if (validate) assertWorldInvariants(world);
   return world;
 }
@@ -3687,7 +3715,7 @@ function parseVersionFiveWorldPayload(value: unknown, validate = true): WorldSta
   return current;
 }
 
-function parseVersionSixWorldPayload(value: unknown): WorldState {
+function parseVersionSixWorldPayload(value: unknown, validate = true): WorldState {
   if (!isRecord(value)) throw new Error('Snapshot payload must be an object.');
   assertExactKeys(
     value,
@@ -3702,9 +3730,525 @@ function parseVersionSixWorldPayload(value: unknown): WorldState {
     world.tick,
     world.config.width * world.config.height,
   );
-  const current: WorldState = Object.freeze({ ...world, civilizations });
-  assertWorldInvariants(current);
+  const current: WorldState = Object.freeze({
+    ...world,
+    civilizations,
+    ...initializeM8WorldAuthority({ ...world, civilizations }),
+  });
+  if (validate) assertWorldInvariants(current);
   return current;
+}
+
+function parseScaleIds(value: unknown, name: string): readonly number[] {
+  if (!isUnknownArray(value)) throw new Error(`${name} must be an array.`);
+  return Object.freeze(value.map((entry, index) => safeInteger(entry, `${name}[${index}]`, 1)));
+}
+
+function parseScaleTotals(value: unknown, name: string): AggregateTotals {
+  if (!isRecord(value)) throw new Error(`${name} must be an object.`);
+  assertExactKeys(value, ['age', 'foodNeed', 'health', 'safety', 'skill', 'waterNeed'], name);
+  return Object.freeze({
+    age: safeInteger(value.age, `${name}.age`),
+    health: safeInteger(value.health, `${name}.health`),
+    foodNeed: safeInteger(value.foodNeed, `${name}.foodNeed`),
+    waterNeed: safeInteger(value.waterNeed, `${name}.waterNeed`),
+    safety: safeInteger(value.safety, `${name}.safety`),
+    skill: safeInteger(value.skill, `${name}.skill`),
+  });
+}
+
+function parsePopulationScale(
+  value: unknown,
+  worldTick: number,
+  includesResidentAllocator: boolean,
+): PopulationScaleState {
+  if (!isRecord(value)) throw new Error('Snapshot population scale must be an object.');
+  assertExactKeys(
+    value,
+    [
+      'backlog',
+      'cohorts',
+      'detailedResidents',
+      'nextCohortId',
+      ...(includesResidentAllocator ? ['nextResidentId'] : []),
+      'nextTransferId',
+      'operationCount',
+      'rng',
+      'tick',
+      'transfers',
+    ],
+    'Snapshot population scale',
+  );
+  if (
+    !isUnknownArray(value.detailedResidents) ||
+    !isUnknownArray(value.cohorts) ||
+    !isUnknownArray(value.transfers)
+  )
+    throw new Error('Snapshot population scale collections must be arrays.');
+  const detailedResidents = Object.freeze(
+    value.detailedResidents.map((candidate, index): DetailedResidentState => {
+      if (!isRecord(candidate))
+        throw new Error(`Snapshot detailed resident ${index} must be an object.`);
+      assertExactKeys(
+        candidate,
+        [
+          'age',
+          'civilizationId',
+          'cultureId',
+          'eventIds',
+          'familyIds',
+          'foodNeed',
+          'health',
+          'householdId',
+          'id',
+          'importance',
+          'nextUpdateTick',
+          'relationshipIds',
+          'rng',
+          'safety',
+          'settlementId',
+          'skill',
+          'tileIndex',
+          'updateCount',
+          'waterNeed',
+        ],
+        `Snapshot detailed resident ${index}`,
+      );
+      return Object.freeze({
+        id: safeInteger(candidate.id, `Snapshot detailed resident ${index} id`, 1),
+        settlementId: safeInteger(
+          candidate.settlementId,
+          `Snapshot detailed resident ${index} settlement`,
+          1,
+        ),
+        civilizationId: safeInteger(
+          candidate.civilizationId,
+          `Snapshot detailed resident ${index} civilization`,
+          1,
+        ),
+        cultureId: safeInteger(
+          candidate.cultureId,
+          `Snapshot detailed resident ${index} culture`,
+          1,
+        ),
+        householdId: safeInteger(
+          candidate.householdId,
+          `Snapshot detailed resident ${index} household`,
+          includesResidentAllocator ? 0 : 1,
+        ),
+        tileIndex: safeInteger(candidate.tileIndex, `Snapshot detailed resident ${index} tile`),
+        age: safeInteger(candidate.age, `Snapshot detailed resident ${index} age`),
+        health: safeInteger(candidate.health, `Snapshot detailed resident ${index} health`),
+        foodNeed: safeInteger(candidate.foodNeed, `Snapshot detailed resident ${index} food need`),
+        waterNeed: safeInteger(
+          candidate.waterNeed,
+          `Snapshot detailed resident ${index} water need`,
+        ),
+        safety: safeInteger(candidate.safety, `Snapshot detailed resident ${index} safety`),
+        skill: safeInteger(candidate.skill, `Snapshot detailed resident ${index} skill`),
+        importance: safeInteger(
+          candidate.importance,
+          `Snapshot detailed resident ${index} importance`,
+        ),
+        nextUpdateTick: safeInteger(
+          candidate.nextUpdateTick,
+          `Snapshot detailed resident ${index} next update`,
+        ),
+        updateCount: safeInteger(
+          candidate.updateCount,
+          `Snapshot detailed resident ${index} updates`,
+        ),
+        rng: parseRng(candidate.rng, `Snapshot detailed resident ${index} rng`),
+        relationshipIds: parseScaleIds(
+          candidate.relationshipIds,
+          `Snapshot detailed resident ${index} relationships`,
+        ),
+        familyIds: parseScaleIds(candidate.familyIds, `Snapshot detailed resident ${index} family`),
+        eventIds: parseScaleIds(candidate.eventIds, `Snapshot detailed resident ${index} events`),
+      });
+    }),
+  );
+  const cohorts = Object.freeze(
+    value.cohorts.map((candidate, index): AggregateCohortState => {
+      if (!isRecord(candidate) || !isRecord(candidate.classification))
+        throw new Error(`Snapshot scale cohort ${index} must be an object.`);
+      assertExactKeys(
+        candidate,
+        [
+          'classification',
+          'householdCount',
+          'id',
+          'nextUpdateTick',
+          ...(includesResidentAllocator ? ['promotionCursor'] : []),
+          'residentIds',
+          'totals',
+          'updateCount',
+        ],
+        `Snapshot scale cohort ${index}`,
+      );
+      assertExactKeys(
+        candidate.classification,
+        ['civilizationId', 'cultureId', 'householdId', 'settlementId', 'tileIndex'],
+        `Snapshot scale cohort ${index} classification`,
+      );
+      return Object.freeze({
+        id: safeInteger(candidate.id, `Snapshot scale cohort ${index} id`, 1),
+        classification: Object.freeze({
+          settlementId: safeInteger(
+            candidate.classification.settlementId,
+            `Snapshot scale cohort ${index} settlement`,
+            1,
+          ),
+          civilizationId: safeInteger(
+            candidate.classification.civilizationId,
+            `Snapshot scale cohort ${index} civilization`,
+            1,
+          ),
+          cultureId: safeInteger(
+            candidate.classification.cultureId,
+            `Snapshot scale cohort ${index} culture`,
+            1,
+          ),
+          householdId: safeInteger(
+            candidate.classification.householdId,
+            `Snapshot scale cohort ${index} household`,
+            includesResidentAllocator ? 0 : 1,
+          ),
+          tileIndex: safeInteger(
+            candidate.classification.tileIndex,
+            `Snapshot scale cohort ${index} tile`,
+          ),
+        }),
+        residentIds: parseScaleIds(
+          candidate.residentIds,
+          `Snapshot scale cohort ${index} residents`,
+        ),
+        householdCount: safeInteger(
+          candidate.householdCount,
+          `Snapshot scale cohort ${index} household count`,
+          includesResidentAllocator ? 0 : 1,
+        ),
+        totals: parseScaleTotals(candidate.totals, `Snapshot scale cohort ${index} totals`),
+        nextUpdateTick: safeInteger(
+          candidate.nextUpdateTick,
+          `Snapshot scale cohort ${index} next update`,
+        ),
+        updateCount: safeInteger(candidate.updateCount, `Snapshot scale cohort ${index} updates`),
+        promotionCursor: includesResidentAllocator
+          ? safeInteger(
+              candidate.promotionCursor,
+              `Snapshot scale cohort ${index} promotion cursor`,
+            )
+          : 0,
+      });
+    }),
+  );
+  const transfers = Object.freeze(
+    value.transfers.map((candidate, index): ScaleTransferDelta => {
+      if (!isRecord(candidate))
+        throw new Error(`Snapshot scale transfer ${index} must be an object.`);
+      assertExactKeys(
+        candidate,
+        [
+          'cohortId',
+          'firstResidentId',
+          'id',
+          'kind',
+          'lastResidentId',
+          'residentCount',
+          'tick',
+          'totals',
+        ],
+        `Snapshot scale transfer ${index}`,
+      );
+      if (
+        candidate.kind !== 'aggregated' &&
+        candidate.kind !== 'deaggregated' &&
+        (!includesResidentAllocator ||
+          (candidate.kind !== 'materialized' && candidate.kind !== 'removed'))
+      )
+        throw new Error(`Snapshot scale transfer ${index} kind is invalid.`);
+      return Object.freeze({
+        id: safeInteger(candidate.id, `Snapshot scale transfer ${index} id`, 1),
+        tick: safeInteger(candidate.tick, `Snapshot scale transfer ${index} tick`),
+        kind: candidate.kind,
+        cohortId: safeInteger(candidate.cohortId, `Snapshot scale transfer ${index} cohort`, 1),
+        residentCount: safeInteger(
+          candidate.residentCount,
+          `Snapshot scale transfer ${index} residents`,
+          1,
+        ),
+        firstResidentId: safeInteger(
+          candidate.firstResidentId,
+          `Snapshot scale transfer ${index} first resident`,
+          1,
+        ),
+        lastResidentId: safeInteger(
+          candidate.lastResidentId,
+          `Snapshot scale transfer ${index} last resident`,
+          1,
+        ),
+        totals: parseScaleTotals(candidate.totals, `Snapshot scale transfer ${index} totals`),
+      });
+    }),
+  );
+  if (!isRecord(value.backlog)) throw new Error('Snapshot scale backlog must be an object.');
+  assertExactKeys(
+    value.backlog,
+    ['cohortDue', 'detailedDue', 'totalDue'],
+    'Snapshot scale backlog',
+  );
+  const state: PopulationScaleState = Object.freeze({
+    tick: safeInteger(value.tick, 'Snapshot population scale tick', 0, worldTick),
+    nextResidentId: includesResidentAllocator
+      ? safeInteger(
+          value.nextResidentId,
+          'Snapshot population scale next resident',
+          FIRST_ORDINARY_RESIDENT_ID,
+        )
+      : Math.max(
+          FIRST_ORDINARY_RESIDENT_ID,
+          ...detailedResidents.map((resident) => resident.id + 1),
+          ...cohorts.flatMap((cohort) => cohort.residentIds.map((residentId) => residentId + 1)),
+        ),
+    nextCohortId: safeInteger(value.nextCohortId, 'Snapshot population scale next cohort', 1),
+    nextTransferId: safeInteger(value.nextTransferId, 'Snapshot population scale next transfer', 1),
+    rng: parseRng(value.rng, 'Snapshot population scale rng'),
+    detailedResidents,
+    cohorts,
+    transfers,
+    backlog: Object.freeze({
+      detailedDue: safeInteger(value.backlog.detailedDue, 'Snapshot scale detailed backlog'),
+      cohortDue: safeInteger(value.backlog.cohortDue, 'Snapshot scale cohort backlog'),
+      totalDue: safeInteger(value.backlog.totalDue, 'Snapshot scale total backlog'),
+    }),
+    operationCount: safeInteger(value.operationCount, 'Snapshot population scale operations'),
+  });
+  if (includesResidentAllocator) assertPopulationScaleInvariants(state);
+  else assertVersionEightPopulationScaleInvariants(state);
+  return state;
+}
+
+function parsePathRequest(value: unknown, name: string): PathCacheRequest {
+  if (!isRecord(value) || !isRecord(value.start) || !isRecord(value.goal))
+    throw new Error(`${name} must be an object.`);
+  assertExactKeys(
+    value,
+    ['chunkSize', 'goal', 'height', 'maxExpansions', 'revision', 'start', 'width'],
+    name,
+  );
+  assertExactKeys(value.start, ['x', 'y'], `${name} start`);
+  assertExactKeys(value.goal, ['x', 'y'], `${name} goal`);
+  return Object.freeze({
+    width: safeInteger(value.width, `${name} width`, 1),
+    height: safeInteger(value.height, `${name} height`, 1),
+    chunkSize: safeInteger(value.chunkSize, `${name} chunk size`, 1),
+    start: Object.freeze({
+      x: safeInteger(value.start.x, `${name} start x`),
+      y: safeInteger(value.start.y, `${name} start y`),
+    }),
+    goal: Object.freeze({
+      x: safeInteger(value.goal.x, `${name} goal x`),
+      y: safeInteger(value.goal.y, `${name} goal y`),
+    }),
+    maxExpansions: safeInteger(value.maxExpansions, `${name} expansions`),
+    revision: safeInteger(value.revision, `${name} revision`),
+  });
+}
+
+function parsePathCache(
+  value: unknown,
+  worldTick: number,
+  allowsDeferredFallback: boolean,
+): PathCacheState {
+  if (!isRecord(value)) throw new Error('Snapshot path cache must be an object.');
+  assertExactKeys(
+    value,
+    [
+      'backlog',
+      'completed',
+      'logicalTick',
+      'nextEntryId',
+      'nextRequestId',
+      'operationCount',
+      'pending',
+      'terrainRevision',
+    ],
+    'Snapshot path cache',
+  );
+  if (!isUnknownArray(value.pending) || !isUnknownArray(value.completed))
+    throw new Error('Snapshot path cache collections must be arrays.');
+  const pending = Object.freeze(
+    value.pending.map((candidate, index): PendingPathRequest => {
+      if (!isRecord(candidate))
+        throw new Error(`Snapshot pending path ${index} must be an object.`);
+      const hasDeferredFallback =
+        'stage' in candidate ||
+        'fallbackExpansionOffset' in candidate ||
+        'fallbackEligibleTick' in candidate;
+      assertExactKeys(
+        candidate,
+        hasDeferredFallback && allowsDeferredFallback
+          ? [
+              'fallbackEligibleTick',
+              'fallbackExpansionOffset',
+              'key',
+              'queuedAtTick',
+              'request',
+              'requestId',
+              'stage',
+            ]
+          : ['key', 'queuedAtTick', 'request', 'requestId'],
+        `Snapshot pending path ${index}`,
+      );
+      if (typeof candidate.key !== 'string')
+        throw new Error(`Snapshot pending path ${index} key is invalid.`);
+      if (hasDeferredFallback && candidate.stage !== 'direct-fallback')
+        throw new Error(`Snapshot pending path ${index} stage is invalid.`);
+      return Object.freeze({
+        requestId: safeInteger(candidate.requestId, `Snapshot pending path ${index} id`, 1),
+        key: candidate.key,
+        queuedAtTick: safeInteger(candidate.queuedAtTick, `Snapshot pending path ${index} tick`),
+        request: parsePathRequest(candidate.request, `Snapshot pending path ${index} request`),
+        ...(hasDeferredFallback
+          ? {
+              stage: 'direct-fallback' as const,
+              fallbackExpansionOffset: safeInteger(
+                candidate.fallbackExpansionOffset,
+                `Snapshot pending path ${index} fallback expansions`,
+              ),
+              fallbackEligibleTick: safeInteger(
+                candidate.fallbackEligibleTick,
+                `Snapshot pending path ${index} fallback eligible tick`,
+              ),
+            }
+          : {}),
+      });
+    }),
+  );
+  const completed = Object.freeze(
+    value.completed.map((candidate, index): CachedPathResult => {
+      if (
+        !isRecord(candidate) ||
+        !isUnknownArray(candidate.tilePath) ||
+        !isUnknownArray(candidate.chunkRoute) ||
+        !isUnknownArray(candidate.flowDirections)
+      )
+        throw new Error(`Snapshot completed path ${index} is malformed.`);
+      assertExactKeys(
+        candidate,
+        [
+          'chunkRoute',
+          'completedAtTick',
+          'entryId',
+          'expansions',
+          'flowDirections',
+          'key',
+          'lastUsedTick',
+          'request',
+          'status',
+          'tilePath',
+        ],
+        `Snapshot completed path ${index}`,
+      );
+      if (
+        typeof candidate.key !== 'string' ||
+        !['complete', 'no-path', 'quota-exhausted'].includes(String(candidate.status))
+      )
+        throw new Error(`Snapshot completed path ${index} status is invalid.`);
+      if (
+        !candidate.flowDirections.every((direction) =>
+          ['north', 'east', 'south', 'west', 'arrived'].includes(String(direction)),
+        )
+      )
+        throw new Error(`Snapshot completed path ${index} flow is invalid.`);
+      return Object.freeze({
+        entryId: safeInteger(candidate.entryId, `Snapshot completed path ${index} id`, 1),
+        key: candidate.key,
+        request: parsePathRequest(candidate.request, `Snapshot completed path ${index} request`),
+        status: candidate.status as CachedPathResult['status'],
+        expansions: safeInteger(
+          candidate.expansions,
+          `Snapshot completed path ${index} expansions`,
+        ),
+        tilePath: Object.freeze(
+          candidate.tilePath.map((tile, tileIndex) =>
+            safeInteger(tile, `Snapshot completed path ${index} tile ${tileIndex}`),
+          ),
+        ),
+        chunkRoute: Object.freeze(
+          candidate.chunkRoute.map((chunk, chunkIndex) =>
+            safeInteger(chunk, `Snapshot completed path ${index} chunk ${chunkIndex}`),
+          ),
+        ),
+        flowDirections: Object.freeze(
+          candidate.flowDirections as CachedPathResult['flowDirections'],
+        ),
+        completedAtTick: safeInteger(
+          candidate.completedAtTick,
+          `Snapshot completed path ${index} completed tick`,
+        ),
+        lastUsedTick: safeInteger(
+          candidate.lastUsedTick,
+          `Snapshot completed path ${index} used tick`,
+        ),
+      });
+    }),
+  );
+  const state: PathCacheState = Object.freeze({
+    terrainRevision: safeInteger(value.terrainRevision, 'Snapshot path cache terrain revision'),
+    logicalTick: safeInteger(value.logicalTick, 'Snapshot path cache logical tick', 0, worldTick),
+    nextRequestId: safeInteger(value.nextRequestId, 'Snapshot path cache next request', 1),
+    nextEntryId: safeInteger(value.nextEntryId, 'Snapshot path cache next entry', 1),
+    pending,
+    completed,
+    backlog: safeInteger(value.backlog, 'Snapshot path cache backlog'),
+    operationCount: safeInteger(value.operationCount, 'Snapshot path cache operations'),
+  });
+  assertPathCacheInvariants(state);
+  return state;
+}
+
+function parseVersionEightOrNineWorldPayload(
+  value: unknown,
+  includesResidentAllocator: boolean,
+): WorldState {
+  if (!isRecord(value)) throw new Error('Snapshot payload must be an object.');
+  assertExactKeys(
+    value,
+    [
+      ...LEGACY_PAYLOAD_KEYS,
+      'civilization',
+      'civilizations',
+      'development',
+      'pathCache',
+      'populationScale',
+    ],
+    'Snapshot payload',
+  );
+  const legacyPayload = { ...value };
+  delete legacyPayload.populationScale;
+  delete legacyPayload.pathCache;
+  const base = parseVersionSixWorldPayload(legacyPayload, false);
+  const current: WorldState = Object.freeze({
+    ...base,
+    populationScale: parsePopulationScale(
+      value.populationScale,
+      base.tick,
+      includesResidentAllocator,
+    ),
+    pathCache: parsePathCache(value.pathCache, base.tick, includesResidentAllocator),
+  });
+  if (includesResidentAllocator) assertWorldInvariants(current);
+  return current;
+}
+
+function parseVersionEightWorldPayload(value: unknown): WorldState {
+  return parseVersionEightOrNineWorldPayload(value, false);
+}
+
+function parseVersionNineWorldPayload(value: unknown): WorldState {
+  return parseVersionEightOrNineWorldPayload(value, true);
 }
 
 function parseEnvelope(snapshot: string): UnknownRecord {
@@ -3829,6 +4373,8 @@ function deserializeVersionFour(envelope: UnknownRecord): WorldState {
   const canonicalPayload = JSON.parse(canonicalWorldJson(world)) as UnknownRecord;
   delete canonicalPayload.development;
   delete canonicalPayload.civilizations;
+  delete canonicalPayload.populationScale;
+  delete canonicalPayload.pathCache;
   const canonical = JSON.stringify(canonicalPayload);
   if (canonical !== payloadJson) {
     let difference = 0;
@@ -3861,6 +4407,8 @@ function deserializeVersionFive(envelope: UnknownRecord): WorldState {
   const world = parseVersionFiveWorldPayload(envelope.payload);
   const canonicalPayload = JSON.parse(canonicalWorldJson(world)) as UnknownRecord;
   delete canonicalPayload.civilizations;
+  delete canonicalPayload.populationScale;
+  delete canonicalPayload.pathCache;
   const canonical = JSON.stringify(canonicalPayload);
   if (canonical !== payloadJson) {
     let difference = 0;
@@ -3891,8 +4439,11 @@ function deserializeVersionedWorld(envelope: UnknownRecord, version: number): Wo
   if (hashCanonicalJson(payloadJson) !== envelope.checksum)
     throw new Error('World snapshot checksum does not match its payload.');
   const world = parseVersionSixWorldPayload(envelope.payload);
-  if (canonicalWorldJson(world) !== payloadJson) {
-    const canonical = canonicalWorldJson(world);
+  const canonicalPayload = JSON.parse(canonicalWorldJson(world)) as UnknownRecord;
+  delete canonicalPayload.populationScale;
+  delete canonicalPayload.pathCache;
+  const canonical = JSON.stringify(canonicalPayload);
+  if (canonical !== payloadJson) {
     let difference = 0;
     while (difference < canonical.length && canonical[difference] === payloadJson[difference])
       difference += 1;
@@ -3911,6 +4462,239 @@ function deserializeVersionSix(envelope: UnknownRecord): WorldState {
 /** Parses the v7 payload shape. Keep this pinned when a later format becomes current. */
 function deserializeVersionSeven(envelope: UnknownRecord): WorldState {
   return deserializeVersionedWorld(envelope, WORLD_SNAPSHOT_VERSION_SEVEN);
+}
+
+const SCALE_TOTAL_KEYS = ['age', 'health', 'foodNeed', 'waterNeed', 'safety', 'skill'] as const;
+
+function versionEightPopulationScalePayload(state: PopulationScaleState): UnknownRecord {
+  assertVersionEightPopulationScaleInvariants(state);
+  return {
+    tick: state.tick,
+    nextCohortId: state.nextCohortId,
+    nextTransferId: state.nextTransferId,
+    rng: [...state.rng],
+    detailedResidents: state.detailedResidents.map((resident) => ({
+      ...resident,
+      rng: [...resident.rng],
+      relationshipIds: [...resident.relationshipIds],
+      familyIds: [...resident.familyIds],
+      eventIds: [...resident.eventIds],
+    })),
+    cohorts: state.cohorts.map((cohort) => ({
+      id: cohort.id,
+      classification: { ...cohort.classification },
+      residentIds: [...cohort.residentIds],
+      householdCount: cohort.householdCount,
+      totals: { ...cohort.totals },
+      nextUpdateTick: cohort.nextUpdateTick,
+      updateCount: cohort.updateCount,
+    })),
+    transfers: state.transfers.map((transfer) => ({
+      ...transfer,
+      totals: { ...transfer.totals },
+    })),
+    backlog: { ...state.backlog },
+    operationCount: state.operationCount,
+  };
+}
+
+function canonicalVersionEightWorldJson(world: WorldState): string {
+  const currentPopulationScale = initializeM8WorldAuthority(world).populationScale;
+  const payload = JSON.parse(
+    canonicalWorldJson({ ...world, populationScale: currentPopulationScale }),
+  ) as UnknownRecord;
+  payload.populationScale = versionEightPopulationScalePayload(world.populationScale);
+  return JSON.stringify(payload);
+}
+
+function legacyScaleTotalPortion(
+  total: number,
+  sourceCount: number,
+  startIndex: number,
+  length: number,
+): number {
+  const quotient = Math.floor(total / sourceCount);
+  const remainder = total % sourceCount;
+  const endIndex = startIndex + length;
+  return quotient * length + Math.max(0, Math.min(endIndex, remainder) - startIndex);
+}
+
+/**
+ * Normalizes every valid v8 population into v9's bounded anonymous settlement cohorts. Named
+ * living people retain their identity; every ordinary identity moves to the disjoint persisted
+ * allocator range. Splitting conserves every aggregate total without inventing history.
+ */
+function upgradeVersionEightPopulation(world: WorldState): WorldState {
+  const settlements = new Map(
+    world.civilizations.settlements.map((settlement) => [settlement.id, settlement] as const),
+  );
+  const livingNamedIds = new Set(
+    world.civilization.society.people.filter((person) => person.alive).map((person) => person.id),
+  );
+  const ordinaryIds = [
+    ...world.populationScale.detailedResidents
+      .filter((resident) => !livingNamedIds.has(resident.id))
+      .map((resident) => resident.id),
+    ...world.populationScale.cohorts.flatMap((cohort) => cohort.residentIds),
+  ].sort((left, right) => left - right);
+  if (ordinaryIds.length > MAX_AGGREGATE_RESIDENTS + MAX_DETAILED_RESIDENTS)
+    throw new Error('Version 8 population exceeds migration capacity.');
+  const ordinaryIdMap = new Map(
+    ordinaryIds.map(
+      (residentId, index) => [residentId, FIRST_ORDINARY_RESIDENT_ID + index] as const,
+    ),
+  );
+  const settlementFor = (settlementId: number) => {
+    const settlement = settlements.get(settlementId);
+    if (settlement === undefined || settlement.status === 'abandoned')
+      throw new Error('Version 8 population references an inactive settlement.');
+    return settlement;
+  };
+  const detailedResidents = world.populationScale.detailedResidents
+    .map((resident): DetailedResidentState => {
+      if (livingNamedIds.has(resident.id)) return resident;
+      const settlement = settlementFor(resident.settlementId);
+      return Object.freeze({
+        ...resident,
+        id: ordinaryIdMap.get(resident.id)!,
+        settlementId: settlement.id,
+        civilizationId: settlement.civilizationId,
+        cultureId: settlement.cultureId,
+        householdId: 0,
+        tileIndex: settlement.centerTileIndex,
+        importance: 0,
+        relationshipIds: Object.freeze([]),
+        familyIds: Object.freeze([]),
+        eventIds: Object.freeze([]),
+      });
+    })
+    .sort((left, right) => left.id - right.id);
+
+  let nextCohortId = world.populationScale.nextCohortId;
+  const cohorts: AggregateCohortState[] = [];
+  for (const legacy of world.populationScale.cohorts) {
+    const settlement = settlementFor(legacy.classification.settlementId);
+    const sourceCount = legacy.residentIds.length;
+    for (let start = 0; start < sourceCount; start += MAX_SCALE_COHORT_RESIDENTS) {
+      const residentIds = legacy.residentIds
+        .slice(start, start + MAX_SCALE_COHORT_RESIDENTS)
+        .map((residentId) => ordinaryIdMap.get(residentId)!);
+      const length = residentIds.length;
+      const totals = Object.fromEntries(
+        SCALE_TOTAL_KEYS.map((key) => [
+          key,
+          legacyScaleTotalPortion(legacy.totals[key], sourceCount, start, length),
+        ]),
+      ) as unknown as AggregateTotals;
+      cohorts.push(
+        Object.freeze({
+          id: start === 0 ? legacy.id : nextCohortId++,
+          classification: Object.freeze({
+            settlementId: settlement.id,
+            civilizationId: settlement.civilizationId,
+            cultureId: settlement.cultureId,
+            householdId: 0,
+            tileIndex: settlement.centerTileIndex,
+          }),
+          residentIds: Object.freeze(residentIds),
+          householdCount: 0,
+          totals: Object.freeze(totals),
+          nextUpdateTick: legacy.nextUpdateTick,
+          updateCount: legacy.updateCount,
+          promotionCursor: 0,
+        }),
+      );
+    }
+  }
+  cohorts.sort((left, right) => left.id - right.id);
+
+  const base = createPopulationScale(world.populationScale.rng, world.populationScale.tick, {
+    detailedResidents,
+    cohorts,
+  });
+  const transfers = world.populationScale.transfers.map((transfer) => {
+    const firstResidentId = ordinaryIdMap.get(transfer.firstResidentId) ?? transfer.firstResidentId;
+    const lastResidentId = ordinaryIdMap.get(transfer.lastResidentId) ?? transfer.lastResidentId;
+    return Object.freeze({
+      ...transfer,
+      firstResidentId: Math.min(firstResidentId, lastResidentId),
+      lastResidentId: Math.max(firstResidentId, lastResidentId),
+    });
+  });
+  const populationScale: PopulationScaleState = Object.freeze({
+    ...base,
+    nextResidentId: FIRST_ORDINARY_RESIDENT_ID + ordinaryIds.length,
+    nextCohortId,
+    nextTransferId: world.populationScale.nextTransferId,
+    transfers: Object.freeze(transfers),
+    operationCount: world.populationScale.operationCount,
+  });
+  assertPopulationScaleInvariants(populationScale);
+  const upgraded = Object.freeze({ ...world, populationScale });
+  assertWorldInvariants(upgraded);
+  return upgraded;
+}
+
+/** Parses the strict v8 payload shape including population and cache authority. */
+function deserializeVersionEight(envelope: UnknownRecord): WorldState {
+  assertExactKeys(
+    envelope,
+    ['checksum', 'contentVersion', 'engineVersion', 'format', 'formatVersion', 'payload'],
+    'World snapshot envelope',
+  );
+  if (
+    envelope.formatVersion !== WORLD_SNAPSHOT_VERSION_EIGHT ||
+    envelope.engineVersion !== WORLD_SNAPSHOT_VERSION_EIGHT ||
+    envelope.contentVersion !== WORLD_SNAPSHOT_VERSION_EIGHT ||
+    typeof envelope.checksum !== 'string'
+  ) {
+    throw new Error('World snapshot version metadata is invalid.');
+  }
+  const payloadJson = JSON.stringify(envelope.payload);
+  if (hashCanonicalJson(payloadJson) !== envelope.checksum)
+    throw new Error('World snapshot checksum does not match its payload.');
+  const world = parseVersionEightWorldPayload(envelope.payload);
+  const canonical = canonicalVersionEightWorldJson(world);
+  if (canonical !== payloadJson) {
+    let difference = 0;
+    while (difference < canonical.length && canonical[difference] === payloadJson[difference])
+      difference += 1;
+    throw new Error(
+      `World snapshot payload is not canonical at byte ${difference}: ${payloadJson.slice(difference, difference + 80)} != ${canonical.slice(difference, difference + 80)}.`,
+    );
+  }
+  return upgradeVersionEightPopulation(world);
+}
+
+/** Parses the strict v9 payload shape including the persisted ordinary-resident allocator. */
+function deserializeVersionNine(envelope: UnknownRecord): WorldState {
+  assertExactKeys(
+    envelope,
+    ['checksum', 'contentVersion', 'engineVersion', 'format', 'formatVersion', 'payload'],
+    'World snapshot envelope',
+  );
+  if (
+    envelope.formatVersion !== WORLD_SNAPSHOT_VERSION_NINE ||
+    envelope.engineVersion !== WORLD_SNAPSHOT_VERSION_NINE ||
+    envelope.contentVersion !== WORLD_SNAPSHOT_VERSION_NINE ||
+    typeof envelope.checksum !== 'string'
+  ) {
+    throw new Error('World snapshot version metadata is invalid.');
+  }
+  const payloadJson = JSON.stringify(envelope.payload);
+  if (hashCanonicalJson(payloadJson) !== envelope.checksum)
+    throw new Error('World snapshot checksum does not match its payload.');
+  const world = parseVersionNineWorldPayload(envelope.payload);
+  const canonical = canonicalWorldJson(world);
+  if (canonical !== payloadJson) {
+    let difference = 0;
+    while (difference < canonical.length && canonical[difference] === payloadJson[difference])
+      difference += 1;
+    throw new Error(
+      `World snapshot payload is not canonical at byte ${difference}: ${payloadJson.slice(difference, difference + 80)} != ${canonical.slice(difference, difference + 80)}.`,
+    );
+  }
+  return world;
 }
 
 function canonicalVersionTwoWorldJson(state: VersionTwoWorldState): string {
@@ -4014,12 +4798,13 @@ export function migrateWorldSnapshot(snapshot: string): string {
   if (formatVersion > WORLD_SNAPSHOT_FORMAT_VERSION) {
     throw new Error(`World snapshot version ${formatVersion} is newer than this application.`);
   }
-  // Keep every historic parser branch explicit. When v8 is introduced, add its parser for the
-  // current-version branch below but retain this v7 branch so existing generations keep loading.
-  if (formatVersion === WORLD_SNAPSHOT_VERSION_SEVEN) {
-    return serializeWorldSnapshot(deserializeVersionSeven(envelope));
+  if (formatVersion === WORLD_SNAPSHOT_VERSION_NINE) {
+    return serializeWorldSnapshot(deserializeVersionNine(envelope));
   }
-  if (formatVersion === WORLD_SNAPSHOT_FORMAT_VERSION) {
+  if (formatVersion === WORLD_SNAPSHOT_VERSION_EIGHT) {
+    return serializeWorldSnapshot(deserializeVersionEight(envelope));
+  }
+  if (formatVersion === WORLD_SNAPSHOT_VERSION_SEVEN) {
     return serializeWorldSnapshot(deserializeVersionSeven(envelope));
   }
   if (formatVersion === WORLD_SNAPSHOT_VERSION_SIX) {
@@ -4072,5 +4857,5 @@ export function migrateWorldSnapshot(snapshot: string): string {
 /** Loads and validates a supported snapshot without mutating its input. */
 export function deserializeWorldSnapshot(snapshot: string): WorldState {
   const migrated = migrateWorldSnapshot(snapshot);
-  return deserializeVersionSeven(parseEnvelope(migrated));
+  return deserializeVersionNine(parseEnvelope(migrated));
 }
