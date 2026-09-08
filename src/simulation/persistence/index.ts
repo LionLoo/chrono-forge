@@ -92,6 +92,23 @@ import {
   type SharedRelationshipEvent,
 } from '../relationships';
 import {
+  assertSpaceInvariants,
+  createInitialSpace,
+  type AlienCivilization,
+  type CargoEndpoint,
+  type CargoTransfer,
+  type CelestialBody,
+  type CivilizationSpaceProgram,
+  type DelayedCommunication,
+  type SpaceColony,
+  type SpaceMission,
+  type SpaceRelation,
+  type SpaceResourceLedger,
+  type SpaceResourceStock,
+  type SpaceState,
+  type Spacecraft,
+} from '../space';
+import {
   Biome,
   assertWorldInvariants,
   canonicalWorldJson,
@@ -100,6 +117,8 @@ import {
   type WorldChunk,
   type WorldConfig,
   type WorldEvent,
+  type WorldEntityKind,
+  type SocietyWorldEvent,
   type WorldSeed,
   type WorldState,
   type WorldTileFields,
@@ -109,14 +128,15 @@ export const WORLD_SNAPSHOT_FORMAT = 'chrono-forge-world';
 // A strict persisted-payload shape change must increment all three values and retain a
 // parser for the prior format below. This keeps development saves from silently being
 // reinterpreted as a newer schema.
-export const WORLD_SNAPSHOT_FORMAT_VERSION = 9;
-export const WORLD_ENGINE_VERSION = 9;
-export const WORLD_CONTENT_VERSION = 9;
+export const WORLD_SNAPSHOT_FORMAT_VERSION = 10;
+export const WORLD_ENGINE_VERSION = 10;
+export const WORLD_CONTENT_VERSION = 10;
 
 const WORLD_SNAPSHOT_VERSION_SIX = 6;
 const WORLD_SNAPSHOT_VERSION_SEVEN = 7;
 const WORLD_SNAPSHOT_VERSION_EIGHT = 8;
 const WORLD_SNAPSHOT_VERSION_NINE = 9;
+const WORLD_SNAPSHOT_VERSION_TEN = 10;
 const MAX_WORLD_TILES = 1_000_000;
 const MAX_WORLD_SNAPSHOT_BYTES = 50 * 1024 * 1024;
 const MAX_EVENT_KIND_LENGTH = 64;
@@ -193,7 +213,10 @@ interface VersionTwoWorldState extends Omit<LegacyWorldState, 'eventLog'> {
   readonly civilization: LegacyCivilizationState;
 }
 
-type PreM6WorldState = Omit<WorldState, 'civilizations' | 'populationScale' | 'pathCache'>;
+type PreM6WorldState = Omit<
+  WorldState,
+  'civilizations' | 'populationScale' | 'pathCache' | 'space'
+>;
 
 function migratePreM6World(state: PreM6WorldState, validate = true): WorldState {
   const civilizations = migrateSingleSettlementCivilizations(
@@ -204,6 +227,7 @@ function migratePreM6World(state: PreM6WorldState, validate = true): WorldState 
   const world: WorldState = Object.freeze({
     ...state,
     civilizations,
+    space: createInitialSpace(state.seed, state.tick),
     ...initializeM8WorldAuthority({ ...state, civilizations }),
   });
   if (validate) assertWorldInvariants(world);
@@ -337,6 +361,48 @@ const ENTITY_KINDS = new Set<EntityKind>([
   'conflict',
   'ruin',
   'world',
+]);
+const WORLD_ENTITY_KINDS = new Set<WorldEntityKind>([
+  ...ENTITY_KINDS,
+  'celestial-body',
+  'space-program',
+  'spacecraft',
+  'space-colony',
+  'alien-civilization',
+]);
+const SPACE_BODY_KINDS = new Set<CelestialBody['kind']>(['home', 'moon', 'planet', 'asteroid']);
+const SPACE_PROGRAM_STAGES = new Set<CivilizationSpaceProgram['stage']>([
+  'advanced-energy',
+  'planetary-engineering',
+  'spaceflight',
+]);
+const SPACE_MISSION_KINDS = new Set<SpaceMission['kind']>(['orbital', 'exploration', 'colony']);
+const SPACE_MISSION_STATUSES = new Set<SpaceMission['status']>(['active', 'completed', 'failed']);
+const SPACECRAFT_STATUSES = new Set<Spacecraft['status']>([
+  'grounded',
+  'in-flight',
+  'orbiting',
+  'retired',
+]);
+const CARGO_STATUSES = new Set<CargoTransfer['status']>(['active', 'completed', 'lost']);
+const COMMUNICATION_STATUSES = new Set<DelayedCommunication['status']>(['pending', 'delivered']);
+const COMMUNICATION_TOPICS = new Set<DelayedCommunication['topic']>([
+  'mission',
+  'colony',
+  'contact',
+  'reply',
+]);
+const ALIEN_TRAITS = new Set<AlienCivilization['trait']>([
+  'curious',
+  'cautious',
+  'competitive',
+  'hostile',
+]);
+const SPACE_RELATION_STATUSES = new Set<SpaceRelation['status']>([
+  'allied',
+  'cooperative',
+  'competitive',
+  'hostile',
 ]);
 const ECONOMIC_ROLES = new Set<EconomicRole>(['grower', 'maker', 'trader', 'caretaker']);
 const GOVERNMENTS = new Set<GovernmentKind>(['council', 'stewardship']);
@@ -1427,16 +1493,9 @@ function parseCivilization(
   sortedUniqueIds(structures, 'Civilization structure');
   const structureIds = new Set(structures.map((structure) => structure.id));
   const structuresById = new Map(structures.map((structure) => [structure.id, structure]));
-  const isWalkable = (tileIndex: number) =>
-    (tiles.water[tileIndex] ?? 1) === 0 &&
-    (tiles.habitability[tileIndex] ?? 0) >= 80 &&
-    (tiles.hazard[tileIndex] ?? 255) < 180;
-  if (!isWalkable(centerTileIndex)) throw new Error('Civilization center tile must be walkable.');
   const occupiedStructures = new Set<number>();
   for (const structure of structures) {
     if (structure.status !== 'demolished') {
-      if (!isWalkable(structure.tileIndex))
-        throw new Error('Active structure placement must be walkable.');
       if (occupiedStructures.has(structure.tileIndex))
         throw new Error('Active structures cannot share a tile.');
       occupiedStructures.add(structure.tileIndex);
@@ -1658,7 +1717,6 @@ function parseCivilization(
   const agentIds = new Set(agents.map((agent) => agent.id));
   const memoryIds = new Set<number>();
   for (const agent of agents) {
-    if (!isWalkable(agent.tileIndex)) throw new Error('Agent placement must be walkable.');
     if (agent.route.length > 0) {
       if (
         agent.route[agent.routeCursor] !== agent.tileIndex ||
@@ -1668,7 +1726,6 @@ function parseCivilization(
       }
       for (let routeIndex = 0; routeIndex < agent.route.length; routeIndex += 1) {
         const tileIndex = agent.route[routeIndex]!;
-        if (!isWalkable(tileIndex)) throw new Error('Agent route must remain walkable.');
         if (routeIndex > 0) {
           const previous = agent.route[routeIndex - 1]!;
           const distance =
@@ -3004,11 +3061,12 @@ function parseSociety(
   return society;
 }
 
-function parseTypedEvents(
+function parseWorldEvents(
   value: unknown,
   tick: number,
   nextEventId: number,
   tileCount: number,
+  entityKinds: ReadonlySet<WorldEntityKind>,
 ): readonly WorldEvent[] {
   if (!isUnknownArray(value)) throw new Error('Snapshot eventLog must be an array.');
   const events = value.map((candidate, index) => {
@@ -3033,12 +3091,12 @@ function parseTypedEvents(
     );
     const subjectKind = enumValue(
       candidate.subjectKind,
-      ENTITY_KINDS,
+      entityKinds,
       `Snapshot event ${index} subject kind`,
     );
     const targetKind = enumValue(
       candidate.targetKind,
-      ENTITY_KINDS,
+      entityKinds,
       `Snapshot event ${index} target kind`,
     );
     const subjectId = safeInteger(
@@ -3085,6 +3143,21 @@ function parseTypedEvents(
   if (nextEventId <= (events.at(-1)?.id ?? 0))
     throw new Error('Snapshot nextEventId must exceed every event id.');
   return Object.freeze(events);
+}
+
+function parseTypedEvents(
+  value: unknown,
+  tick: number,
+  nextEventId: number,
+  tileCount: number,
+): readonly SocietyWorldEvent[] {
+  return parseWorldEvents(
+    value,
+    tick,
+    nextEventId,
+    tileCount,
+    ENTITY_KINDS,
+  ) as readonly SocietyWorldEvent[];
 }
 
 function parseChildArrivalEligibilityEvidence(
@@ -3286,7 +3359,7 @@ function legacyEventSummary(event: LegacyM3Event, civilization: LegacyCivilizati
   return `Recorded ${event.kind} at tick ${event.tick}.`;
 }
 
-function typedLegacyEvents(state: VersionTwoWorldState): readonly WorldEvent[] {
+function typedLegacyEvents(state: VersionTwoWorldState): readonly SocietyWorldEvent[] {
   return Object.freeze(
     state.eventLog.map((event) =>
       Object.freeze({
@@ -3397,7 +3470,7 @@ function upgradeLegacyWorld(state: LegacyWorldState): WorldState {
       (state.hazard[tileIndex] ?? 255) < 180,
   };
   const foundingCivilization = createCivilizationAtTick(state.seed, terrain, state.tick);
-  const foundersTyped: WorldEvent = Object.freeze({
+  const foundersTyped: SocietyWorldEvent = Object.freeze({
     id: state.nextEventId,
     tick: state.tick,
     kind: 'founders-arrived',
@@ -4209,6 +4282,429 @@ function parsePathCache(
   return state;
 }
 
+function parseSpaceStock(value: unknown, name: string): SpaceResourceStock {
+  if (!isRecord(value)) throw new Error(`${name} must be an object.`);
+  assertExactKeys(value, ['food', 'metal', 'stone', 'timber', 'water'], name);
+  return Object.freeze({
+    food: safeInteger(value.food, `${name} food`),
+    water: safeInteger(value.water, `${name} water`),
+    timber: safeInteger(value.timber, `${name} timber`),
+    stone: safeInteger(value.stone, `${name} stone`),
+    metal: safeInteger(value.metal, `${name} metal`),
+  });
+}
+
+function nullableSpaceInteger(value: unknown, name: string): number | null {
+  return value === null ? null : safeInteger(value, name);
+}
+
+function parseSpaceEndpoint(value: unknown, name: string): CargoEndpoint {
+  if (!isRecord(value) || typeof value.kind !== 'string')
+    throw new Error(`${name} must be an object.`);
+  if (value.kind === 'settlement') {
+    assertExactKeys(value, ['civilizationId', 'kind', 'settlementId'], name);
+    return Object.freeze({
+      kind: 'settlement',
+      civilizationId: safeInteger(value.civilizationId, `${name} civilization`, 1),
+      settlementId: safeInteger(value.settlementId, `${name} settlement`, 1),
+    });
+  }
+  if (value.kind === 'colony') {
+    assertExactKeys(value, ['colonyId', 'kind'], name);
+    return Object.freeze({
+      kind: 'colony',
+      colonyId: safeInteger(value.colonyId, `${name} colony`, 1),
+    });
+  }
+  if (value.kind === 'alien') {
+    assertExactKeys(value, ['alienId', 'kind'], name);
+    return Object.freeze({
+      kind: 'alien',
+      alienId: safeInteger(value.alienId, `${name} alien`, 1),
+    });
+  }
+  throw new Error(`${name} kind is invalid.`);
+}
+
+function parseSpaceState(value: unknown, worldTick: number): SpaceState {
+  if (!isRecord(value)) throw new Error('Snapshot space authority must be an object.');
+  assertExactKeys(
+    value,
+    [
+      'aliens',
+      'bodies',
+      'cargoTransfers',
+      'colonies',
+      'communications',
+      'contactRng',
+      'ledger',
+      'missionRng',
+      'missions',
+      'nextOffworldResidentId',
+      'nextSpaceId',
+      'operationCount',
+      'programRng',
+      'programs',
+      'relations',
+      'spacecraft',
+      'systemRng',
+      'tick',
+    ],
+    'Snapshot space authority',
+  );
+  for (const [name, collection] of [
+    ['bodies', value.bodies],
+    ['programs', value.programs],
+    ['spacecraft', value.spacecraft],
+    ['missions', value.missions],
+    ['colonies', value.colonies],
+    ['cargo transfers', value.cargoTransfers],
+    ['communications', value.communications],
+    ['aliens', value.aliens],
+    ['relations', value.relations],
+  ] as const)
+    if (!isUnknownArray(collection)) throw new Error(`Snapshot space ${name} must be an array.`);
+
+  const bodies = Object.freeze(
+    (value.bodies as unknown[]).map((candidate, index): CelestialBody => {
+      const name = `Snapshot space body ${index}`;
+      if (!isRecord(candidate)) throw new Error(`${name} must be an object.`);
+      assertExactKeys(
+        candidate,
+        ['distance', 'habitable', 'id', 'kind', 'name', 'originalDeposit', 'remainingDeposit'],
+        name,
+      );
+      if (typeof candidate.habitable !== 'boolean')
+        throw new Error(`${name} habitability is invalid.`);
+      return Object.freeze({
+        id: safeInteger(candidate.id, `${name} id`, 1),
+        kind: enumValue(candidate.kind, SPACE_BODY_KINDS, `${name} kind`),
+        name: finiteString(candidate.name, `${name} name`, 80),
+        distance: safeInteger(candidate.distance, `${name} distance`),
+        habitable: candidate.habitable,
+        originalDeposit: parseSpaceStock(candidate.originalDeposit, `${name} original deposit`),
+        remainingDeposit: parseSpaceStock(candidate.remainingDeposit, `${name} remaining deposit`),
+      });
+    }),
+  );
+  const programs = Object.freeze(
+    (value.programs as unknown[]).map((candidate, index): CivilizationSpaceProgram => {
+      const name = `Snapshot space program ${index}`;
+      if (!isRecord(candidate)) throw new Error(`${name} must be an object.`);
+      assertExactKeys(
+        candidate,
+        [
+          'civilizationId',
+          'cultureId',
+          'id',
+          'launchCapacity',
+          'planetaryTransportCapacity',
+          'settlementId',
+          'stage',
+          'startedTick',
+          'updatedTick',
+        ],
+        name,
+      );
+      return Object.freeze({
+        id: safeInteger(candidate.id, `${name} id`, 1),
+        civilizationId: safeInteger(candidate.civilizationId, `${name} civilization`, 1),
+        settlementId: safeInteger(candidate.settlementId, `${name} settlement`, 1),
+        cultureId: safeInteger(candidate.cultureId, `${name} culture`, 1),
+        stage: enumValue(candidate.stage, SPACE_PROGRAM_STAGES, `${name} stage`),
+        startedTick: safeInteger(candidate.startedTick, `${name} started tick`),
+        updatedTick: safeInteger(candidate.updatedTick, `${name} updated tick`),
+        planetaryTransportCapacity: safeInteger(
+          candidate.planetaryTransportCapacity,
+          `${name} transport capacity`,
+        ),
+        launchCapacity: safeInteger(candidate.launchCapacity, `${name} launch capacity`),
+      });
+    }),
+  );
+  const spacecraft = Object.freeze(
+    (value.spacecraft as unknown[]).map((candidate, index): Spacecraft => {
+      const name = `Snapshot spacecraft ${index}`;
+      if (!isRecord(candidate)) throw new Error(`${name} must be an object.`);
+      assertExactKeys(
+        candidate,
+        [
+          'civilizationId',
+          'currentBodyId',
+          'id',
+          'launchedTick',
+          'missionId',
+          'settlementId',
+          'status',
+        ],
+        name,
+      );
+      return Object.freeze({
+        id: safeInteger(candidate.id, `${name} id`, 1),
+        civilizationId: safeInteger(candidate.civilizationId, `${name} civilization`, 1),
+        settlementId: safeInteger(candidate.settlementId, `${name} settlement`, 1),
+        status: enumValue(candidate.status, SPACECRAFT_STATUSES, `${name} status`),
+        currentBodyId: safeInteger(candidate.currentBodyId, `${name} body`, 1),
+        missionId: nullableSpaceInteger(candidate.missionId, `${name} mission`),
+        launchedTick: nullableSpaceInteger(candidate.launchedTick, `${name} launched tick`),
+      });
+    }),
+  );
+  const missions = Object.freeze(
+    (value.missions as unknown[]).map((candidate, index): SpaceMission => {
+      const name = `Snapshot space mission ${index}`;
+      if (
+        !isRecord(candidate) ||
+        !isUnknownArray(candidate.passengerIds) ||
+        !isUnknownArray(candidate.manifestPassengerIds)
+      )
+        throw new Error(`${name} must be an object with passenger arrays.`);
+      assertExactKeys(
+        candidate,
+        [
+          'cargo',
+          'civilizationId',
+          'completedTick',
+          'cultureId',
+          'departureTick',
+          'destinationBodyId',
+          'dueTick',
+          'id',
+          'kind',
+          'manifestCargo',
+          'manifestPassengerIds',
+          'originBodyId',
+          'passengerIds',
+          'settlementId',
+          'spacecraftId',
+          'status',
+        ],
+        name,
+      );
+      return Object.freeze({
+        id: safeInteger(candidate.id, `${name} id`, 1),
+        spacecraftId: safeInteger(candidate.spacecraftId, `${name} spacecraft`, 1),
+        civilizationId: safeInteger(candidate.civilizationId, `${name} civilization`, 1),
+        settlementId: safeInteger(candidate.settlementId, `${name} settlement`, 1),
+        cultureId: safeInteger(candidate.cultureId, `${name} culture`, 1),
+        kind: enumValue(candidate.kind, SPACE_MISSION_KINDS, `${name} kind`),
+        originBodyId: safeInteger(candidate.originBodyId, `${name} origin body`, 1),
+        destinationBodyId: safeInteger(candidate.destinationBodyId, `${name} destination body`, 1),
+        departureTick: safeInteger(candidate.departureTick, `${name} departure tick`),
+        dueTick: safeInteger(candidate.dueTick, `${name} due tick`),
+        status: enumValue(candidate.status, SPACE_MISSION_STATUSES, `${name} status`),
+        completedTick: nullableSpaceInteger(candidate.completedTick, `${name} completed tick`),
+        passengerIds: Object.freeze(
+          candidate.passengerIds.map((id, passengerIndex) =>
+            safeInteger(id, `${name} passenger ${passengerIndex}`, 1),
+          ),
+        ),
+        manifestPassengerIds: Object.freeze(
+          candidate.manifestPassengerIds.map((id, passengerIndex) =>
+            safeInteger(id, `${name} manifest passenger ${passengerIndex}`, 1),
+          ),
+        ),
+        cargo: parseSpaceStock(candidate.cargo, `${name} cargo`),
+        manifestCargo: parseSpaceStock(candidate.manifestCargo, `${name} manifest cargo`),
+      });
+    }),
+  );
+  const colonies = Object.freeze(
+    (value.colonies as unknown[]).map((candidate, index): SpaceColony => {
+      const name = `Snapshot space colony ${index}`;
+      if (!isRecord(candidate) || !isUnknownArray(candidate.residentIds))
+        throw new Error(`${name} must be an object with residents.`);
+      assertExactKeys(
+        candidate,
+        [
+          'bodyId',
+          'civilizationId',
+          'cultureDivergence',
+          'cultureId',
+          'foundedTick',
+          'id',
+          'parentBodyId',
+          'residentIds',
+          'settlementId',
+          'status',
+          'stores',
+        ],
+        name,
+      );
+      if (candidate.status !== 'active' && candidate.status !== 'abandoned')
+        throw new Error(`${name} status is invalid.`);
+      return Object.freeze({
+        id: safeInteger(candidate.id, `${name} id`, 1),
+        civilizationId: safeInteger(candidate.civilizationId, `${name} civilization`, 1),
+        settlementId: safeInteger(candidate.settlementId, `${name} settlement`, 1),
+        cultureId: safeInteger(candidate.cultureId, `${name} culture`, 1),
+        parentBodyId: safeInteger(candidate.parentBodyId, `${name} parent body`, 1),
+        bodyId: safeInteger(candidate.bodyId, `${name} body`, 1),
+        foundedTick: safeInteger(candidate.foundedTick, `${name} founded tick`),
+        cultureDivergence: safeInteger(candidate.cultureDivergence, `${name} divergence`),
+        residentIds: Object.freeze(
+          candidate.residentIds.map((id, residentIndex) =>
+            safeInteger(id, `${name} resident ${residentIndex}`, 1),
+          ),
+        ),
+        stores: parseSpaceStock(candidate.stores, `${name} stores`),
+        status: candidate.status,
+      });
+    }),
+  );
+  const cargoTransfers = Object.freeze(
+    (value.cargoTransfers as unknown[]).map((candidate, index): CargoTransfer => {
+      const name = `Snapshot space cargo ${index}`;
+      if (!isRecord(candidate)) throw new Error(`${name} must be an object.`);
+      assertExactKeys(
+        candidate,
+        [
+          'cargo',
+          'civilizationId',
+          'departureTick',
+          'destination',
+          'dueTick',
+          'id',
+          'manifestCargo',
+          'origin',
+          'status',
+        ],
+        name,
+      );
+      return Object.freeze({
+        id: safeInteger(candidate.id, `${name} id`, 1),
+        civilizationId: safeInteger(candidate.civilizationId, `${name} civilization`, 1),
+        origin: parseSpaceEndpoint(candidate.origin, `${name} origin`),
+        destination: parseSpaceEndpoint(candidate.destination, `${name} destination`),
+        departureTick: safeInteger(candidate.departureTick, `${name} departure tick`),
+        dueTick: safeInteger(candidate.dueTick, `${name} due tick`),
+        status: enumValue(candidate.status, CARGO_STATUSES, `${name} status`),
+        cargo: parseSpaceStock(candidate.cargo, `${name} cargo`),
+        manifestCargo: parseSpaceStock(candidate.manifestCargo, `${name} manifest cargo`),
+      });
+    }),
+  );
+  const communications = Object.freeze(
+    (value.communications as unknown[]).map((candidate, index): DelayedCommunication => {
+      const name = `Snapshot space communication ${index}`;
+      if (!isRecord(candidate)) throw new Error(`${name} must be an object.`);
+      assertExactKeys(
+        candidate,
+        [
+          'civilizationId',
+          'destinationBodyId',
+          'dueTick',
+          'id',
+          'originBodyId',
+          'replyToId',
+          'sentTick',
+          'status',
+          'topic',
+        ],
+        name,
+      );
+      return Object.freeze({
+        id: safeInteger(candidate.id, `${name} id`, 1),
+        civilizationId: safeInteger(candidate.civilizationId, `${name} civilization`, 1),
+        originBodyId: safeInteger(candidate.originBodyId, `${name} origin body`, 1),
+        destinationBodyId: safeInteger(candidate.destinationBodyId, `${name} destination body`, 1),
+        sentTick: safeInteger(candidate.sentTick, `${name} sent tick`),
+        dueTick: safeInteger(candidate.dueTick, `${name} due tick`),
+        status: enumValue(candidate.status, COMMUNICATION_STATUSES, `${name} status`),
+        topic: enumValue(candidate.topic, COMMUNICATION_TOPICS, `${name} topic`),
+        replyToId: nullableSpaceInteger(candidate.replyToId, `${name} reply`),
+      });
+    }),
+  );
+  const aliens = Object.freeze(
+    (value.aliens as unknown[]).map((candidate, index): AlienCivilization => {
+      const name = `Snapshot alien civilization ${index}`;
+      if (!isRecord(candidate)) throw new Error(`${name} must be an object.`);
+      assertExactKeys(candidate, ['discoveredTick', 'homeBodyId', 'id', 'trait'], name);
+      return Object.freeze({
+        id: safeInteger(candidate.id, `${name} id`, 1),
+        homeBodyId: safeInteger(candidate.homeBodyId, `${name} home body`, 1),
+        trait: enumValue(candidate.trait, ALIEN_TRAITS, `${name} trait`),
+        discoveredTick: nullableSpaceInteger(candidate.discoveredTick, `${name} discovered tick`),
+      });
+    }),
+  );
+  const relations = Object.freeze(
+    (value.relations as unknown[]).map((candidate, index): SpaceRelation => {
+      const name = `Snapshot space relation ${index}`;
+      if (!isRecord(candidate)) throw new Error(`${name} must be an object.`);
+      assertExactKeys(
+        candidate,
+        [
+          'alienId',
+          'changedTick',
+          'civilizationId',
+          'conflictCount',
+          'exchangeCount',
+          'id',
+          'lastInteractionTick',
+          'status',
+          'tension',
+          'trust',
+        ],
+        name,
+      );
+      return Object.freeze({
+        id: safeInteger(candidate.id, `${name} id`, 1),
+        civilizationId: safeInteger(candidate.civilizationId, `${name} civilization`, 1),
+        alienId: safeInteger(candidate.alienId, `${name} alien`, 1),
+        status: enumValue(candidate.status, SPACE_RELATION_STATUSES, `${name} status`),
+        trust: safeInteger(candidate.trust, `${name} trust`),
+        tension: safeInteger(candidate.tension, `${name} tension`),
+        changedTick: safeInteger(candidate.changedTick, `${name} changed tick`),
+        lastInteractionTick: safeInteger(candidate.lastInteractionTick, `${name} interaction tick`),
+        exchangeCount: safeInteger(candidate.exchangeCount, `${name} exchange count`),
+        conflictCount: safeInteger(candidate.conflictCount, `${name} conflict count`),
+      });
+    }),
+  );
+  if (!isRecord(value.ledger)) throw new Error('Snapshot space ledger must be an object.');
+  assertExactKeys(
+    value.ledger,
+    ['alienImports', 'bodyExtraction', 'consumed', 'lost', 'surfaceExports', 'surfaceImports'],
+    'Snapshot space ledger',
+  );
+  const ledger: SpaceResourceLedger = Object.freeze({
+    surfaceImports: parseSpaceStock(value.ledger.surfaceImports, 'Snapshot surface imports'),
+    alienImports: parseSpaceStock(value.ledger.alienImports, 'Snapshot alien imports'),
+    bodyExtraction: parseSpaceStock(value.ledger.bodyExtraction, 'Snapshot body extraction'),
+    consumed: parseSpaceStock(value.ledger.consumed, 'Snapshot space consumption'),
+    lost: parseSpaceStock(value.ledger.lost, 'Snapshot space losses'),
+    surfaceExports: parseSpaceStock(value.ledger.surfaceExports, 'Snapshot surface exports'),
+  });
+  const state: SpaceState = Object.freeze({
+    tick: safeInteger(value.tick, 'Snapshot space tick', 0, worldTick),
+    nextSpaceId: safeInteger(value.nextSpaceId, 'Snapshot next space id', 1),
+    nextOffworldResidentId: safeInteger(
+      value.nextOffworldResidentId,
+      'Snapshot next offworld resident id',
+      1,
+    ),
+    systemRng: parseRng(value.systemRng, 'Snapshot space system rng'),
+    programRng: parseRng(value.programRng, 'Snapshot space program rng'),
+    missionRng: parseRng(value.missionRng, 'Snapshot space mission rng'),
+    contactRng: parseRng(value.contactRng, 'Snapshot space contact rng'),
+    bodies,
+    programs,
+    spacecraft,
+    missions,
+    colonies,
+    cargoTransfers,
+    communications,
+    aliens,
+    relations,
+    ledger,
+    operationCount: safeInteger(value.operationCount, 'Snapshot space operation count'),
+  });
+  assertSpaceInvariants(state);
+  return state;
+}
+
 function parseVersionEightOrNineWorldPayload(
   value: unknown,
   includesResidentAllocator: boolean,
@@ -4249,6 +4745,46 @@ function parseVersionEightWorldPayload(value: unknown): WorldState {
 
 function parseVersionNineWorldPayload(value: unknown): WorldState {
   return parseVersionEightOrNineWorldPayload(value, true);
+}
+
+function parseVersionTenWorldPayload(value: unknown): WorldState {
+  if (!isRecord(value) || !isUnknownArray(value.eventLog))
+    throw new Error('Snapshot payload must be an object with an event log.');
+  assertExactKeys(
+    value,
+    [
+      ...LEGACY_PAYLOAD_KEYS,
+      'civilization',
+      'civilizations',
+      'development',
+      'pathCache',
+      'populationScale',
+      'space',
+    ],
+    'Snapshot payload',
+  );
+  const versionNinePayload: UnknownRecord = { ...value };
+  delete versionNinePayload.space;
+  versionNinePayload.eventLog = value.eventLog.filter(
+    (candidate) =>
+      isRecord(candidate) &&
+      ENTITY_KINDS.has(candidate.subjectKind as EntityKind) &&
+      ENTITY_KINDS.has(candidate.targetKind as EntityKind),
+  );
+  const base = parseVersionNineWorldPayload(versionNinePayload);
+  const current: WorldState = Object.freeze({
+    ...base,
+    eventLog: parseWorldEvents(
+      value.eventLog,
+      base.tick,
+      base.nextEventId,
+      base.config.width * base.config.height,
+      WORLD_ENTITY_KINDS,
+    ),
+    space: parseSpaceState(value.space, base.tick),
+  });
+  assertWorldInvariants(current);
+  return current;
 }
 
 function parseEnvelope(snapshot: string): UnknownRecord {
@@ -4375,6 +4911,7 @@ function deserializeVersionFour(envelope: UnknownRecord): WorldState {
   delete canonicalPayload.civilizations;
   delete canonicalPayload.populationScale;
   delete canonicalPayload.pathCache;
+  delete canonicalPayload.space;
   const canonical = JSON.stringify(canonicalPayload);
   if (canonical !== payloadJson) {
     let difference = 0;
@@ -4409,6 +4946,7 @@ function deserializeVersionFive(envelope: UnknownRecord): WorldState {
   delete canonicalPayload.civilizations;
   delete canonicalPayload.populationScale;
   delete canonicalPayload.pathCache;
+  delete canonicalPayload.space;
   const canonical = JSON.stringify(canonicalPayload);
   if (canonical !== payloadJson) {
     let difference = 0;
@@ -4442,6 +4980,7 @@ function deserializeVersionedWorld(envelope: UnknownRecord, version: number): Wo
   const canonicalPayload = JSON.parse(canonicalWorldJson(world)) as UnknownRecord;
   delete canonicalPayload.populationScale;
   delete canonicalPayload.pathCache;
+  delete canonicalPayload.space;
   const canonical = JSON.stringify(canonicalPayload);
   if (canonical !== payloadJson) {
     let difference = 0;
@@ -4504,6 +5043,7 @@ function canonicalVersionEightWorldJson(world: WorldState): string {
     canonicalWorldJson({ ...world, populationScale: currentPopulationScale }),
   ) as UnknownRecord;
   payload.populationScale = versionEightPopulationScalePayload(world.populationScale);
+  delete payload.space;
   return JSON.stringify(payload);
 }
 
@@ -4685,6 +5225,39 @@ function deserializeVersionNine(envelope: UnknownRecord): WorldState {
   if (hashCanonicalJson(payloadJson) !== envelope.checksum)
     throw new Error('World snapshot checksum does not match its payload.');
   const world = parseVersionNineWorldPayload(envelope.payload);
+  const canonicalPayload = JSON.parse(canonicalWorldJson(world)) as UnknownRecord;
+  delete canonicalPayload.space;
+  const canonical = JSON.stringify(canonicalPayload);
+  if (canonical !== payloadJson) {
+    let difference = 0;
+    while (difference < canonical.length && canonical[difference] === payloadJson[difference])
+      difference += 1;
+    throw new Error(
+      `World snapshot payload is not canonical at byte ${difference}: ${payloadJson.slice(difference, difference + 80)} != ${canonical.slice(difference, difference + 80)}.`,
+    );
+  }
+  return world;
+}
+
+/** Parses the strict v10 payload with persisted planetary and interworld authority. */
+function deserializeVersionTen(envelope: UnknownRecord): WorldState {
+  assertExactKeys(
+    envelope,
+    ['checksum', 'contentVersion', 'engineVersion', 'format', 'formatVersion', 'payload'],
+    'World snapshot envelope',
+  );
+  if (
+    envelope.formatVersion !== WORLD_SNAPSHOT_VERSION_TEN ||
+    envelope.engineVersion !== WORLD_SNAPSHOT_VERSION_TEN ||
+    envelope.contentVersion !== WORLD_SNAPSHOT_VERSION_TEN ||
+    typeof envelope.checksum !== 'string'
+  ) {
+    throw new Error('World snapshot version metadata is invalid.');
+  }
+  const payloadJson = JSON.stringify(envelope.payload);
+  if (hashCanonicalJson(payloadJson) !== envelope.checksum)
+    throw new Error('World snapshot checksum does not match its payload.');
+  const world = parseVersionTenWorldPayload(envelope.payload);
   const canonical = canonicalWorldJson(world);
   if (canonical !== payloadJson) {
     let difference = 0;
@@ -4798,6 +5371,9 @@ export function migrateWorldSnapshot(snapshot: string): string {
   if (formatVersion > WORLD_SNAPSHOT_FORMAT_VERSION) {
     throw new Error(`World snapshot version ${formatVersion} is newer than this application.`);
   }
+  if (formatVersion === WORLD_SNAPSHOT_VERSION_TEN) {
+    return serializeWorldSnapshot(deserializeVersionTen(envelope));
+  }
   if (formatVersion === WORLD_SNAPSHOT_VERSION_NINE) {
     return serializeWorldSnapshot(deserializeVersionNine(envelope));
   }
@@ -4857,5 +5433,5 @@ export function migrateWorldSnapshot(snapshot: string): string {
 /** Loads and validates a supported snapshot without mutating its input. */
 export function deserializeWorldSnapshot(snapshot: string): WorldState {
   const migrated = migrateWorldSnapshot(snapshot);
-  return deserializeVersionNine(parseEnvelope(migrated));
+  return deserializeVersionTen(parseEnvelope(migrated));
 }

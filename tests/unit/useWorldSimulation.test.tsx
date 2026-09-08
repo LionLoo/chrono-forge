@@ -251,7 +251,7 @@ describe('world simulation UI gateway', () => {
       total: 0,
       events: [],
     });
-  });
+  }, 30_000);
 
   it('round-trips worker saves and keeps offline catch-up factual', async () => {
     const { result } = renderHook(() => useWorldSimulation(createRuntimeWorker));

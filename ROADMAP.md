@@ -2,7 +2,7 @@
 
 `PRODUCT_SPEC.md` is the product contract and `PLAN.md` contains the decision-complete acceptance criteria, branches, and validation for each item. Milestones run in this order:
 
-Current checkpoint: M0-M8 are merged, independently reviewed, and hosted-verified on `main`. M9 is the next active release-blocking milestone. M9-M12 and the private v1.0.0 release remain fully blocking until their gates finish.
+Current checkpoint: M0-M8 are merged, independently reviewed, and hosted-verified on `main`. M9 is acceptance-complete locally on `feature/planetary-space-age` and pending its private PR, hosted CI, and merge. M9 integration, M10-M12 (including every M10.x release gate), and the private v1.0.0 release remain fully blocking.
 
 | Order | Milestone                                                    | Outcome                                                                                       |
 | ----- | ------------------------------------------------------------ | --------------------------------------------------------------------------------------------- |
@@ -18,6 +18,11 @@ Current checkpoint: M0-M8 are merged, independently reviewed, and hosted-verifie
 | M8    | Scale and authoritative aggregation                          | Deterministic LOD, conservation, path caches, transfer deltas, performance budgets            |
 | M9    | Planetary civilization and space age                         | Autonomous orbit/missions/colonies/interworld exchange/aliens and space relations             |
 | M10   | Content coherence and long-run hardening                     | Balanced complete content/assets/docs and multi-seed soak fixes                               |
+| M10.5 | UI and graphics overhaul                                     | Major game-presentation, map, interface, and experience polish                                |
+| M10.6 | Frontend bug hunt and repair                                 | UI, rendering, controls, accessibility, and browser/desktop interaction fixes                 |
+| M10.7 | Backend bug hunt and repair                                  | Simulation, Worker, persistence, migration, SQLite, and determinism fixes                     |
+| M10.8 | Whole-product bug hunt and stabilization                     | Cross-system player-flow, installer, and end-to-end integration fixes                         |
+| M10.9 | World Lifecycle & Save Slot Semantics                        | Distinct New World, Duplicate Current World, and Reset World flows with safe slot behavior    |
 | M11   | Release candidate and clean verification                     | Installed-artifact end-to-end proof, accessibility/performance QA, independent final review   |
 | M12   | v1.0.0 release                                               | Green main, exact tag, private GitHub release, checksummed usable Windows artifact            |
 

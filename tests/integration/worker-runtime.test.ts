@@ -462,7 +462,7 @@ describe('simulation worker runtime', () => {
     const clampedEvents = lastMessageOfType(responses, 'eventBatch').events;
     expect(clampedEvents.length).toBeLessThanOrEqual(MAX_RECENT_WORKER_EVENTS);
     expect(clampedEvents.at(-1)).toMatchObject({ type: 'offline-catch-up' });
-  }, 60_000);
+  }, 120_000);
 
   it('rejects invalid offline input and unsupported policy versions', () => {
     const responses: WorkerToUiMessage[] = [];

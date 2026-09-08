@@ -163,6 +163,7 @@ export interface CivilizationEventDraft {
     | 'conflict-started'
     | 'conflict-resolved'
     | 'refugees-relocated'
+    | 'settlement-restored'
     | 'settlement-ruined'
     | 'federation-formed'
     | 'civilization-fragmented'
@@ -192,6 +193,8 @@ export interface CommunityEconomyInput {
   readonly production: CommunityReserves;
   readonly consumption: CommunityReserves;
   readonly stabilityDelta: number;
+  /** Bounded ordinary-resident growth owned by aggregate settlement authority. */
+  readonly populationDelta?: number;
 }
 
 export interface RouteCandidate {
@@ -242,6 +245,7 @@ export interface CivilizationsContext {
   readonly conflictCandidates: readonly ConflictCandidate[];
   readonly conflictResolutions: readonly ConflictResolutionInput[];
   readonly residencyTransfers: readonly ResidencyTransferInput[];
+  readonly recoveredSettlementIds?: readonly number[];
   readonly ruinSettlementIds: readonly number[];
   readonly federationCivilizationIds: readonly number[];
   readonly fragmentationCivilizationIds: readonly number[];
@@ -547,8 +551,9 @@ interface MarketTransfer {
 
 /**
  * Route volume is the maximum total annual exchange. The route settles the
- * largest relative shortages first, with resource order as the final tie
- * breaker. Transfers only rebalance goods that already exist in a community.
+ * survival shortages first, then the largest relative imbalances, with
+ * transferable amount and resource order as total tie-breakers. Transfers
+ * only rebalance goods that already exist in a community.
  */
 function marketTransfers(
   first: Settlement,
@@ -558,18 +563,31 @@ function marketTransfers(
   let remainingVolume = volume;
   const candidates = MARKET_RESOURCES.map((resource, resourceOrder) => {
     const difference = first.reserves[resource] - second.reserves[resource];
+    const recipient = difference > 0 ? second : first;
+    const transferable = Math.floor(Math.abs(difference) / 2);
     return {
       donorSettlementId: difference > 0 ? first.id : second.id,
-      recipientSettlementId: difference > 0 ? second.id : first.id,
+      recipientSettlementId: recipient.id,
       resource,
       resourceOrder,
-      transferable: Math.floor(Math.abs(difference) / 2),
+      transferable,
+      survivalUrgency:
+        (resource === 'food' || resource === 'water') &&
+        recipient.reserves[resource] < Math.max(2, recipient.population)
+          ? 1
+          : 0,
+      relativeImbalance: Math.floor(
+        (transferable * 1_000) / Math.max(1, first.reserves[resource] + second.reserves[resource]),
+      ),
     };
   })
     .filter((candidate) => candidate.transferable > 0)
     .sort(
       (left, right) =>
-        right.transferable - left.transferable || left.resourceOrder - right.resourceOrder,
+        right.survivalUrgency - left.survivalUrgency ||
+        right.relativeImbalance - left.relativeImbalance ||
+        right.transferable - left.transferable ||
+        left.resourceOrder - right.resourceOrder,
     );
   const transfers: MarketTransfer[] = [];
   for (const candidate of candidates) {
@@ -647,6 +665,7 @@ function validateContext(state: CivilizationsState, context: CivilizationsContex
     context.diplomacyCandidates.length > MAX_DIPLOMACY_PAIRS ||
     context.conflictCandidates.length > MAX_ACTIVE_CONFLICTS ||
     context.residencyTransfers.length > MAX_MIGRATION_CHOICES ||
+    (context.recoveredSettlementIds?.length ?? 0) > MAX_ACTIVE_SETTLEMENTS ||
     context.territoryChanges.length > MAX_TERRITORY_HISTORY_PER_SETTLEMENT
   )
     throw new Error('Civilization annual candidate cap exceeded.');
@@ -676,6 +695,7 @@ function validateContext(state: CivilizationsState, context: CivilizationsContex
     freezeReserves(economy.production);
     freezeReserves(economy.consumption);
     validateInteger(economy.stabilityDelta, 'Community stability delta', -100, 100);
+    validateInteger(economy.populationDelta ?? 0, 'Community population delta', 0, 16);
   }
   for (const candidate of context.routeCandidates) {
     if (!ids.has(candidate.firstSettlementId) || !ids.has(candidate.secondSettlementId))
@@ -828,6 +848,41 @@ export function advanceCivilizations(
   let foundingReserveDelta = emptyReserveDelta();
   let operationCount = state.operationCount;
 
+  // Stable post-conflict recovery keeps a conquered network from becoming a permanent dead end.
+  for (const settlementId of [...new Set(context.recoveredSettlementIds ?? [])].sort(
+    compareNumber,
+  )) {
+    const settlementIndex = settlements.findIndex((settlement) => settlement.id === settlementId);
+    const settlement = settlements[settlementIndex];
+    const civilization = civilizations.find(
+      (candidate) => candidate.id === settlement?.civilizationId,
+    );
+    if (
+      settlement?.status !== 'conquered' ||
+      settlement.endedTick === null ||
+      civilization?.endedTick !== null
+    )
+      continue;
+    settlements[settlementIndex] = frozen({
+      ...settlement,
+      status: 'active',
+      endedTick: null,
+      stability: Math.max(30, settlement.stability),
+    });
+    appendEvent(
+      events,
+      event(
+        'settlement-restored',
+        settlement.id,
+        civilization.id,
+        context.tick,
+        1,
+        `${settlement.name} resumed life under post-conflict rule.`,
+      ),
+    );
+    operationCount += 1;
+  }
+
   // 1. Founding and residency. Exactly one best valid candidate may found per year.
   const founding = [...context.foundingCandidates]
     .sort(
@@ -953,6 +1008,7 @@ export function advanceCivilizations(
     const stability = Math.max(0, Math.min(100, settlement.stability + economy.stabilityDelta));
     settlements[settlements.findIndex((candidate) => candidate.id === settlement.id)] = frozen({
       ...settlement,
+      population: settlement.population + (economy.populationDelta ?? 0),
       reserves,
       stability,
     });
@@ -974,7 +1030,6 @@ export function advanceCivilizations(
     const routeKey = pairKey(firstSettlementId, secondSettlementId);
     const existing = routes.find(
       (route) =>
-        route.status !== 'ended' &&
         route.firstSettlementId === firstSettlementId &&
         route.secondSettlementId === secondSettlementId,
     );
@@ -997,11 +1052,15 @@ export function advanceCivilizations(
           ),
         );
         operationCount += 1;
-      } else if (existing.status === 'disrupted' && candidate.utility >= 40) {
+      } else if (
+        (existing.status === 'disrupted' || existing.status === 'ended') &&
+        candidate.utility >= 40
+      ) {
         routes[routes.findIndex((route) => route.id === existing.id)] = frozen({
           ...existing,
           status: 'active',
           volume: candidate.volume,
+          endedTick: null,
         });
         appendEvent(
           events,
@@ -1014,6 +1073,16 @@ export function advanceCivilizations(
             'A trade route resumed.',
           ),
         );
+        operationCount += 1;
+      } else if (
+        existing.status === 'active' &&
+        candidate.utility >= 40 &&
+        existing.volume !== candidate.volume
+      ) {
+        routes[routes.findIndex((route) => route.id === existing.id)] = frozen({
+          ...existing,
+          volume: candidate.volume,
+        });
         operationCount += 1;
       }
       continue;

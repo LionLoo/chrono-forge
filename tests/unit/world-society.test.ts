@@ -8,7 +8,7 @@ import {
   createInitialWorld,
   hashWorldState,
   stepWorld,
-  type WorldEvent,
+  type SocietyWorldEvent,
   type WorldState,
 } from '../../src/simulation/world';
 
@@ -29,8 +29,10 @@ const M4_EVENT_KINDS = new Set([
   'government-changed',
 ]);
 
-function m4Events(world: WorldState): readonly WorldEvent[] {
-  return world.eventLog.filter((event) => M4_EVENT_KINDS.has(event.kind));
+function m4Events(world: WorldState): readonly SocietyWorldEvent[] {
+  return world.eventLog
+    .filter((event) => M4_EVENT_KINDS.has(event.kind))
+    .map((event) => event as SocietyWorldEvent);
 }
 
 function referenceResolves(world: WorldState, kind: EntityKind, id: number): boolean {
@@ -108,7 +110,7 @@ describe('M4 society world integration', () => {
       hashWorldState(initial),
       hashWorldState(atThirtyMinutes),
       hashWorldState(atSixtyMinutes),
-    ]).toEqual(['1b362ac0', 'cb1969c5', '4ac71f28']);
+    ]).toEqual(['d7ecfee1', '35e132c0', 'f57f9d63']);
     expect(atThirtyMinutes.civilization.structures).not.toEqual(initial.civilization.structures);
     expect(atSixtyMinutes.civilization.stockpile).not.toEqual(
       atThirtyMinutes.civilization.stockpile,

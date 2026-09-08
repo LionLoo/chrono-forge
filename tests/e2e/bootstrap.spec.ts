@@ -1,9 +1,32 @@
-import { expect, test } from '@playwright/test';
+import { expect, test, type Page } from '@playwright/test';
 import { createHash } from 'node:crypto';
+import { readFileSync } from 'node:fs';
 import { serializeWorldSnapshot } from '../../src/simulation/persistence';
 import { createInitialWorld, stepWorld } from '../../src/simulation/world';
 import { projectRelationshipPage } from '../../src/workers/simulation-runtime';
 import { startProductionServer } from './static-server';
+
+const M9_E2E_ARCHIVES = JSON.parse(
+  readFileSync(new URL('../fixtures/saves/m9-e2e-archives.json', import.meta.url), 'utf8'),
+) as Readonly<{
+  midFlightPackage: string;
+  contactedPackage: string;
+}>;
+
+async function importSavePackage(page: Page, savePackage: string, loadedName: string) {
+  const importDetails = page.locator('details').filter({ hasText: 'Import or export package' });
+  if ((await importDetails.getAttribute('open')) === null) {
+    await importDetails.getByText('Import or export package').click();
+  }
+  await page.getByRole('textbox', { name: 'Import package' }).evaluate((element, value) => {
+    Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value')!.set!.bind(element)(
+      value,
+    );
+    element.dispatchEvent(new Event('input', { bubbles: true }));
+  }, savePackage);
+  await page.getByRole('button', { name: 'Validate and import' }).click();
+  await expect(page.getByText(`Loaded ${loadedName}.`)).toBeVisible({ timeout: 20_000 });
+}
 
 let origin: string;
 let closeServer: () => Promise<void>;
@@ -256,4 +279,56 @@ test('imports, inspects, saves, and reloads a relationship-rich world', async ({
   await expect(page.getByRole('article', { name: 'Relationship detail' })).toContainText(
     fixture.eventSummary,
   );
+});
+
+test('inspects and persists a Worker-owned mid-flight space world', async ({ page }) => {
+  test.setTimeout(120_000);
+  await page.goto(origin);
+  await importSavePackage(page, M9_E2E_ARCHIVES.midFlightPackage, 'M9 mid-flight');
+  await page.getByRole('button', { name: 'Open world inspection' }).click();
+  const space = page.locator('.space-panel');
+  await expect(space.getByRole('heading', { name: 'The wider system' })).toBeVisible();
+  await expect(space.getByText('Autonomous program active')).toBeVisible();
+  await expect(space.getByRole('list', { name: 'Space missions' })).toContainText('active');
+  await page.getByRole('button', { name: 'Save now' }).click();
+  await expect(page.getByText('World saved manually.')).toBeVisible();
+  const localSlots = page.getByRole('combobox', { name: 'Load local slot' });
+  await localSlots.selectOption('primary');
+  await expect(page.getByText('Loaded Founding world.')).toBeVisible();
+  await localSlots.selectOption('m9-mid-flight');
+  await expect(page.getByText('Loaded M9 mid-flight.')).toBeVisible();
+  await expect(
+    page.locator('.space-panel').getByRole('list', { name: 'Space missions' }),
+  ).toContainText('active');
+});
+
+test('inspects contacted space facts at 100-200% with reduced effects', async ({ page }) => {
+  test.setTimeout(120_000);
+  await page.emulateMedia({ reducedMotion: 'reduce' });
+  await page.goto(origin);
+  await importSavePackage(page, M9_E2E_ARCHIVES.contactedPackage, 'M9 contacted world');
+  await page.getByRole('button', { name: 'Open world inspection' }).click();
+  await expect(page.getByRole('list', { name: 'Alien civilizations' })).toContainText(
+    /allied|cooperative|competitive|hostile/,
+  );
+  await expect(
+    page.getByText(/Logistics: \d+ cargo and \d+ communications in transit/),
+  ).toBeVisible();
+  await page.getByText(/Logistics: \d+ cargo and \d+ communications in transit/).click();
+  await expect(page.getByRole('list', { name: 'Interworld communications' })).toBeVisible();
+
+  for (const scale of [100, 150, 200]) {
+    await page.evaluate((percent) => {
+      document.documentElement.style.fontSize = `${percent}%`;
+    }, scale);
+    await expect(page.getByRole('heading', { name: 'The wider system' })).toBeVisible();
+    await expect(page.getByRole('list', { name: 'Alien civilizations' })).toBeVisible();
+    expect(
+      await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth),
+    ).toBe(true);
+  }
+  await page.getByText('Focus and accessibility settings', { exact: true }).click();
+  const reducedEffects = page.getByRole('checkbox', { name: 'Reduce visual effects' });
+  if (!(await reducedEffects.isChecked())) await reducedEffects.check();
+  await expect(page.locator('.world-map-canvas')).toHaveAttribute('data-effects', 'reduced');
 });

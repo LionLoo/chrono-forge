@@ -4,6 +4,7 @@ import {
   type DevelopmentProjection,
   type SettlementSummary,
   type SocietyProjection,
+  type SpaceProjection,
   type WorkerProtocolVersion,
   type WorldFrameProjection,
 } from './index';
@@ -53,6 +54,7 @@ export interface WorldFrameDelta {
   readonly society?: SocietyProjection;
   readonly development?: DevelopmentProjection;
   readonly civilizations?: CivilizationsProjection;
+  readonly space?: SpaceProjection;
 }
 
 type TypedArray =
@@ -327,6 +329,7 @@ export function createWorldFrameDelta(
     society?: SocietyProjection;
     development?: DevelopmentProjection;
     civilizations?: CivilizationsProjection;
+    space?: SpaceProjection;
   } = {
     version: next.version,
     width: next.width,
@@ -346,6 +349,7 @@ export function createWorldFrameDelta(
     delta.development = copyProjectionValue(next.development);
   if (!structuralEqual(previous.civilizations, next.civilizations))
     delta.civilizations = copyProjectionValue(next.civilizations);
+  if (!structuralEqual(previous.space, next.space)) delta.space = copyProjectionValue(next.space);
   return Object.freeze(delta);
 }
 
@@ -406,6 +410,7 @@ export function applyWorldFrameDelta(
     society: copyProjectionValue(delta.society ?? previous.society),
     development: copyProjectionValue(delta.development ?? previous.development),
     civilizations: copyCivilizations(civilizations),
+    space: copyProjectionValue(delta.space ?? previous.space),
   });
   validateFrame(applied);
   return applied;

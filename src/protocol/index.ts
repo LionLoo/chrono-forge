@@ -9,7 +9,7 @@ import type {
 } from '../simulation/development';
 import { ACCELERATED_YEAR_TICKS, NORMAL_YEAR_TICKS } from '../simulation/society';
 
-export const WORKER_PROTOCOL_VERSION = 7;
+export const WORKER_PROTOCOL_VERSION = 8;
 export const MAX_ADVANCE_TICKS_PER_REQUEST = 1_000_000;
 
 export type WorkerProtocolVersion = typeof WORKER_PROTOCOL_VERSION;
@@ -308,6 +308,137 @@ export interface CivilizationsProjection {
   readonly tileOwners: Uint32Array;
 }
 
+export interface SpaceResourceProjection {
+  readonly food: number;
+  readonly water: number;
+  readonly timber: number;
+  readonly stone: number;
+  readonly metal: number;
+}
+
+export interface SpaceBodyProjection {
+  readonly id: number;
+  readonly kind: 'home' | 'moon' | 'planet' | 'asteroid';
+  readonly name: string;
+  readonly distance: number;
+  readonly habitable: boolean;
+  readonly remainingDeposit: SpaceResourceProjection;
+}
+
+export interface SpaceProgramProjection {
+  readonly id: number;
+  readonly civilizationId: number;
+  readonly settlementId: number;
+  readonly stage: 'none' | 'advanced-energy' | 'planetary-engineering' | 'spaceflight';
+  readonly planetaryTransportCapacity: number;
+  readonly launchCapacity: number;
+}
+
+export interface SpacecraftProjection {
+  readonly id: number;
+  readonly civilizationId: number;
+  readonly status: 'grounded' | 'in-flight' | 'orbiting' | 'retired';
+  readonly currentBodyId: number;
+  readonly missionId: number | null;
+}
+
+export interface SpaceMissionProjection {
+  readonly id: number;
+  readonly spacecraftId: number;
+  readonly civilizationId: number;
+  readonly kind: 'orbital' | 'exploration' | 'colony';
+  readonly originBodyId: number;
+  readonly destinationBodyId: number;
+  readonly departureTick: number;
+  readonly dueTick: number;
+  readonly status: 'active' | 'completed' | 'failed';
+  readonly completedTick: number | null;
+  readonly passengerCount: number;
+  readonly cargo: SpaceResourceProjection;
+}
+
+export interface SpaceColonyProjection {
+  readonly id: number;
+  readonly civilizationId: number;
+  readonly settlementId: number;
+  readonly cultureId: number;
+  readonly bodyId: number;
+  readonly foundedTick: number;
+  readonly cultureDivergence: number;
+  readonly residentCount: number;
+  readonly stores: SpaceResourceProjection;
+  readonly status: 'active' | 'abandoned';
+}
+
+export type SpaceCargoEndpointProjection =
+  | Readonly<{ kind: 'settlement'; civilizationId: number; settlementId: number }>
+  | Readonly<{ kind: 'colony'; colonyId: number }>
+  | Readonly<{ kind: 'alien'; alienId: number }>;
+
+export interface SpaceCargoProjection {
+  readonly id: number;
+  readonly civilizationId: number;
+  readonly origin: SpaceCargoEndpointProjection;
+  readonly destination: SpaceCargoEndpointProjection;
+  readonly departureTick: number;
+  readonly dueTick: number;
+  readonly status: 'active' | 'completed' | 'lost';
+  readonly cargo: SpaceResourceProjection;
+}
+
+export interface SpaceCommunicationProjection {
+  readonly id: number;
+  readonly civilizationId: number;
+  readonly originBodyId: number;
+  readonly destinationBodyId: number;
+  readonly sentTick: number;
+  readonly dueTick: number;
+  readonly status: 'pending' | 'delivered';
+  readonly topic: 'mission' | 'colony' | 'contact' | 'reply';
+}
+
+export interface AlienCivilizationProjection {
+  readonly id: number;
+  readonly homeBodyId: number;
+  readonly trait: 'curious' | 'cautious' | 'competitive' | 'hostile';
+  readonly discoveredTick: number | null;
+}
+
+export interface SpaceRelationProjection {
+  readonly id: number;
+  readonly civilizationId: number;
+  readonly alienId: number;
+  readonly status: 'allied' | 'cooperative' | 'competitive' | 'hostile';
+  readonly trust: number;
+  readonly tension: number;
+  readonly changedTick: number;
+  readonly exchangeCount: number;
+  readonly conflictCount: number;
+}
+
+export interface SpaceProjection {
+  readonly tick: number;
+  readonly operationCount: number;
+  readonly offworldPopulation: number;
+  readonly bodies: readonly SpaceBodyProjection[];
+  readonly programs: readonly SpaceProgramProjection[];
+  readonly spacecraft: readonly SpacecraftProjection[];
+  readonly missions: readonly SpaceMissionProjection[];
+  readonly colonies: readonly SpaceColonyProjection[];
+  readonly cargoTransfers: readonly SpaceCargoProjection[];
+  readonly communications: readonly SpaceCommunicationProjection[];
+  readonly aliens: readonly AlienCivilizationProjection[];
+  readonly relations: readonly SpaceRelationProjection[];
+  readonly ledger: Readonly<{
+    surfaceImports: SpaceResourceProjection;
+    alienImports: SpaceResourceProjection;
+    bodyExtraction: SpaceResourceProjection;
+    consumed: SpaceResourceProjection;
+    lost: SpaceResourceProjection;
+    surfaceExports: SpaceResourceProjection;
+  }>;
+}
+
 export interface WorldFrameProjection {
   readonly version: WorkerProtocolVersion;
   readonly width: number;
@@ -336,6 +467,7 @@ export interface WorldFrameProjection {
   readonly society: SocietyProjection;
   readonly development: DevelopmentProjection;
   readonly civilizations: CivilizationsProjection;
+  readonly space: SpaceProjection;
 }
 
 interface RequestBase {

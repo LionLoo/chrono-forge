@@ -20,6 +20,7 @@ import {
   type SettlementSummary,
   type SocietyProjection,
   type SocietyRelationshipProjection,
+  type SpaceProjection,
   type WorkerEvent,
   type WorkerFaultCode,
   type WorkerToUiMessage,
@@ -229,6 +230,161 @@ function projectCivilizations(state: WorldState): CivilizationsProjection {
     conflicts: Object.freeze(conflicts),
     ruins: Object.freeze(ruins),
     tileOwners,
+  });
+}
+
+function projectSpace(state: WorldState): SpaceProjection {
+  const source = state.space;
+  const visibleBodies =
+    source.programs.length === 0
+      ? source.bodies.filter((body) => body.kind === 'home')
+      : source.bodies;
+  const contactedAliens = source.aliens.filter((alien) => alien.discoveredTick !== null);
+  const stock = (value: (typeof source.ledger)['surfaceImports']) => Object.freeze({ ...value });
+  const endpoint = (value: (typeof source.cargoTransfers)[number]['origin']) =>
+    Object.freeze({ ...value });
+  return Object.freeze({
+    tick: source.tick,
+    operationCount: source.operationCount,
+    offworldPopulation:
+      source.missions
+        .filter((mission) => mission.status === 'active')
+        .reduce((total, mission) => total + mission.passengerIds.length, 0) +
+      source.colonies
+        .filter((colony) => colony.status === 'active')
+        .reduce((total, colony) => total + colony.residentIds.length, 0),
+    bodies: Object.freeze(
+      stableIdSorted(visibleBodies).map((body) =>
+        Object.freeze({
+          id: body.id,
+          kind: body.kind,
+          name: body.name,
+          distance: body.distance,
+          habitable: body.habitable,
+          remainingDeposit: stock(body.remainingDeposit),
+        }),
+      ),
+    ),
+    programs: Object.freeze(
+      stableIdSorted(source.programs).map((program) =>
+        Object.freeze({
+          id: program.id,
+          civilizationId: program.civilizationId,
+          settlementId: program.settlementId,
+          stage: program.stage,
+          planetaryTransportCapacity: program.planetaryTransportCapacity,
+          launchCapacity: program.launchCapacity,
+        }),
+      ),
+    ),
+    spacecraft: Object.freeze(
+      stableIdSorted(source.spacecraft).map((spacecraft) =>
+        Object.freeze({
+          id: spacecraft.id,
+          civilizationId: spacecraft.civilizationId,
+          status: spacecraft.status,
+          currentBodyId: spacecraft.currentBodyId,
+          missionId: spacecraft.missionId,
+        }),
+      ),
+    ),
+    missions: Object.freeze(
+      stableIdSorted(source.missions).map((mission) =>
+        Object.freeze({
+          id: mission.id,
+          spacecraftId: mission.spacecraftId,
+          civilizationId: mission.civilizationId,
+          kind: mission.kind,
+          originBodyId: mission.originBodyId,
+          destinationBodyId: mission.destinationBodyId,
+          departureTick: mission.departureTick,
+          dueTick: mission.dueTick,
+          status: mission.status,
+          completedTick: mission.completedTick,
+          passengerCount: mission.manifestPassengerIds.length,
+          cargo: stock(mission.manifestCargo),
+        }),
+      ),
+    ),
+    colonies: Object.freeze(
+      stableIdSorted(source.colonies).map((colony) =>
+        Object.freeze({
+          id: colony.id,
+          civilizationId: colony.civilizationId,
+          settlementId: colony.settlementId,
+          cultureId: colony.cultureId,
+          bodyId: colony.bodyId,
+          foundedTick: colony.foundedTick,
+          cultureDivergence: colony.cultureDivergence,
+          residentCount: colony.residentIds.length,
+          stores: stock(colony.stores),
+          status: colony.status,
+        }),
+      ),
+    ),
+    cargoTransfers: Object.freeze(
+      stableIdSorted(source.cargoTransfers).map((transfer) =>
+        Object.freeze({
+          id: transfer.id,
+          civilizationId: transfer.civilizationId,
+          origin: endpoint(transfer.origin),
+          destination: endpoint(transfer.destination),
+          departureTick: transfer.departureTick,
+          dueTick: transfer.dueTick,
+          status: transfer.status,
+          cargo: stock(transfer.manifestCargo),
+        }),
+      ),
+    ),
+    communications: Object.freeze(
+      stableIdSorted(source.communications).map((communication) =>
+        Object.freeze({
+          id: communication.id,
+          civilizationId: communication.civilizationId,
+          originBodyId: communication.originBodyId,
+          destinationBodyId: communication.destinationBodyId,
+          sentTick: communication.sentTick,
+          dueTick: communication.dueTick,
+          status: communication.status,
+          topic: communication.topic,
+        }),
+      ),
+    ),
+    aliens: Object.freeze(
+      stableIdSorted(contactedAliens).map((alien) =>
+        Object.freeze({
+          id: alien.id,
+          homeBodyId: alien.homeBodyId,
+          trait: alien.trait,
+          discoveredTick: alien.discoveredTick,
+        }),
+      ),
+    ),
+    relations: Object.freeze(
+      stableIdSorted(source.relations)
+        .filter((relation) => contactedAliens.some((alien) => alien.id === relation.alienId))
+        .map((relation) =>
+          Object.freeze({
+            id: relation.id,
+            civilizationId: relation.civilizationId,
+            alienId: relation.alienId,
+            status: relation.status,
+            trust: relation.trust,
+            tension: relation.tension,
+            changedTick: relation.changedTick,
+            exchangeCount: relation.exchangeCount,
+            conflictCount: relation.conflictCount,
+          }),
+        ),
+    ),
+    ledger: Object.freeze({
+      surfaceImports: stock(source.ledger.surfaceImports),
+      alienImports: stock(source.ledger.alienImports),
+      bodyExtraction: stock(source.ledger.bodyExtraction),
+      consumed: stock(source.ledger.consumed),
+      lost: stock(source.ledger.lost),
+      surfaceExports: stock(source.ledger.surfaceExports),
+    }),
   });
 }
 
@@ -893,6 +1049,7 @@ export function projectWorldFrame(state: WorldState): WorldFrameProjection {
   const society = projectSociety(state);
   const development = projectDevelopment(state);
   const civilizations = projectCivilizations(state);
+  const space = projectSpace(state);
 
   return Object.freeze({
     version: WORKER_PROTOCOL_VERSION,
@@ -918,6 +1075,7 @@ export function projectWorldFrame(state: WorldState): WorldFrameProjection {
     society,
     development,
     civilizations,
+    space,
   });
 }
 

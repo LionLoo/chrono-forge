@@ -12,6 +12,7 @@ import { FocusPersistencePanel } from './ui/FocusPersistencePanel';
 import { CivilizationsPanel } from './ui/CivilizationsPanel';
 import { DevelopmentPanel } from './ui/DevelopmentPanel';
 import { SocietyPanel } from './ui/SocietyPanel';
+import { SpacePanel } from './ui/SpacePanel';
 import type { FocusClock } from './ui/useFocusController';
 import {
   DEMO_WORLD_SEED,
@@ -714,6 +715,7 @@ export function App({ focusAlerts, focusClock, persistence, workerFactory }: App
                 new Map(simulation.frame.society.people.map((person) => [person.id, person.name]))
               }
             />
+            <SpacePanel space={simulation.frame.space} />
             <DevelopmentPanel
               development={simulation.frame.development}
               disabled={simulation.status !== 'ready'}

@@ -14,6 +14,7 @@ import {
   populationScaleDto,
   reconcileAnonymousPopulation,
   reconcilePopulationLod,
+  removeAnonymousResidents,
   type AggregateCohortState,
   type DetailedResidentState,
 } from '../../src/simulation/scale';
@@ -315,6 +316,35 @@ describe('M8 deterministic population scale authority', () => {
     ]);
     expect(regrown.nextResidentId).toBe(FIRST_ORDINARY_RESIDENT_ID + 8);
     expect(() => assertPopulationScaleInvariants(regrown)).not.toThrow();
+  });
+
+  it('removes exact anonymous identities with conserved cohort totals and no allocator rewind', () => {
+    const initial = createPopulationScale(SEED, 0, { detailedResidents: [] });
+    const populated = reconcileAnonymousPopulation(initial, [
+      {
+        settlementId: 1,
+        civilizationId: 1,
+        cultureId: 1,
+        tileIndex: 9,
+        residentCount: 5,
+      },
+    ]);
+    const ids = populated.cohorts[0]!.residentIds;
+    const beforeNextResidentId = populated.nextResidentId;
+    const transferred = removeAnonymousResidents(populated, [ids[1]!, ids[3]!]);
+
+    expect(transferred.cohorts[0]!.residentIds).toStrictEqual([ids[0], ids[2], ids[4]]);
+    expect(transferred.nextResidentId).toBe(beforeNextResidentId);
+    expect(transferred.transfers.at(-1)).toMatchObject({
+      kind: 'removed',
+      cohortId: populated.cohorts[0]!.id,
+      residentCount: 2,
+      firstResidentId: ids[1],
+      lastResidentId: ids[3],
+    });
+    expect(() => assertPopulationScaleInvariants(transferred)).not.toThrow();
+    expect(() => removeAnonymousResidents(populated, [ids[0]!, ids[0]!])).toThrow(/sorted/i);
+    expect(() => removeAnonymousResidents(populated, [999])).toThrow(/ordinary/i);
   });
 
   it('bounds structured transfers and reports deterministic due-work backlog', () => {

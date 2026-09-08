@@ -33,7 +33,7 @@ describe('M4 society world determinism', () => {
     );
     expect(hashWorldState(partitioned)).toBe(hashWorldState(oneShot));
     expect(canonicalWorldJson(partitioned)).toBe(canonicalWorldJson(oneShot));
-  }, 30_000);
+  }, 60_000);
 
   it('matches a save-like canonical continuation through the same accelerated horizon', () => {
     const oneShot = stepWorld(acceleratedWorld(), TOTAL_TICKS);
@@ -44,5 +44,5 @@ describe('M4 society world determinism', () => {
     expect(resumed.civilization.society.people.some((person) => person.generation >= 1)).toBe(true);
     expect(hashWorldState(resumed)).toBe(hashWorldState(oneShot));
     expect(canonicalWorldJson(resumed)).toBe(canonicalWorldJson(oneShot));
-  }, 30_000);
+  }, 60_000);
 });

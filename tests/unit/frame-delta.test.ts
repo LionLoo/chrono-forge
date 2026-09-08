@@ -75,6 +75,11 @@ describe('ordered world frame deltas', () => {
         operationCount: previous.development.operationCount + 1,
       },
       civilizations,
+      space: {
+        ...previous.space,
+        tick: previous.space.tick + 1,
+        operationCount: previous.space.operationCount + 1,
+      },
     });
     const delta = createWorldFrameDelta(previous, next);
 
@@ -85,6 +90,7 @@ describe('ordered world frame deltas', () => {
     expect(delta.society).toBeDefined();
     expect(delta.development).toBeDefined();
     expect(delta.civilizations).toBeDefined();
+    expect(delta.space).toBeDefined();
     expect(Object.isFrozen(applyWorldFrameDelta(previous, delta))).toBe(true);
     expect(applyWorldFrameDelta(previous, delta)).toStrictEqual(next);
   });

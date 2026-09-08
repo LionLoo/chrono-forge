@@ -270,6 +270,10 @@ describe('autonomous settlement core', () => {
     const terrain = terrainFrom(world);
     let civilization: CivilizationState = {
       ...inactiveFounders(world.civilization),
+      agents: inactiveFounders(world.civilization).agents.map((agent) => ({
+        ...agent,
+        homeStructureId: 1,
+      })),
       nextStructureId: 2,
       structures: [operationalShelter(world.civilization.centerTileIndex, 2)],
     };
@@ -286,6 +290,7 @@ describe('autonomous settlement core', () => {
       level: 2,
       progress: 0,
     });
+    expect(civilization.agents.every((agent) => agent.homeStructureId === 0)).toBe(true);
     expect(() => assertCivilizationInvariants(civilization, terrain)).not.toThrow();
   });
 

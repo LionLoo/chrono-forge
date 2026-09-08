@@ -136,6 +136,21 @@ describe('versioned worker protocol', () => {
     expect(frame.civilizations.tileOwners).toStrictEqual(
       new Uint32Array(state.civilizations.tileOwners),
     );
+    expect(frame.space).toMatchObject({
+      tick: 0,
+      operationCount: 0,
+      offworldPopulation: 0,
+      programs: [],
+      spacecraft: [],
+      missions: [],
+      colonies: [],
+      cargoTransfers: [],
+      communications: [],
+      aliens: [],
+      relations: [],
+    });
+    expect(frame.space.bodies).toHaveLength(1);
+    expect(frame.space.bodies[0]).toMatchObject({ id: 1, kind: 'home' });
     expect(projectionTransferables(frame)).toStrictEqual([
       frame.biome.buffer,
       frame.resource.buffer,
