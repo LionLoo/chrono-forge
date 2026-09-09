@@ -22,7 +22,7 @@ Last updated: 2026-09-08
 
 ## Release-plan amendment
 
-- User-directed gates M10.5-M10.9 are release-blocking after M10 and before M11. They add a major UI/graphics overhaul, dedicated frontend and backend bug hunts, whole-product stabilization, and explicit New World / Duplicate Current World / Reset World semantics without replacing ongoing fixes or final release verification.
+- User-directed gates M10.5-M10.9 are release-blocking after M10 and before M11. M10.5 is a release-quality explorable-civilization, game-art-direction overhaul, not a dashboard reskin: it explicitly replaces circle-only people and generic/debug-like presentation with polished factual characters, homes, buildings, terrain, settlements, map navigation at wide and close scales, UI, and focus-session visuals. M10.6-M10.8 add dedicated frontend, backend, and whole-product bug hunts; M10.9 adds explicit New World / Duplicate Current World / Reset World semantics. None replaces ongoing fixes or final release verification.
 - M10.8 explicitly owns the reported long-focus freeze in which timer, controls, and world advancement can stall, plus comparable cross-layer responsiveness failures.
 
 ## M9 verified scope
