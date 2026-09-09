@@ -160,6 +160,16 @@ Balance all systems, expand procedural names/cultures/architecture/event descrip
 
 Acceptance: every explicit product area has functioning non-placeholder content; long runs cover collapse and recovery, multiple societies, divergent technology, disasters, advanced cities, space, multi-generation lineages, persistent friendships and grudges, partnerships and household change, estrangement/reconciliation, and bereavement; no critical/high correctness issue remains; all asset attribution is complete.
 
+## M10.1 — Focus-session engagement and return value
+
+Branch: `release/v1-focus-session-engagement`
+
+Turn Chrono Forge's core promise—focus time quietly building one persistent civilization—into an experience worth returning to after each work session. Tune the factual feedback loop across new, growing, mature, crisis, and space-age worlds so a player can understand what changed during accepted focus time, notice a meaningful living-world response, and choose a natural next place or person to revisit. This is not permission to turn the product into a clicker, a manual city builder, an attention trap, or a system that fabricates rewards: the world remains autonomous, major societal change remains gradual, and all progress, recaps, activity, and visual change must arise from authoritative Worker state and recorded events.
+
+Design and validate the complete session arc: an inviting, low-friction start; calm, readable live observation while working; a satisfying factual end-of-session reveal/recap; and a clear optional route back into the same world next time. Balance focus-to-simulation pace so short sessions still reveal understandable real movement, work, construction progress, resource change, relationships, or other state when those facts occur, while longer arcs retain discovery, surprise, continuity, and a reason to care about named people and places. When a session contains no major event, communicate the quiet continuity honestly rather than manufacturing drama. Test representative consecutive 25-, 50-, and 60-minute deterministic sessions across early, middle, and late worlds, including resuming an existing world after days away.
+
+Acceptance: a player can start a session without wrestling with the interface, understand the world state before and after it, and identify factual changes or an honest quiet interval in the resulting recap. Across representative multi-session worlds, visible short-term activity and recap feedback make progress feel alive without compressing major history into one session; named people, places, and prior events provide genuine continuity worth revisiting. The focus loop remains calm, optional-inspection-first, deterministic, accessible, and free of invented rewards or punitive engagement mechanics. Controlled session tests prove truthful before/after state, focus-to-world accounting, recap provenance, resume continuity, and no-world-advance-without-accepted-focus; independent product review concludes that the real focus loop gives a user a credible reason to return to the same world over many work sessions.
+
 ## M10.5 — UI and graphics overhaul
 
 Branch: `release/v1-ui-graphics-overhaul`
