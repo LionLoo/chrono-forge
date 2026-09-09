@@ -7,7 +7,7 @@ Last updated: 2026-09-08
 - Goal: build, verify, package, and privately release the complete Chrono Forge v1.0.0 contract; never stop at a prototype or partial roadmap.
 - Current milestone: M0-M8 are merged, independently reviewed, and hosted-verified on `main`. M9 planetary civilization and space age is acceptance-complete locally on `feature/planetary-space-age` from base `e17bb457bbde484d18a5dc8936e7c3fd4f397d65`; its exact commit, private PR, hosted CI, merge, and durable main checkpoint are next.
 - Spending safety: never use an API key, purchased credits, promotional credits, usage-reset credits, or the owner's credit balance. Weekly allowance percentage is informational and never pauses or blocks work.
-- v1.0 completion: not satisfied. M9 integration; M10; M10.1 focus-session engagement and return value; M10.5 UI/graphics overhaul; M10.6 frontend bug hunt; M10.7 backend bug hunt; M10.8 whole-product stabilization; M10.9 world lifecycle/save-slot semantics; M11-M12; clean release verification; tag; artifact; checksums; and private GitHub release remain fully blocking.
+- v1.0 completion: not satisfied. M9 integration; M10; M10.1 focus-session engagement and return value; M10.2 sound, atmosphere, and game feel; M10.5 UI/graphics overhaul; M10.6 frontend bug hunt; M10.7 backend bug hunt; M10.8 whole-product stabilization; M10.9 world lifecycle/save-slot semantics; M11-M12; clean release verification; tag; artifact; checksums; and private GitHub release remain fully blocking.
 
 ## HARNESS EVALUATION
 
@@ -22,7 +22,7 @@ Last updated: 2026-09-08
 
 ## Release-plan amendment
 
-- User-directed gates M10.1 and M10.5-M10.9 are release-blocking after M10 and before M11. M10.1 makes the factual focus-session feedback loop, pacing, and long-term return value a deliberate product gate rather than an assumed outcome. M10.5 is a release-quality explorable-civilization, game-art-direction overhaul, not a dashboard reskin: it explicitly replaces circle-only people and generic/debug-like presentation with polished factual characters, homes, buildings, terrain, settlements, map navigation at wide and close scales, UI, and focus-session visuals. M10.6-M10.8 add dedicated frontend, backend, and whole-product bug hunts; M10.9 adds explicit New World / Duplicate Current World / Reset World semantics. None replaces ongoing fixes or final release verification.
+- User-directed gates M10.1, M10.2, and M10.5-M10.9 are release-blocking after M10 and before M11. M10.1 makes the factual focus-session feedback loop, pacing, and long-term return value a deliberate product gate rather than an assumed outcome. M10.2 adds a calm, optional, factual soundscape and feedback layer for game feel. M10.5 is a release-quality explorable-civilization, game-art-direction overhaul, not a dashboard reskin: it explicitly replaces circle-only people and generic/debug-like presentation with polished factual characters, homes, buildings, terrain, settlements, map navigation at wide and close scales, UI, and focus-session visuals. M10.6-M10.8 add dedicated frontend, backend, and whole-product bug hunts; M10.9 adds explicit New World / Duplicate Current World / Reset World semantics. None replaces ongoing fixes or final release verification.
 - M10.8 explicitly owns the reported long-focus freeze in which timer, controls, and world advancement can stall, plus comparable cross-layer responsiveness failures.
 
 ## M9 verified scope

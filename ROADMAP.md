@@ -19,6 +19,7 @@ Current checkpoint: M0-M8 are merged, independently reviewed, and hosted-verifie
 | M9    | Planetary civilization and space age                         | Autonomous orbit/missions/colonies/interworld exchange/aliens and space relations                                  |
 | M10   | Content coherence and long-run hardening                     | Balanced complete content/assets/docs and multi-seed soak fixes                                                    |
 | M10.1 | Focus-session engagement and return value                    | Truthful, satisfying focus-session feedback and a reason to revisit one persistent world                           |
+| M10.2 | Sound, atmosphere, and game feel                             | Calm, high-quality optional sound and ambience grounded in real world events                                       |
 | M10.5 | World, UI, and graphics overhaul                             | Release-quality explorable civilization: polished people, homes, buildings, terrain, map, UI, and focus experience |
 | M10.6 | Frontend bug hunt and repair                                 | UI, rendering, controls, accessibility, and browser/desktop interaction fixes                                      |
 | M10.7 | Backend bug hunt and repair                                  | Simulation, Worker, persistence, migration, SQLite, and determinism fixes                                          |

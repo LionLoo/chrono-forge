@@ -170,6 +170,16 @@ Design and validate the complete session arc: an inviting, low-friction start; c
 
 Acceptance: a player can start a session without wrestling with the interface, understand the world state before and after it, and identify factual changes or an honest quiet interval in the resulting recap. Across representative multi-session worlds, visible short-term activity and recap feedback make progress feel alive without compressing major history into one session; named people, places, and prior events provide genuine continuity worth revisiting. The focus loop remains calm, optional-inspection-first, deterministic, accessible, and free of invented rewards or punitive engagement mechanics. Controlled session tests prove truthful before/after state, focus-to-world accounting, recap provenance, resume continuity, and no-world-advance-without-accepted-focus; independent product review concludes that the real focus loop gives a user a credible reason to return to the same world over many work sessions.
 
+## M10.2 — Sound, atmosphere, and game feel
+
+Branch: `release/v1-sound-atmosphere-game-feel`
+
+Create a deliberately understated but high-quality audio and atmosphere layer that makes the civilization feel present without competing with work. Replace generic browser-like feedback with a coherent, attributed local sound palette for actual focus actions, map selection, construction/progress, danger, discoveries, session completion, and optional major factual events. Add optional adaptive ambience and restrained music where it strengthens the sense of place, era, weather, settlement activity, or space exploration. Audio and visual effects must remain grounded in actual Worker projections or recorded events; they are presentation only and can never alter timing, authority, or outcomes.
+
+The focus-first product constraint is non-negotiable: sound must be quiet by default, never surprise or distract a working user, and offer clear master-volume, music/ambience, effect-volume, mute, and calm/reduced-effects behavior that persists locally. Respect operating-system notification and accessibility settings, provide redundant visual/text cues for every important audio cue, avoid inaccessible rapid flashing or motion, and use only original or properly licensed/attributed assets. Sound should make a focus session feel more like inhabiting a calm living game world, not like receiving productivity-app alerts.
+
+Acceptance: browser and installed-desktop review verifies an intentional soundscape across founding, settlement growth, crisis, advanced city, and space states, plus quiet focus, mute, and reduced-effects modes. Focus start/pause/complete, selection, construction/progress, danger, and factual recap/event cues are distinct, restrained, and optional; no sound is the sole carrier of important information. Settings survive restart; audio failures degrade silently to usable visual/text feedback; accessibility, volume, and licensing checks pass. Independent product review concludes that atmosphere and feedback materially improve game feel without making the application noisy, distracting, or less calm for focus.
+
 ## M10.5 — UI and graphics overhaul
 
 Branch: `release/v1-ui-graphics-overhaul`
