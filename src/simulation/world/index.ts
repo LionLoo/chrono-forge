@@ -36,9 +36,20 @@ import {
   populationScaleDto,
   reconcileAnonymousPopulation,
   reconcilePopulationLod,
+  removeAnonymousResidents,
   type DetailedResidentState,
   type PopulationScaleState,
 } from '../scale';
+import {
+  advanceSpace,
+  assertSpaceInvariants,
+  createInitialSpace,
+  spaceDto,
+  type SpaceContext,
+  type SpaceReferentKind,
+  type SpaceResourceStock,
+  type SpaceState,
+} from '../space';
 import {
   assertPathCacheInvariants,
   createPathCacheState,
@@ -108,9 +119,9 @@ export interface WorldEvent {
   readonly tick: number;
   readonly kind: string;
   readonly summary: string;
-  readonly subjectKind: EntityKind;
+  readonly subjectKind: WorldEntityKind;
   readonly subjectId: number;
-  readonly targetKind: EntityKind;
+  readonly targetKind: WorldEntityKind;
   readonly targetId: number;
   readonly tileIndex: number;
   readonly amount: number;
@@ -119,14 +130,17 @@ export interface WorldEvent {
 
 export interface WorldEventDetails {
   readonly summary?: string;
-  readonly subjectKind?: EntityKind;
+  readonly subjectKind?: WorldEntityKind;
   readonly subjectId?: number;
-  readonly targetKind?: EntityKind;
+  readonly targetKind?: WorldEntityKind;
   readonly targetId?: number;
   readonly tileIndex?: number;
   readonly amount?: number;
   readonly childArrivalEligibility?: ChildArrivalEligibilityEvidence;
 }
+
+export type SocietyWorldEvent = Omit<WorldEvent, 'subjectKind' | 'targetKind'> &
+  Readonly<{ subjectKind: EntityKind; targetKind: EntityKind }>;
 
 export interface WorldTileFields {
   readonly elevation: Int16Array;
@@ -155,6 +169,8 @@ export interface WorldState extends WorldTileFields {
   readonly civilization: CivilizationState;
   readonly civilizations: CivilizationsState;
   readonly development: DevelopmentState;
+  /** M9's bounded planetary and interworld authority. */
+  readonly space: SpaceState;
   /** Camera-independent detailed and aggregate population authority. */
   readonly populationScale: PopulationScaleState;
   /** Persisted deterministic cache authority; live request scheduling is separate. */
@@ -163,7 +179,9 @@ export interface WorldState extends WorldTileFields {
   readonly tiles: WorldTileFields;
 }
 
-const ENTITY_KINDS: readonly EntityKind[] = Object.freeze([
+export type WorldEntityKind = EntityKind | SpaceReferentKind;
+
+const SOCIETY_ENTITY_KINDS: readonly EntityKind[] = Object.freeze([
   'person',
   'structure',
   'household',
@@ -178,11 +196,31 @@ const ENTITY_KINDS: readonly EntityKind[] = Object.freeze([
   'world',
 ]);
 
-function isEntityKind(value: unknown): value is EntityKind {
-  return typeof value === 'string' && (ENTITY_KINDS as readonly string[]).includes(value);
+const WORLD_ENTITY_KINDS: readonly WorldEntityKind[] = Object.freeze([
+  ...SOCIETY_ENTITY_KINDS,
+  'celestial-body',
+  'space-program',
+  'spacecraft',
+  'space-colony',
+  'alien-civilization',
+]);
+
+function isEntityKind(value: unknown): value is WorldEntityKind {
+  return typeof value === 'string' && (WORLD_ENTITY_KINDS as readonly string[]).includes(value);
 }
 
-function worldReferenceExists(state: WorldState, kind: EntityKind, id: number): boolean {
+function isSocietyEntityKind(value: WorldEntityKind): value is EntityKind {
+  return (SOCIETY_ENTITY_KINDS as readonly WorldEntityKind[]).includes(value);
+}
+
+function societyWorldEvent(event: WorldEvent): SocietyWorldEvent {
+  if (!isSocietyEntityKind(event.subjectKind) || !isSocietyEntityKind(event.targetKind)) {
+    throw new Error('A space-referenced event cannot enter person memory or biography authority.');
+  }
+  return event as SocietyWorldEvent;
+}
+
+function worldReferenceExists(state: WorldState, kind: WorldEntityKind, id: number): boolean {
   switch (kind) {
     case 'world':
       return id === 0;
@@ -208,6 +246,16 @@ function worldReferenceExists(state: WorldState, kind: EntityKind, id: number): 
       return state.civilizations.conflicts.some((conflict) => conflict.id === id);
     case 'ruin':
       return state.civilizations.ruins.some((ruin) => ruin.id === id);
+    case 'celestial-body':
+      return state.space.bodies.some((body) => body.id === id);
+    case 'space-program':
+      return state.space.programs.some((program) => program.id === id);
+    case 'spacecraft':
+      return state.space.spacecraft.some((spacecraft) => spacecraft.id === id);
+    case 'space-colony':
+      return state.space.colonies.some((colony) => colony.id === id);
+    case 'alien-civilization':
+      return state.space.aliens.some((alien) => alien.id === id);
   }
 }
 
@@ -821,7 +869,7 @@ export function createInitialWorld(
     0,
     config.societyYearTicks,
   );
-  const initialEvents: readonly WorldEvent[] = Object.freeze([
+  const initialEvents: readonly SocietyWorldEvent[] = Object.freeze([
     Object.freeze({
       id: 1,
       tick: 0,
@@ -876,6 +924,7 @@ export function createInitialWorld(
     civilization: foundedCivilization,
     civilizations,
     development: createInitialDevelopment(normalizedSeed, 0),
+    space: createInitialSpace(normalizedSeed, 0),
     ...m8,
     ...tiles,
     tiles,
@@ -915,6 +964,27 @@ export function findResourceDepletionAt(
 function developmentContext(state: WorldState, tick: number): DevelopmentContext {
   const indexes = sampledTileIndexes(state);
   const land = indexes.filter((index) => state.water[index] === 0);
+  const activeSettlements = state.civilizations.settlements.filter(
+    (settlement) => settlement.status === 'active',
+  );
+  const activeRoutes = state.civilizations.routes.filter((route) => route.status === 'active');
+  const primarySettlementId = state.civilizations.settlements[0]?.id ?? 0;
+  const secondaryReserves = activeSettlements
+    .filter((settlement) => settlement.id !== primarySettlementId)
+    .reduce(
+      (total, settlement) => ({
+        food: total.food + settlement.reserves.food,
+        water: total.water + settlement.reserves.water,
+        timber: total.timber + settlement.reserves.timber,
+        stone: total.stone + settlement.reserves.stone,
+      }),
+      { food: 0, water: 0, timber: 0, stone: 0 },
+    );
+  const storedSettlementMetal = activeSettlements.reduce(
+    (total, settlement) => total + settlement.reserves.metal,
+    0,
+  );
+  const planetScaleInfrastructure = activeSettlements.length * 3 + activeRoutes.length * 2;
   const householdByPersonId = new Map(
     state.civilization.society.people.map((person) => [person.id, person.householdId] as const),
   );
@@ -951,20 +1021,32 @@ function developmentContext(state: WorldState, tick: number): DevelopmentContext
     ),
     interpersonal: society.interpersonal,
     stockpile: Object.freeze({
-      ...state.civilization.stockpile,
-      metal: Math.floor(
-        indexes.reduce((total, index) => total + (state.metal[index] ?? 0), 0) /
-          Math.max(1, indexes.length),
+      food: state.civilization.stockpile.food + secondaryReserves.food,
+      water: state.civilization.stockpile.water + secondaryReserves.water,
+      timber: state.civilization.stockpile.timber + secondaryReserves.timber,
+      stone: state.civilization.stockpile.stone + secondaryReserves.stone,
+      metal: Math.max(
+        storedSettlementMetal,
+        Math.floor(
+          indexes.reduce((total, index) => total + (state.metal[index] ?? 0), 0) /
+            Math.max(1, indexes.length),
+        ),
       ),
     }),
-    operationalStructures: state.civilization.structures.filter(
-      (structure) => structure.status === 'operational',
-    ).length,
+    operationalStructures:
+      state.civilization.structures.filter((structure) => structure.status === 'operational')
+        .length + planetScaleInfrastructure,
     damagedStructures: state.civilization.structures.filter(
       (structure) => structure.status === 'damaged',
     ).length,
-    tradeVolume: society.offers.reduce((total, offer) => total + offer.fulfilledAmount, 0),
-    institutionCount: 1 + society.groups.length,
+    tradeVolume:
+      society.offers.reduce((total, offer) => total + offer.fulfilledAmount, 0) +
+      activeRoutes.reduce((total, route) => total + route.volume, 0),
+    institutionCount:
+      1 +
+      society.groups.length +
+      state.civilizations.civilizations.filter((civilization) => civilization.endedTick === null)
+        .length,
     stability: society.stability,
     scarcity: society.scarcity,
     inequality: society.inequality,
@@ -1036,7 +1118,7 @@ function applyDevelopmentResult(
   state: WorldState,
   result: DevelopmentResult,
   tick: number,
-): { readonly state: WorldState; readonly events: readonly WorldEvent[] } {
+): { readonly state: WorldState; readonly events: readonly SocietyWorldEvent[] } {
   const started = crisisKindsStarted(state.development, result.state);
   const clampByte = (value: number): number => clamp(value, 0, 255);
   const clampResource = (value: number): number => clamp(value, 0, 65_535);
@@ -1312,7 +1394,7 @@ function applyDevelopmentResult(
       }),
     });
   }
-  const created: WorldEvent[] = [];
+  const created: SocietyWorldEvent[] = [];
   for (const event of result.events) {
     next = appendWorldEvent(next, event.kind, tick, {
       summary: developmentSummary(event, result.state),
@@ -1323,7 +1405,7 @@ function applyDevelopmentResult(
       tileIndex: event.targetTileIndex ?? center,
       amount: event.amount,
     });
-    created.push(next.eventLog.at(-1)!);
+    created.push(societyWorldEvent(next.eventLog.at(-1)!));
   }
   for (const response of result.responses) {
     const helper = society.people.find((person) => person.id === response.helperPersonId)!;
@@ -1337,7 +1419,7 @@ function applyDevelopmentResult(
       tileIndex: recipient.tileIndex,
       amount: response.amount,
     });
-    created.push(next.eventLog.at(-1)!);
+    created.push(societyWorldEvent(next.eventLog.at(-1)!));
   }
   for (const person of crisisPeople.filter((candidate) => killedIds.has(candidate.id))) {
     next = appendWorldEvent(next, 'person-died', tick, {
@@ -1349,7 +1431,7 @@ function applyDevelopmentResult(
       tileIndex: agentById.get(person.id)?.tileIndex ?? center,
       amount: 0,
     });
-    created.push(next.eventLog.at(-1)!);
+    created.push(societyWorldEvent(next.eventLog.at(-1)!));
   }
   return Object.freeze({ state: next, events: Object.freeze(created) });
 }
@@ -1370,16 +1452,17 @@ function settlementTerrain(state: WorldState): SettlementTerrain {
 }
 
 function societyAuthoritativeEvent(event: WorldEvent): SocietyAuthoritativeEvent {
+  const source = societyWorldEvent(event);
   return Object.freeze({
-    id: event.id,
-    tick: event.tick,
-    kind: event.kind,
-    summary: event.summary,
-    subject: Object.freeze({ kind: event.subjectKind, id: event.subjectId }),
-    target: Object.freeze({ kind: event.targetKind, id: event.targetId }),
-    ...(event.childArrivalEligibility === undefined
+    id: source.id,
+    tick: source.tick,
+    kind: source.kind,
+    summary: source.summary,
+    subject: Object.freeze({ kind: source.subjectKind, id: source.subjectId }),
+    target: Object.freeze({ kind: source.targetKind, id: source.targetId }),
+    ...(source.childArrivalEligibility === undefined
       ? {}
-      : { childArrivalEligibility: event.childArrivalEligibility }),
+      : { childArrivalEligibility: source.childArrivalEligibility }),
   });
 }
 
@@ -1412,7 +1495,7 @@ function communityReservesFromFounding(state: WorldState): CommunityReserves {
     water: state.civilization.stockpile.water,
     timber: state.civilization.stockpile.timber,
     stone: state.civilization.stockpile.stone,
-    metal: 0,
+    metal: state.civilizations.settlements[0]?.reserves.metal ?? 0,
   });
 }
 
@@ -1624,40 +1707,55 @@ export function createCivilizationsContext(state: WorldState, tick: number): Civ
       ])
     : Object.freeze([]);
   const economies = Object.freeze(
-    activeSettlements.map((settlement, index) =>
-      Object.freeze({
+    activeSettlements.map((settlement, index) => {
+      const ordinaryGrowth =
+        index !== 0 &&
+        year % 2 === 0 &&
+        settlement.stability >= 40 &&
+        settlement.reserves.food >= Math.max(2, Math.ceil(settlement.population / 3) + 1) &&
+        settlement.reserves.water >= Math.max(2, Math.ceil(settlement.population / 3) + 1)
+          ? 1
+          : 0;
+      return Object.freeze({
         settlementId: settlement.id,
         production:
           index === 0
-            ? Object.freeze({ food: 0, water: 0, timber: 0, stone: 0, metal: 0 })
+            ? Object.freeze({
+                food: 0,
+                water: 0,
+                timber: 0,
+                stone: 0,
+                metal: Math.trunc((state.metal[settlement.centerTileIndex] ?? 0) / 60),
+              })
             : Object.freeze({
                 food: Math.max(1, Math.trunc((state.food[settlement.centerTileIndex] ?? 0) / 120)),
                 water: Math.max(
                   1,
                   Math.trunc((state.freshWater[settlement.centerTileIndex] ?? 0) / 180),
                 ),
-                timber: Math.trunc((state.timber[settlement.centerTileIndex] ?? 0) / 220),
+                timber: Math.trunc((state.timber[settlement.centerTileIndex] ?? 0) / 120),
                 stone: Math.trunc((state.stone[settlement.centerTileIndex] ?? 0) / 260),
-                metal: Math.trunc((state.metal[settlement.centerTileIndex] ?? 0) / 80),
+                metal: Math.trunc((state.metal[settlement.centerTileIndex] ?? 0) / 60),
               }),
         consumption:
           index === 0
             ? Object.freeze({ food: 0, water: 0, timber: 0, stone: 0, metal: 0 })
             : Object.freeze({
-                food: Math.max(1, Math.ceil(settlement.population / 3)),
-                water: Math.max(1, Math.ceil(settlement.population / 3)),
+                food: Math.max(1, Math.ceil(settlement.population / 3)) + ordinaryGrowth,
+                water: Math.max(1, Math.ceil(settlement.population / 3)) + ordinaryGrowth,
                 timber: 0,
                 stone: 0,
                 metal: 0,
               }),
+        populationDelta: ordinaryGrowth,
         stabilityDelta:
           profile === 'volatile' && year >= 30
             ? -3
             : (state.hazard[settlement.centerTileIndex] ?? 0) > 120
               ? -1
               : 1,
-      }),
-    ),
+      });
+    }),
   );
   const routeCandidates = Object.freeze(
     activeSettlements.flatMap((left, leftIndex) =>
@@ -1763,6 +1861,26 @@ export function createCivilizationsContext(state: WorldState, tick: number): Civ
                 : Math.min(conflict.attackerCivilizationId, conflict.defenderCivilizationId),
         });
       }),
+  );
+  const activeCivilizationIds = new Set(activeCivilizations.map((civilization) => civilization.id));
+  const conqueredSettlements = state.civilizations.settlements
+    .filter(
+      (settlement) =>
+        settlement.status === 'conquered' &&
+        settlement.endedTick !== null &&
+        activeCivilizationIds.has(settlement.civilizationId),
+    )
+    .sort((left, right) => (left.endedTick ?? 0) - (right.endedTick ?? 0) || left.id - right.id);
+  const retainedOccupationId = conqueredSettlements.at(-1)?.id ?? null;
+  const recoveredSettlementIds = Object.freeze(
+    conqueredSettlements
+      .filter(
+        (settlement) =>
+          settlement.id !== retainedOccupationId &&
+          tick - settlement.endedTick! >= state.config.societyYearTicks * 12,
+      )
+      .slice(0, 1)
+      .map((settlement) => settlement.id),
   );
   const ruinDrive = profile === 'volatile' && year >= 45 ? 70 : 0;
   const ruinCandidate = activeSettlements
@@ -1973,6 +2091,7 @@ export function createCivilizationsContext(state: WorldState, tick: number): Civ
     conflictCandidates,
     conflictResolutions,
     residencyTransfers,
+    recoveredSettlementIds,
     ruinSettlementIds,
     federationCivilizationIds,
     fragmentationCivilizationIds,
@@ -1994,6 +2113,7 @@ function civilizationEventDetails(
   });
   switch (event.kind) {
     case 'settlement-founded':
+    case 'settlement-restored':
       return {
         ...pair('settlement'),
         targetKind: 'civilization',
@@ -2139,7 +2259,14 @@ function applyCivilizationsYear(state: WorldState, tick: number): WorldState {
     timber: Math.max(0, source.civilization.stockpile.timber + delta.timber),
     stone: Math.max(0, source.civilization.stockpile.stone + delta.stone),
   });
-  const primaryReserves = Object.freeze({ ...stockpile, metal: 0 });
+  const primaryReserves = Object.freeze({
+    ...stockpile,
+    metal: Math.max(
+      0,
+      (result.state.settlements.find((settlement) => settlement.id === primarySettlementId)
+        ?.reserves.metal ?? 0) + delta.metal,
+    ),
+  });
   let next: WorldState = Object.freeze({
     ...source,
     civilizations: Object.freeze({
@@ -2156,6 +2283,280 @@ function applyCivilizationsYear(state: WorldState, tick: number): WorldState {
   });
   for (const event of result.events)
     next = appendWorldEvent(next, event.kind, tick, civilizationEventDetails(next, event));
+  return next;
+}
+
+const SPACE_CONTEXT_RESIDENTS_PER_SETTLEMENT = 16;
+const SPACE_RESOURCE_KEYS = Object.freeze([
+  'food',
+  'water',
+  'timber',
+  'stone',
+  'metal',
+] as const satisfies readonly (keyof SpaceResourceStock)[]);
+
+export function createSpaceContext(state: WorldState, tick: number): SpaceContext {
+  const knownKnowledge = Object.freeze(
+    state.development.knowledge
+      .filter((knowledge) => knowledge.status === 'known')
+      .map((knowledge) => knowledge.id)
+      .sort(),
+  );
+  const activeRoutes = state.civilizations.routes.filter((route) => route.status === 'active');
+  const activeCivilizations = state.civilizations.civilizations
+    .filter((civilization) => civilization.endedTick === null)
+    .sort((left, right) => left.id - right.id)
+    .flatMap((civilization) => {
+      const memberIds = new Set(civilization.memberSettlementIds);
+      const settlements = state.civilizations.settlements
+        .filter((settlement) => settlement.status === 'active' && memberIds.has(settlement.id))
+        .sort(
+          (left, right) =>
+            right.reserves.metal - left.reserves.metal ||
+            right.reserves.stone - left.reserves.stone ||
+            right.population - left.population ||
+            left.id - right.id,
+        );
+      const launchSettlement = settlements[0];
+      if (launchSettlement === undefined) return [];
+      const civilizationRoutes = activeRoutes.filter(
+        (route) =>
+          memberIds.has(route.firstSettlementId) || memberIds.has(route.secondSettlementId),
+      );
+      const routeVolume = civilizationRoutes.reduce((total, route) => total + route.volume, 0);
+      const population = settlements.reduce(
+        (total, settlement) => total + settlement.population,
+        0,
+      );
+      const institutionCount =
+        1 +
+        settlements.length +
+        (memberIds.has(state.civilizations.settlements[0]!.id)
+          ? state.civilization.society.groups.length
+          : 0);
+      const infrastructure = Math.min(
+        100,
+        settlements.length * 10 +
+          civilizationRoutes.length * 2 +
+          Math.trunc(routeVolume / 3) +
+          Math.trunc(population / 2),
+      );
+      const storedMaterial = settlements.reduce(
+        (total, settlement) =>
+          total +
+          settlement.reserves.timber +
+          settlement.reserves.stone +
+          settlement.reserves.metal,
+        0,
+      );
+      const hasAdvancedEnergy = knownKnowledge.includes('advanced-energy');
+      const hasPlanetaryEngineering = knownKnowledge.includes('planetary-engineering');
+      const energyCapacity = hasAdvancedEnergy
+        ? Math.min(100, infrastructure + institutionCount * 8)
+        : 0;
+      const engineeringCapacity = hasPlanetaryEngineering
+        ? Math.min(100, infrastructure + settlements.length * 8 + Math.trunc(routeVolume / 2))
+        : 0;
+      const primaryMember = memberIds.has(state.civilizations.settlements[0]!.id);
+      const scarcity = primaryMember
+        ? state.civilization.society.scarcity
+        : Math.max(
+            0,
+            100 - Math.min(100, launchSettlement.reserves.food + launchSettlement.reserves.water),
+          );
+      return [
+        Object.freeze({
+          id: civilization.id,
+          launchSettlementId: launchSettlement.id,
+          cultureId: launchSettlement.cultureId,
+          institutionCount,
+          scarcity,
+          stability: Math.trunc(
+            settlements.reduce((total, settlement) => total + settlement.stability, 0) /
+              settlements.length,
+          ),
+          infrastructure,
+          storedMaterial,
+          energyCapacity,
+          engineeringCapacity,
+          interSettlementExchange: Math.min(100, routeVolume),
+          surfaceReserves: Object.freeze({ ...launchSettlement.reserves }),
+        }),
+      ];
+    });
+  const eligibleUnsalientResidents = Object.freeze(
+    activeCivilizations.flatMap((civilization) => {
+      const aggregate = state.populationScale.cohorts
+        .filter(
+          (cohort) =>
+            cohort.classification.householdId === 0 &&
+            cohort.classification.civilizationId === civilization.id &&
+            cohort.classification.settlementId === civilization.launchSettlementId,
+        )
+        .flatMap((cohort) => cohort.residentIds.slice(0, SPACE_CONTEXT_RESIDENTS_PER_SETTLEMENT));
+      return aggregate
+        .sort((left, right) => left - right)
+        .slice(0, SPACE_CONTEXT_RESIDENTS_PER_SETTLEMENT)
+        .map((residentId) =>
+          Object.freeze({
+            residentId,
+            civilizationId: civilization.id,
+            settlementId: civilization.launchSettlementId,
+          }),
+        );
+    }),
+  );
+  const terrestrialDiplomacyPressure = Math.max(
+    0,
+    Math.min(
+      100,
+      state.civilizations.diplomacy.reduce(
+        (total, relation) =>
+          total +
+          (relation.status === 'at-war'
+            ? 60
+            : relation.status === 'rival'
+              ? 30
+              : relation.status === 'allied'
+                ? -15
+                : 0),
+        state.civilizations.conflicts.filter((conflict) => conflict.status === 'active').length *
+          40,
+      ),
+    ),
+  );
+  return Object.freeze({
+    tick,
+    knownKnowledge,
+    activeCivilizations: Object.freeze(activeCivilizations),
+    surfaceSettlementOwners: Object.freeze(
+      state.civilizations.settlements
+        .filter((settlement) => settlement.status === 'active')
+        .map((settlement) =>
+          Object.freeze({
+            settlementId: settlement.id,
+            civilizationId: settlement.civilizationId,
+          }),
+        )
+        .sort((left, right) => left.settlementId - right.settlementId),
+    ),
+    eligibleUnsalientResidents,
+    recentAlienSignalPressure: Math.min(100, state.development.conditions.accidentPressure),
+    terrestrialDiplomacyPressure,
+  });
+}
+
+function applySpaceResourceDeltas(
+  state: WorldState,
+  deltas: readonly Readonly<{
+    civilizationId: number;
+    settlementId: number;
+    resources: Readonly<Record<keyof SpaceResourceStock, number>>;
+  }>[],
+): WorldState {
+  let civilization = state.civilization;
+  const settlements = [...state.civilizations.settlements];
+  const primarySettlementId = settlements[0]!.id;
+  for (const delta of deltas) {
+    const settlementIndex = settlements.findIndex(
+      (settlement) =>
+        settlement.id === delta.settlementId && settlement.civilizationId === delta.civilizationId,
+    );
+    if (settlementIndex < 0) throw new Error('Space resource patch lost its surface owner.');
+    const source = settlements[settlementIndex]!;
+    const reserves = { ...source.reserves };
+    for (const key of SPACE_RESOURCE_KEYS) {
+      const amount = delta.resources[key];
+      if (!Number.isSafeInteger(amount) || !Number.isSafeInteger(reserves[key] + amount))
+        throw new Error('Space resource patch must remain a safe integer.');
+      reserves[key] += amount;
+      if (reserves[key] < 0) throw new Error('Space resource patch overdrew its surface owner.');
+    }
+    settlements[settlementIndex] = Object.freeze({
+      ...source,
+      reserves: Object.freeze(reserves),
+    });
+    if (source.id === primarySettlementId) {
+      civilization = Object.freeze({
+        ...civilization,
+        stockpile: Object.freeze({
+          food: reserves.food,
+          water: reserves.water,
+          timber: reserves.timber,
+          stone: reserves.stone,
+        }),
+      });
+    }
+  }
+  return Object.freeze({
+    ...state,
+    civilization,
+    civilizations: Object.freeze({
+      ...state.civilizations,
+      settlements: Object.freeze(settlements),
+    }),
+  });
+}
+
+function applySpaceYear(state: WorldState, tick: number): WorldState {
+  const result = advanceSpace(state.space, createSpaceContext(state, tick));
+  let next: WorldState = Object.freeze({ ...state, space: result.state });
+  next = applySpaceResourceDeltas(next, result.surfaceResourceDeltas);
+  if (result.surfacePopulationDeltas.length > 0) {
+    const provenanceByResident = new Map<
+      number,
+      Readonly<{ civilizationId: number; settlementId: number }>
+    >();
+    for (const cohort of next.populationScale.cohorts)
+      for (const residentId of cohort.residentIds)
+        provenanceByResident.set(residentId, cohort.classification);
+    for (const delta of result.surfacePopulationDeltas) {
+      const provenance = provenanceByResident.get(delta.residentId);
+      if (
+        provenance?.civilizationId !== delta.civilizationId ||
+        provenance.settlementId !== delta.settlementId ||
+        delta.delta !== -1
+      )
+        throw new Error('Space population patch lost its exact terrestrial provenance.');
+    }
+    const departureIds = result.surfacePopulationDeltas
+      .map((delta) => delta.residentId)
+      .sort((left, right) => left - right);
+    const departuresBySettlement = new Map<number, number>();
+    for (const delta of result.surfacePopulationDeltas)
+      departuresBySettlement.set(
+        delta.settlementId,
+        (departuresBySettlement.get(delta.settlementId) ?? 0) + 1,
+      );
+    next = Object.freeze({
+      ...next,
+      populationScale: removeAnonymousResidents(next.populationScale, departureIds),
+      civilizations: Object.freeze({
+        ...next.civilizations,
+        settlements: Object.freeze(
+          next.civilizations.settlements.map((settlement) => {
+            const departures = departuresBySettlement.get(settlement.id) ?? 0;
+            if (departures > settlement.population)
+              throw new Error('Space population patch overdrew its terrestrial settlement.');
+            return departures === 0
+              ? settlement
+              : Object.freeze({ ...settlement, population: settlement.population - departures });
+          }),
+        ),
+      }),
+    });
+  }
+  for (const event of result.events) {
+    next = appendWorldEvent(next, event.kind, tick, {
+      summary: event.summary,
+      subjectKind: event.subjectKind,
+      subjectId: event.subjectId,
+      targetKind: event.targetKind,
+      targetId: event.targetId,
+      tileIndex: -1,
+      amount: event.amount,
+    });
+  }
   return next;
 }
 
@@ -2191,10 +2592,10 @@ export function stepWorld(state: WorldState, ticks = 1): WorldState {
       populationScale,
       pathCache: pulse.pathCache,
     });
-    const createdEvents: WorldEvent[] = [];
+    const createdEvents: SocietyWorldEvent[] = [];
     for (const draft of pulse.events) {
       next = appendWorldEvent(next, draft.kind, pulseTick, draft);
-      createdEvents.push(next.eventLog.at(-1)!);
+      createdEvents.push(societyWorldEvent(next.eventLog.at(-1)!));
     }
     const societyEvents = createdEvents.map(societyAuthoritativeEvent);
     next = Object.freeze({
@@ -2232,6 +2633,8 @@ export function stepWorld(state: WorldState, ticks = 1): WorldState {
     }
     if (pulseTick % next.config.societyYearTicks === 0 && next.civilizations.tick < pulseTick)
       next = applyCivilizationsYear(next, pulseTick);
+    if (pulseTick % next.config.societyYearTicks === 0 && next.space.tick < pulseTick)
+      next = applySpaceYear(next, pulseTick);
     next = Object.freeze({
       ...next,
       civilizations: reconcileCivilizationResidencies(next),
@@ -2247,15 +2650,17 @@ export function stepWorld(state: WorldState, ticks = 1): WorldState {
       ),
     });
     next = synchronizeSettlementPopulation(next);
-    assertWorldInvariants(next);
     pulseTick += SETTLEMENT_ACTION_PULSE_TICKS;
   }
-  if (next.tick === endingTick) return next;
+  if (next.tick === endingTick) {
+    assertWorldInvariants(next);
+    return next;
+  }
   const populationScale = advancePopulationScale(
     next.populationScale,
     endingTick - next.populationScale.tick,
   );
-  return synchronizeSettlementPopulation(
+  const completed = synchronizeSettlementPopulation(
     Object.freeze({
       ...next,
       tick: endingTick,
@@ -2263,6 +2668,8 @@ export function stepWorld(state: WorldState, ticks = 1): WorldState {
       pathCache: Object.freeze({ ...next.pathCache, logicalTick: endingTick }),
     }),
   );
+  assertWorldInvariants(completed);
+  return completed;
 }
 
 /** Appends one factual event with the next stable id to an immutable world snapshot. */
@@ -2518,6 +2925,7 @@ export function assertWorldInvariants(state: WorldState): void {
   assertCivilizationInvariants(state.civilization, settlementTerrain(state));
   assertCivilizationsInvariants(state.civilizations);
   assertDevelopmentInvariants(state.development);
+  assertSpaceInvariants(state.space);
   assertPopulationScaleInvariants(state.populationScale);
   assertPathCacheInvariants(state.pathCache);
   if (state.populationScale.tick !== state.tick)
@@ -2530,6 +2938,8 @@ export function assertWorldInvariants(state: WorldState): void {
     throw new Error('World invariant violation: development cannot be ahead of world time.');
   if (state.civilizations.tick > state.tick)
     throw new Error('World invariant violation: civilizations cannot be ahead of world time.');
+  if (state.space.tick > state.tick)
+    throw new Error('World invariant violation: space cannot be ahead of world time.');
   const agentIds = new Set(state.civilization.agents.map((agent) => agent.id));
   const detailedById = new Map(
     state.populationScale.detailedResidents.map((resident) => [resident.id, resident]),
@@ -2597,6 +3007,19 @@ export function assertWorldInvariants(state: WorldState): void {
   for (const settlement of state.civilizations.settlements)
     if (settlement.population !== (scalePopulationBySettlement.get(settlement.id) ?? 0))
       throw new Error('Settlement population must conserve scale residents.');
+  const terrestrialResidentIds = new Set<number>([
+    ...state.populationScale.detailedResidents.map((resident) => resident.id),
+    ...state.populationScale.cohorts.flatMap((cohort) => cohort.residentIds),
+  ]);
+  const offworldResidentIds = [
+    ...state.space.missions
+      .filter((mission) => mission.status === 'active')
+      .flatMap((mission) => mission.passengerIds),
+    ...state.space.colonies.flatMap((colony) => colony.residentIds),
+  ];
+  if (offworldResidentIds.some((residentId) => terrestrialResidentIds.has(residentId))) {
+    throw new Error('A resident cannot exist in both terrestrial and space authority.');
+  }
   const structureIds = new Set(state.civilization.structures.map((structure) => structure.id));
   const householdIds = new Set(
     state.civilization.society.households.map((household) => household.id),
@@ -2611,7 +3034,44 @@ export function assertWorldInvariants(state: WorldState): void {
   const routeIds = new Set(state.civilizations.routes.map((route) => route.id));
   const conflictIds = new Set(state.civilizations.conflicts.map((conflict) => conflict.id));
   const ruinIds = new Set(state.civilizations.ruins.map((ruin) => ruin.id));
-  const referenceExists = (kind: EntityKind, id: number): boolean => {
+  for (const program of state.space.programs)
+    if (
+      !civilizationIds.has(program.civilizationId) ||
+      !settlementIds.has(program.settlementId) ||
+      !cultureIds.has(program.cultureId)
+    )
+      throw new Error('Space program lost its terrestrial provenance.');
+  for (const spacecraft of state.space.spacecraft)
+    if (
+      !civilizationIds.has(spacecraft.civilizationId) ||
+      !settlementIds.has(spacecraft.settlementId)
+    )
+      throw new Error('Spacecraft lost its terrestrial provenance.');
+  for (const mission of state.space.missions)
+    if (
+      !civilizationIds.has(mission.civilizationId) ||
+      !settlementIds.has(mission.settlementId) ||
+      !cultureIds.has(mission.cultureId)
+    )
+      throw new Error('Space mission lost its terrestrial provenance.');
+  for (const colony of state.space.colonies)
+    if (
+      !civilizationIds.has(colony.civilizationId) ||
+      !settlementIds.has(colony.settlementId) ||
+      !cultureIds.has(colony.cultureId)
+    )
+      throw new Error('Space colony lost its terrestrial provenance.');
+  for (const transfer of state.space.cargoTransfers)
+    for (const endpoint of [transfer.origin, transfer.destination])
+      if (
+        endpoint.kind === 'settlement' &&
+        (!civilizationIds.has(endpoint.civilizationId) || !settlementIds.has(endpoint.settlementId))
+      )
+        throw new Error('Space cargo endpoint lost its terrestrial provenance.');
+  for (const relation of state.space.relations)
+    if (!civilizationIds.has(relation.civilizationId))
+      throw new Error('Space relation references an unknown terrestrial civilization.');
+  const referenceExists = (kind: WorldEntityKind, id: number): boolean => {
     switch (kind) {
       case 'world':
         return id === 0;
@@ -2637,6 +3097,16 @@ export function assertWorldInvariants(state: WorldState): void {
         return conflictIds.has(id);
       case 'ruin':
         return ruinIds.has(id);
+      case 'celestial-body':
+        return state.space.bodies.some((body) => body.id === id);
+      case 'space-program':
+        return state.space.programs.some((program) => program.id === id);
+      case 'spacecraft':
+        return state.space.spacecraft.some((spacecraft) => spacecraft.id === id);
+      case 'space-colony':
+        return state.space.colonies.some((colony) => colony.id === id);
+      case 'alien-civilization':
+        return state.space.aliens.some((alien) => alien.id === id);
     }
   };
   const eventsById = new Map<number, WorldEvent>();
@@ -2770,6 +3240,7 @@ export function canonicalWorldJson(state: WorldState): string {
     populationScale: populationScaleDto(state.populationScale),
     pathCache: toCanonicalPathCacheDto(state.pathCache),
     seed: [...state.seed],
+    space: spaceDto(state.space),
     stone: arrayDto(state.stone),
     temperature: arrayDto(state.temperature),
     tick: state.tick,

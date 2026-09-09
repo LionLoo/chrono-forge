@@ -1,6 +1,11 @@
 import { $, browser, expect } from '@wdio/globals';
+import { readFileSync } from 'node:fs';
 
 /* global CSSMediaRule, describe, document, it */
+
+const M9_E2E_ARCHIVES = JSON.parse(
+  readFileSync(new URL('../fixtures/saves/m9-e2e-archives.json', import.meta.url), 'utf8'),
+);
 
 async function clearIsolatedNativeArchive() {
   await browser.tauri.execute(async ({ core }) => {
@@ -59,6 +64,38 @@ async function openWorldInspection() {
   await $('h2=Settlement and society').waitForDisplayed();
 }
 
+async function waitForLoadedWorld(name) {
+  let lastStatus = '';
+  try {
+    await browser.waitUntil(
+      async () => {
+        lastStatus = await $('.persistence-status').getText();
+        return lastStatus.includes(`Loaded ${name}.`);
+      },
+      { timeoutMsg: `${name} did not finish loading from SQLite` },
+    );
+  } catch (error) {
+    throw new Error(`${name} did not finish loading from SQLite; last status: ${lastStatus}`, {
+      cause: error,
+    });
+  }
+}
+
+async function installActiveM9Archive(savePackage) {
+  return browser.tauri.execute(async ({ core }, packageText) => {
+    const imported = await core.invoke('import_save_slot', { package: packageText });
+    const settings = await core.invoke('load_settings');
+    await core.invoke('save_settings', {
+      settings: {
+        ...settings,
+        activeSlotId: imported.slotId,
+        offlineProgressionEnabled: false,
+      },
+    });
+    return imported;
+  }, savePackage);
+}
+
 describe('native focus persistence', () => {
   it('starts, pauses, saves, relaunches, resumes, and completes through real SQLite IPC', async () => {
     await $('#focus-title').waitForDisplayed();
@@ -70,6 +107,7 @@ describe('native focus persistence', () => {
     await settleVisibleSessionBeforeCleanup();
     await clearIsolatedNativeArchive();
     await browser.reloadSession();
+    await browser.refresh();
     await $('button=Start focus').waitForDisplayed();
     await $('button=Save now').click();
     await browser.waitUntil(
@@ -134,10 +172,33 @@ describe('native focus persistence', () => {
     await $('button=Pause').click();
     expect(await (await $('p=focus paused')).isDisplayed()).toBe(true);
     await $('button=Save now').click();
-    await browser.waitUntil(
-      async () => (await $('.persistence-status').getText()).includes('World saved manually.'),
-      { timeoutMsg: 'manual save did not finish' },
-    );
+    let lastSaveStatus = '';
+    let lastSessions = [];
+    try {
+      await browser.waitUntil(
+        async () => {
+          lastSaveStatus = await $('.persistence-status').getText();
+          if (lastSaveStatus.startsWith('Save fault:')) throw new Error(lastSaveStatus);
+          lastSessions = await browser.tauri.execute(({ core }) =>
+            core.invoke('list_focus_sessions'),
+          );
+          return lastSessions.some(
+            (session) => session.slotId === 'primary' && session.status === 'paused',
+          );
+        },
+        { timeoutMsg: 'manual save did not commit the paused session to SQLite' },
+      );
+    } catch (error) {
+      const sessionSummary = lastSessions.map(({ sessionId, slotId, status }) => ({
+        sessionId,
+        slotId,
+        status,
+      }));
+      throw new Error(
+        `manual paused-session save failed; status=${JSON.stringify(lastSaveStatus)} sessions=${JSON.stringify(sessionSummary)}`,
+        { cause: error },
+      );
+    }
 
     const allPausedSessions = await browser.tauri.execute(({ core }) =>
       core.invoke('list_focus_sessions'),
@@ -190,5 +251,59 @@ describe('native focus persistence', () => {
       status: 'completed',
       focusedMs: 60_000,
     });
+  });
+
+  it('relaunches an exact mid-flight M9 save through SQLite and the real Worker', async () => {
+    // The embedded Windows driver retains its bootstrap WebView on the first session.
+    // Establish a fresh session before changing the active native slot.
+    await browser.reloadSession();
+    await settleVisibleSessionBeforeCleanup();
+    await $('button=Start focus').waitForDisplayed();
+
+    const expectedMidFlight = JSON.parse(M9_E2E_ARCHIVES.midFlightPackage).snapshot;
+    await installActiveM9Archive(M9_E2E_ARCHIVES.midFlightPackage);
+    await browser.reloadSession();
+    await browser.refresh();
+    await waitForLoadedWorld('M9 mid-flight');
+    await $('button=Open world inspection').waitForDisplayed();
+    await openWorldInspection();
+    const missionList = await $('ul[aria-label="Space missions"]');
+    await missionList.waitForDisplayed();
+    expect(await missionList.getText()).toContain('active');
+    await $('button=Save now').click();
+    await browser.waitUntil(
+      async () => (await $('.persistence-status').getText()).includes('World saved manually.'),
+      { timeoutMsg: 'mid-flight M9 save did not commit' },
+    );
+    const candidates = await browser.tauri.execute(({ core }) =>
+      core.invoke('load_save_slot_candidates', { slotId: 'm9-mid-flight' }),
+    );
+    expect(candidates[0]?.snapshot).toBe(expectedMidFlight);
+  });
+
+  it('relaunches an exact post-contact M9 save through SQLite and the real Worker', async () => {
+    await settleVisibleSessionBeforeCleanup();
+    await $('button=Start focus').waitForDisplayed();
+    const expectedContacted = JSON.parse(M9_E2E_ARCHIVES.contactedPackage).snapshot;
+    await installActiveM9Archive(M9_E2E_ARCHIVES.contactedPackage);
+    await browser.reloadSession();
+    await browser.refresh();
+    await waitForLoadedWorld('M9 contacted world');
+    await openWorldInspection();
+    const alienList = await $('ul[aria-label="Alien civilizations"]');
+    await alienList.waitForDisplayed();
+    expect(await alienList.getText()).toMatch(/allied|cooperative|competitive|hostile/);
+    expect(await (await $('.space-panel details summary')).getText()).toMatch(
+      /Logistics: \d+ cargo and \d+ communications in transit/,
+    );
+    await $('button=Save now').click();
+    await browser.waitUntil(
+      async () => (await $('.persistence-status').getText()).includes('World saved manually.'),
+      { timeoutMsg: 'post-contact M9 save did not commit' },
+    );
+    const candidates = await browser.tauri.execute(({ core }) =>
+      core.invoke('load_save_slot_candidates', { slotId: 'm9-contacted' }),
+    );
+    expect(candidates[0]?.snapshot).toBe(expectedContacted);
   });
 });

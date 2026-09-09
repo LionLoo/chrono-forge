@@ -1282,6 +1282,20 @@ function advanceCivilizationInternal(
   const events: SettlementEventDraft[] = [];
   const newStructure = plannedStructure(civilization, terrain, tick);
   const lifecycle = lifecycleStructures(civilization.structures, tick);
+  const validHomeIds = new Set(
+    lifecycle
+      .filter((structure) => structure.kind === 'shelter' && structure.status !== 'demolished')
+      .map((structure) => structure.id),
+  );
+  agents = agents.map((agent) =>
+    agent.homeStructureId !== 0 && !validHomeIds.has(agent.homeStructureId)
+      ? Object.freeze({
+          ...agent,
+          homeStructureId: 0,
+          safety: agent.alive ? clamp(agent.safety - 15, 0, 100) : agent.safety,
+        })
+      : agent,
+  );
   let structures = lifecycle;
   let nextStructureId = civilization.nextStructureId;
   if (newStructure !== undefined) {
@@ -1807,6 +1821,9 @@ export function assertCivilizationInvariants(
     civilization.structures.map((structure) => [structure.id, structure]),
   );
   for (const agent of civilization.agents) {
+    const home = structuresById.get(agent.homeStructureId);
+    if (agent.homeStructureId !== 0 && (home?.kind !== 'shelter' || home.status === 'demolished'))
+      throw new Error('Agent home must reference a non-demolished shelter.');
     for (const step of agent.plan.slice(agent.planIndex)) {
       const structure = structuresById.get(step.targetStructureId);
       if (

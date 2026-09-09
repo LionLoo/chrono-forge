@@ -959,6 +959,102 @@ export function reconcileAnonymousPopulation(
 }
 
 /**
+ * Transfers exact anonymous resident identities out of terrestrial population authority.
+ * Callers must preselect stable IDs from household-zero cohorts; named, protected, or detailed
+ * residents are deliberately ineligible. The persisted allocator never rewinds, so an exported
+ * identity cannot be reused if terrestrial population later grows again.
+ */
+export function removeAnonymousResidents(
+  input: PopulationScaleState,
+  residentIds: readonly number[],
+): PopulationScaleState {
+  assertPopulationScaleInvariants(input);
+  sortedUnique(residentIds, 'residentIds', MAX_SCALE_TRANSFER_DELTAS);
+  if (residentIds.length === 0) return input;
+  if (residentIds.some((residentId) => residentId < FIRST_ORDINARY_RESIDENT_ID)) {
+    throw new RangeError('Only ordinary anonymous residents may leave terrestrial authority.');
+  }
+
+  const requested = new Set(residentIds);
+  const cohortIdByResident = new Map<number, number>();
+  for (const cohort of input.cohorts) {
+    for (const residentId of cohort.residentIds) {
+      if (!requested.has(residentId)) continue;
+      if (cohort.classification.householdId !== 0) {
+        throw new RangeError('Socially classified residents cannot leave as anonymous residents.');
+      }
+      cohortIdByResident.set(residentId, cohort.id);
+    }
+  }
+  if (cohortIdByResident.size !== residentIds.length) {
+    throw new RangeError('Anonymous resident transfer references an unavailable aggregate ID.');
+  }
+
+  const residentIdsByCohort = new Map<number, number[]>();
+  for (const residentId of residentIds) {
+    const cohortId = cohortIdByResident.get(residentId)!;
+    const ids = residentIdsByCohort.get(cohortId) ?? [];
+    ids.push(residentId);
+    residentIdsByCohort.set(cohortId, ids);
+  }
+
+  let state = input;
+  for (const cohortId of [...residentIdsByCohort.keys()].sort((left, right) => left - right)) {
+    const cohort = state.cohorts.find((candidate) => candidate.id === cohortId);
+    if (cohort === undefined) throw new RangeError('Anonymous resident cohort disappeared.');
+    const removedIds = residentIdsByCohort.get(cohortId)!;
+    const removed = new Set(removedIds);
+    const removedTotals = TOTAL_KEYS.reduce<AggregateTotals>(
+      (totals, key) => ({
+        ...totals,
+        [key]: cohort.residentIds.reduce(
+          (sum, residentId, index) =>
+            sum +
+            (removed.has(residentId)
+              ? distribute(cohort.totals[key], cohort.residentIds.length, index)
+              : 0),
+          0,
+        ),
+      }),
+      zeroTotals(),
+    );
+    const remainingIds = cohort.residentIds.filter((residentId) => !removed.has(residentId));
+    const cohorts = state.cohorts.flatMap((candidate) =>
+      candidate.id !== cohortId
+        ? [candidate]
+        : remainingIds.length === 0
+          ? []
+          : [
+              {
+                ...candidate,
+                residentIds: remainingIds,
+                totals: subtractTotals(candidate.totals, removedTotals),
+                promotionCursor: candidate.promotionCursor % Math.max(1, remainingIds.length),
+              },
+            ],
+    );
+    const transfers = appendTransfer(state, {
+      tick: state.tick,
+      kind: 'removed',
+      cohortId,
+      residentCount: removedIds.length,
+      firstResidentId: removedIds[0]!,
+      lastResidentId: removedIds.at(-1)!,
+      totals: removedTotals,
+    });
+    state = {
+      ...state,
+      nextTransferId: state.nextTransferId + 1,
+      cohorts,
+      transfers,
+      backlog: normalizeBacklog(state.tick, state.detailedResidents, cohorts),
+    };
+  }
+  assertPopulationScaleInvariants(state);
+  return state;
+}
+
+/**
  * Applies bounded, camera-independent production LOD. Updated ordinary detail records collapse
  * into classification cohorts; a rotating sample from mature cohorts is promoted for the next
  * detailed pulse. Persisted cohort update counts and the pulse ordinal are the only cursors.

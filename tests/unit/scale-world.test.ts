@@ -27,6 +27,7 @@ function v7Snapshot(world: ReturnType<typeof createInitialWorld>): string {
   const payload = { ...envelope.payload };
   delete payload.populationScale;
   delete payload.pathCache;
+  delete payload.space;
   const payloadJson = JSON.stringify(payload);
   return JSON.stringify({
     checksum: hashCanonicalJson(payloadJson),
@@ -43,6 +44,7 @@ function v8Snapshot(world: ReturnType<typeof createInitialWorld>): string {
     payload: Record<string, unknown>;
   };
   const payload = structuredClone(envelope.payload);
+  delete payload.space;
   const scale = payload.populationScale as Record<string, unknown>;
   delete scale.nextResidentId;
   for (const cohort of scale.cohorts as Record<string, unknown>[]) delete cohort.promotionCursor;
@@ -374,6 +376,7 @@ describe('M8 world scale authority', () => {
     envelope.contentVersion = 8;
     envelope.engineVersion = 8;
     envelope.formatVersion = 8;
+    delete envelope.payload.space;
     envelope.checksum = hashCanonicalJson(JSON.stringify(envelope.payload));
 
     const migrated = migrateWorldSnapshot(JSON.stringify(envelope));

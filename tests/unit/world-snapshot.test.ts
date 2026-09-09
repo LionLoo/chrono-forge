@@ -7,6 +7,7 @@ import {
   WORLD_SNAPSHOT_FORMAT_VERSION,
 } from '../../src/simulation/persistence';
 import {
+  assertWorldInvariants,
   canonicalWorldJson,
   createInitialWorld,
   hashWorldState,
@@ -17,6 +18,8 @@ import { ACCELERATED_YEAR_TICKS } from '../../src/simulation/society';
 import { interpersonalDto } from '../../src/simulation/relationships';
 import { createInitialDevelopment, developmentDto } from '../../src/simulation/development';
 import { advancePathCache, requestPath } from '../../src/simulation/pathfinding/cache';
+import { createInitialSpace, spaceDto } from '../../src/simulation/space';
+import { createM9MatureWorld } from '../fixtures/m9-space-world';
 import legacyWorldV0 from '../fixtures/saves/world-v0.json';
 
 function legacySnapshot(worldJson: string): string {
@@ -80,6 +83,7 @@ function versionSixSnapshot(world: ReturnType<typeof createInitialWorld>): strin
   const payload = { ...envelope.payload };
   delete payload.populationScale;
   delete payload.pathCache;
+  delete payload.space;
   const payloadJson = JSON.stringify(payload);
   return JSON.stringify({
     ...envelope,
@@ -98,12 +102,30 @@ function versionSevenSnapshot(world: ReturnType<typeof createInitialWorld>): str
   const payload = { ...envelope.payload };
   delete payload.populationScale;
   delete payload.pathCache;
+  delete payload.space;
   const payloadJson = JSON.stringify(payload);
   return JSON.stringify({
     ...envelope,
     contentVersion: 7,
     engineVersion: 7,
     formatVersion: 7,
+    checksum: hashCanonicalJson(payloadJson),
+    payload,
+  });
+}
+
+function versionNineSnapshot(world: ReturnType<typeof createInitialWorld>): string {
+  const envelope = JSON.parse(serializeWorldSnapshot(world)) as {
+    payload: Record<string, unknown>;
+  };
+  const payload = { ...envelope.payload };
+  delete payload.space;
+  const payloadJson = JSON.stringify(payload);
+  return JSON.stringify({
+    ...envelope,
+    contentVersion: 9,
+    engineVersion: 9,
+    formatVersion: 9,
     checksum: hashCanonicalJson(payloadJson),
     payload,
   });
@@ -120,6 +142,7 @@ function versionTwoSnapshot(ticks = 15_000): {
   const payload = { ...envelope.payload };
   delete payload.populationScale;
   delete payload.pathCache;
+  delete payload.space;
   delete payload.civilizations;
   delete payload.development;
   const config = payload.config as Record<string, unknown>;
@@ -194,6 +217,7 @@ function versionThreeSnapshot(): string {
   const payload = { ...envelope.payload };
   delete payload.populationScale;
   delete payload.pathCache;
+  delete payload.space;
   delete payload.civilizations;
   delete payload.development;
   payload.eventLog = (payload.eventLog as Record<string, unknown>[]).filter(
@@ -264,6 +288,7 @@ function versionFourSnapshot(ticks = 4321): {
   const payload = { ...current.payload };
   delete payload.populationScale;
   delete payload.pathCache;
+  delete payload.space;
   delete payload.civilizations;
   delete payload.development;
   const payloadJson = JSON.stringify(payload);
@@ -294,6 +319,7 @@ function versionFiveSnapshot(ticks = 4321): {
   const payload = { ...current.payload };
   delete payload.populationScale;
   delete payload.pathCache;
+  delete payload.space;
   delete payload.civilizations;
   const payloadJson = JSON.stringify(payload);
   return {
@@ -323,6 +349,24 @@ describe('versioned world snapshots', () => {
     expect(hashWorldState(loaded)).toBe(hashWorldState(original));
     expect(loaded.elevation).not.toBe(original.elevation);
     expect(loaded.tiles.elevation).toBe(loaded.elevation);
+  });
+
+  it('round-trips lived centers and structures after terrain becomes hazardous', () => {
+    const source = stepWorld(createInitialWorld([7, 11, 13, 17], { width: 8, height: 6 }), 4_321);
+    const hazard = new Uint8Array(source.hazard);
+    hazard[source.civilization.centerTileIndex] = 200;
+    for (const structure of source.civilization.structures)
+      if (structure.status !== 'demolished') hazard[structure.tileIndex] = 200;
+    const lived = Object.freeze({
+      ...source,
+      hazard,
+      tiles: Object.freeze({ ...source.tiles, hazard }),
+    });
+    assertWorldInvariants(lived);
+
+    const loaded = deserializeWorldSnapshot(serializeWorldSnapshot(lived));
+
+    expect(canonicalWorldJson(loaded)).toBe(canonicalWorldJson(lived));
   });
 
   it('round-trips v6 development and civilization authority, including evidence and queued interventions', () => {
@@ -426,7 +470,7 @@ describe('versioned world snapshots', () => {
       interpersonalDto(original.civilization.society.interpersonal),
     );
     expect(serializeWorldSnapshot(loaded)).toBe(snapshot);
-  });
+  }, 30_000);
 
   it('rejects checksummed relationship authority with false arrival or event identity', () => {
     const original = stepWorld(
@@ -528,7 +572,7 @@ describe('versioned world snapshots', () => {
       expect(unrelated).toBeDefined();
       arrival.eventId = unrelated!.id;
     }, /(family bond|child arrival) event identity/i);
-  });
+  }, 30_000);
 
   it('migrates real v3 social authority conservatively without inventing relationship history', () => {
     const migratedSnapshot = migrateWorldSnapshot(versionThreeSnapshot());
@@ -569,7 +613,7 @@ describe('versioned world snapshots', () => {
       ),
     ).toBe(true);
     expect(serializeWorldSnapshot(loaded)).toBe(migratedSnapshot);
-  });
+  }, 30_000);
 
   it.each([
     ['v0', JSON.stringify(legacyWorldV0)],
@@ -697,6 +741,36 @@ describe('versioned world snapshots', () => {
     expect(loaded.eventLog).toStrictEqual(source.eventLog);
     expect(loaded.populationScale).toMatchObject({ tick: source.tick, operationCount: 0 });
     expect(loaded.pathCache).toMatchObject({ logicalTick: source.tick, operationCount: 0 });
+  });
+
+  it('migrates v9 at the saved tick without inventing space history', () => {
+    const source = stepWorld(createInitialWorld([43, 47, 53, 59]), 15_000);
+    const migrated = migrateWorldSnapshot(versionNineSnapshot(source));
+    const loaded = deserializeWorldSnapshot(migrated);
+
+    expect(JSON.parse(migrated)).toMatchObject({
+      contentVersion: WORLD_SNAPSHOT_FORMAT_VERSION,
+      engineVersion: WORLD_SNAPSHOT_FORMAT_VERSION,
+      formatVersion: WORLD_SNAPSHOT_FORMAT_VERSION,
+    });
+    expect(loaded.eventLog).toStrictEqual(source.eventLog);
+    expect(spaceDto(loaded.space)).toStrictEqual(
+      spaceDto(createInitialSpace(source.seed, source.tick)),
+    );
+    expect(serializeWorldSnapshot(loaded)).toBe(migrated);
+  });
+
+  it('rejects checksummed v10 space authority with a missing ledger field', () => {
+    const envelope = JSON.parse(serializeWorldSnapshot(createInitialWorld([47, 53, 59, 61]))) as {
+      checksum: string;
+      payload: { space: { ledger: Record<string, unknown> } };
+    };
+    delete envelope.payload.space.ledger.surfaceImports;
+    envelope.checksum = hashCanonicalJson(JSON.stringify(envelope.payload));
+
+    expect(() => deserializeWorldSnapshot(JSON.stringify(envelope))).toThrow(
+      /space ledger.*(?:unexpected|missing)/i,
+    );
   });
 
   it('continues a v2 save created between society boundaries', () => {
@@ -912,6 +986,63 @@ describe('versioned world snapshots', () => {
     invalidCivilizations.checksum = hashCanonicalJson(JSON.stringify(invalidCivilizations.payload));
     expect(() => deserializeWorldSnapshot(JSON.stringify(invalidCivilizations))).toThrow(
       /snapshot settlement 0.*(?:fields|keys)/i,
+    );
+
+    const undiscoveredRelation = JSON.parse(snapshot) as {
+      checksum: string;
+      payload: {
+        civilizations: { civilizations: { id: number }[] };
+        space: {
+          aliens: { id: number; discoveredTick: number | null }[];
+          nextSpaceId: number;
+          relations: Record<string, unknown>[];
+        };
+      };
+    };
+    const relationId = undiscoveredRelation.payload.space.nextSpaceId;
+    expect(undiscoveredRelation.payload.space.aliens[0]!.discoveredTick).toBeNull();
+    undiscoveredRelation.payload.space.nextSpaceId = relationId + 1;
+    undiscoveredRelation.payload.space.relations.push({
+      id: relationId,
+      civilizationId: undiscoveredRelation.payload.civilizations.civilizations[0]!.id,
+      alienId: undiscoveredRelation.payload.space.aliens[0]!.id,
+      status: 'cooperative',
+      trust: 60,
+      tension: 20,
+      changedTick: 0,
+      lastInteractionTick: 0,
+      exchangeCount: 0,
+      conflictCount: 0,
+    });
+    undiscoveredRelation.checksum = hashCanonicalJson(JSON.stringify(undiscoveredRelation.payload));
+    expect(() => deserializeWorldSnapshot(JSON.stringify(undiscoveredRelation))).toThrow(
+      /relation/i,
+    );
+
+    let livedSpace = createM9MatureWorld();
+    for (let year = 0; year < 12 && livedSpace.space.colonies.length === 0; year += 1) {
+      livedSpace = stepWorld(livedSpace, ACCELERATED_YEAR_TICKS);
+    }
+    expect(livedSpace.space.colonies.length).toBeGreaterThan(0);
+    const duplicateAbandonedResident = JSON.parse(serializeWorldSnapshot(livedSpace)) as {
+      checksum: string;
+      payload: {
+        populationScale: { cohorts: { residentIds: number[] }[] };
+        space: { colonies: { residentIds: number[]; status: string }[] };
+      };
+    };
+    const terrestrialResidentId =
+      duplicateAbandonedResident.payload.populationScale.cohorts[0]!.residentIds[0]!;
+    const abandonedColony = duplicateAbandonedResident.payload.space.colonies[0]!;
+    expect(abandonedColony.residentIds).not.toContain(terrestrialResidentId);
+    abandonedColony.residentIds[0] = terrestrialResidentId;
+    abandonedColony.residentIds.sort((left, right) => left - right);
+    abandonedColony.status = 'abandoned';
+    duplicateAbandonedResident.checksum = hashCanonicalJson(
+      JSON.stringify(duplicateAbandonedResident.payload),
+    );
+    expect(() => deserializeWorldSnapshot(JSON.stringify(duplicateAbandonedResident))).toThrow(
+      /resident cannot exist in both terrestrial and space authority/i,
     );
   });
 

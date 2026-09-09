@@ -169,6 +169,30 @@ describe('M6 civilizations authority', () => {
       }),
     );
     const conflict = next.state.conflicts[0]!;
+    const resolved = advanceCivilizations(
+      next.state,
+      context(YEAR * 3, {
+        conflictResolutions: Object.freeze([{ conflictId: conflict.id, winnerCivilizationId: 2 }]),
+        residencyTransfers: Object.freeze([
+          {
+            fromSettlementId: secondSettlement.id,
+            toSettlementId: 1,
+            personIds: Object.freeze([21]),
+            householdIds: Object.freeze([]),
+            reason: 'refugee',
+          },
+        ]),
+      }),
+    );
+    const restored = advanceCivilizations(
+      resolved.state,
+      context(YEAR * 4, { recoveredSettlementIds: Object.freeze([secondSettlement.id]) }),
+    );
+    expect(
+      restored.state.settlements.find((settlement) => settlement.id === secondSettlement.id),
+    ).toMatchObject({ status: 'active', endedTick: null, civilizationId: 2 });
+    expect(restored.events.map((event) => event.kind)).toContain('settlement-restored');
+
     const resolvedAndRuined = advanceCivilizations(
       next.state,
       context(YEAR * 3, {
@@ -261,22 +285,36 @@ describe('M6 civilizations authority', () => {
     const stonefordAfterExchange = exchanged.state.settlements.find(
       (settlement) => settlement.id === stoneford.id,
     )!;
-    expect(riverhomeAfterExchange.reserves.water).toBe(72);
-    expect(stonefordAfterExchange.reserves.water).toBe(88);
+    expect(riverhomeAfterExchange.reserves).not.toStrictEqual(reserves);
     expect(riverhomeAfterExchange.reserves.food + stonefordAfterExchange.reserves.food).toBe(140);
     expect(riverhomeAfterExchange.reserves.water + stonefordAfterExchange.reserves.water).toBe(160);
+    expect(riverhomeAfterExchange.reserves.timber + stonefordAfterExchange.reserves.timber).toBe(
+      30,
+    );
+    expect(riverhomeAfterExchange.reserves.stone + stonefordAfterExchange.reserves.stone).toBe(20);
+    expect(riverhomeAfterExchange.reserves.metal + stonefordAfterExchange.reserves.metal).toBe(10);
     expect(exchanged.state.routes[0]?.volume).toBe(12);
 
-    const disrupted = advanceCivilizations(
+    const resized = advanceCivilizations(
       exchanged.state,
       context(YEAR * 3, {
+        routeCandidates: Object.freeze([
+          { firstSettlementId: 1, secondSettlementId: stoneford.id, utility: 90, volume: 6 },
+        ]),
+      }),
+    );
+    expect(resized.state.routes[0]?.volume).toBe(6);
+
+    const disrupted = advanceCivilizations(
+      resized.state,
+      context(YEAR * 4, {
         routeCandidates: Object.freeze([
           { firstSettlementId: 1, secondSettlementId: stoneford.id, utility: -40, volume: 12 },
         ]),
       }),
     );
     expect(disrupted.state.routes[0]?.status).toBe('disrupted');
-    expect(disrupted.state.settlements).toStrictEqual(exchanged.state.settlements);
+    expect(disrupted.state.settlements).toStrictEqual(resized.state.settlements);
     assertCivilizationsInvariants(disrupted.state);
   });
 

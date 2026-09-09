@@ -90,6 +90,8 @@ function scenario(
           status: 'active' as const,
         }),
       ]),
+      spaceColonyCount: options.era === 'space' ? 1 : 0,
+      spaceProgramStage: options.era === 'space' ? 'spaceflight' : 'none',
       structureFacts: Object.freeze([
         Object.freeze({ condition: 920, id: 1, kind: 1, progress: 1_000, state: 3, tileIndex: 36 }),
         Object.freeze({ condition: 420, id: 2, kind: 2, progress: 650, state: 2, tileIndex: 37 }),

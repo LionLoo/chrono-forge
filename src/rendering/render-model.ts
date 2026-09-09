@@ -98,6 +98,8 @@ export interface VisualProjection {
   readonly resource: Uint16Array;
   readonly ruinFacts: readonly VisualRuinFact[];
   readonly settlementFacts: readonly VisualSettlementFact[];
+  readonly spaceColonyCount: number;
+  readonly spaceProgramStage: 'none' | 'advanced-energy' | 'planetary-engineering' | 'spaceflight';
   readonly structureFacts: readonly VisualStructureFact[];
   readonly testOnlyEra: 'advanced' | 'space' | null;
   readonly tick: number;
@@ -271,6 +273,13 @@ function material(knownKnowledgeIds: ReadonlySet<string>): 'timber' | 'stone' | 
 function eraFor(projection: VisualProjection, knownKnowledgeIds: ReadonlySet<string>): RenderEra {
   if (projection.provenance === 'test-only' && projection.testOnlyEra !== null)
     return projection.testOnlyEra;
+  if (projection.spaceProgramStage === 'spaceflight' || projection.spaceColonyCount > 0)
+    return 'space';
+  if (
+    projection.spaceProgramStage === 'advanced-energy' ||
+    projection.spaceProgramStage === 'planetary-engineering'
+  )
+    return 'advanced';
   if (knownKnowledgeIds.has('mechanics')) return 'industrial';
   if (knownKnowledgeIds.has('agriculture')) return 'town';
   return 'founding';
@@ -392,6 +401,12 @@ export function visualProjectionFromWorkerFrame(frame: WorldFrameProjection): Vi
       sorted(frame.civilizations.routes).map((route) => Object.freeze({ ...route })),
     ),
     settlementFacts: Object.freeze(settlements),
+    spaceColonyCount: frame.space.colonies.filter((colony) => colony.status === 'active').length,
+    spaceProgramStage:
+      frame.space.programs.find((program) => program.stage === 'spaceflight')?.stage ??
+      frame.space.programs.find((program) => program.stage === 'planetary-engineering')?.stage ??
+      frame.space.programs.find((program) => program.stage === 'advanced-energy')?.stage ??
+      'none',
     structureFacts: Object.freeze(
       Array.from(frame.structureIds, (id, index) =>
         Object.freeze({

@@ -172,7 +172,9 @@ function percentile(samples: readonly number[], percentileValue: number): number
 
 function commit(): string {
   try {
-    return execFileSync('git', ['rev-parse', 'HEAD'], { encoding: 'utf8' }).trim();
+    return execFileSync('git', ['-c', `safe.directory=${process.cwd()}`, 'rev-parse', 'HEAD'], {
+      encoding: 'utf8',
+    }).trim();
   } catch {
     return process.env.GITHUB_SHA ?? 'unknown';
   }

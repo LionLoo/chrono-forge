@@ -934,6 +934,140 @@ textarea:focus-visible,
   box-shadow: 0 26px 70px rgba(0, 0, 0, 0.2);
 }
 
+.space-panel {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 18px;
+  margin-top: 18px;
+  padding: 22px;
+  border: 1px solid rgba(154, 201, 211, 0.2);
+  background:
+    radial-gradient(circle at 78% 0%, rgba(71, 125, 139, 0.16), transparent 38%),
+    rgba(10, 17, 18, 0.94);
+  box-shadow: 0 26px 70px rgba(0, 0, 0, 0.24);
+}
+
+.space-panel > .card-heading {
+  grid-column: 1 / -1;
+}
+
+.space-panel > section {
+  min-width: 0;
+  padding: 16px;
+  border: 1px solid rgba(154, 201, 211, 0.14);
+  background: rgba(6, 13, 15, 0.82);
+}
+
+.space-panel h3,
+.space-panel p,
+.space-panel ul,
+.space-panel details {
+  margin: 0;
+}
+
+.space-panel h3 {
+  margin-bottom: 12px;
+  color: #d8e8df;
+}
+
+.space-panel p,
+.space-panel li,
+.space-panel details {
+  color: #bdcfca;
+  font-size: 0.78rem;
+  line-height: 1.6;
+}
+
+.space-facts {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+  margin: 0 0 12px;
+}
+
+.space-facts > div {
+  min-width: 0;
+  padding: 9px;
+  background: rgba(19, 35, 37, 0.84);
+}
+
+.space-facts dt {
+  color: #8faaa6;
+  font-size: 0.68rem;
+}
+
+.space-facts dd {
+  margin: 5px 0 0;
+  color: #e7f1e9;
+  font-size: 0.82rem;
+}
+
+.space-list {
+  padding-left: 20px;
+}
+
+.space-list + .space-list,
+.space-panel details {
+  margin-top: 12px;
+}
+
+.space-panel summary {
+  color: #d8e8df;
+  cursor: pointer;
+  font-weight: 750;
+}
+
+.space-body-list {
+  display: grid;
+  gap: 8px;
+  padding: 0;
+  list-style: none;
+}
+
+.space-body-list li {
+  display: grid;
+  grid-template-columns: 26px minmax(0, 1fr);
+  gap: 10px;
+  align-items: center;
+  padding: 9px;
+  background: rgba(19, 35, 37, 0.74);
+}
+
+.space-body-list div,
+.space-body-list span,
+.space-body-list small {
+  display: block;
+}
+
+.space-body-list small {
+  color: #8faaa6;
+}
+
+.space-body-mark {
+  width: 18px;
+  height: 18px;
+  border: 1px solid rgba(238, 246, 238, 0.58);
+  border-radius: 50%;
+  background: #657d75;
+  box-shadow: 0 0 14px rgba(132, 202, 204, 0.3);
+}
+
+.space-body-moon {
+  width: 12px;
+  height: 12px;
+  margin-left: 3px;
+  background: #aab6ad;
+}
+
+.space-body-planet {
+  background: #477e82;
+}
+
+.space-body-asteroid {
+  border-radius: 40% 55% 45% 60%;
+  background: #7f7567;
+}
+
 .development-panel > section,
 .development-intervention-form {
   padding: 16px;
@@ -1359,6 +1493,7 @@ textarea:focus-visible,
 .calm-mode .society-panel,
 .calm-mode .civilizations-panel,
 .calm-mode .development-panel,
+.calm-mode .space-panel,
 .calm-mode .world-card > .card-heading,
 .calm-mode .overlay-picker,
 .calm-mode .overlay-legend,
@@ -1370,6 +1505,10 @@ textarea:focus-visible,
 .calm-mode .inspection-region .society-panel,
 .calm-mode .inspection-region .civilizations-panel,
 .calm-mode .inspection-region .development-panel {
+  display: grid;
+}
+
+.calm-mode .inspection-region .space-panel {
   display: grid;
 }
 
@@ -1386,6 +1525,7 @@ textarea:focus-visible,
   .lab-grid,
   .society-panel,
   .civilizations-panel,
+  .space-panel,
   .focus-layout,
   .focus-lower-grid {
     grid-template-columns: 1fr;
@@ -1463,6 +1603,7 @@ textarea:focus-visible,
   .society-dashboard,
   .civilization-facts,
   .development-panel dl,
+  .space-facts,
   .biography-panel dl,
   .culture-list dl,
   .relationship-detail dl,
