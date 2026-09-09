@@ -68,7 +68,11 @@ Model context-sensitive drought, flood, fire, storm, earthquake, disease, famine
 
 ### Visual experience
 
-Smooth animated 2D world; pan/zoom; readable terrain/resources; visible inhabitants, construction progress, era/condition buildings, roads, districts, farms, industry, infrastructure, ruins, advanced structures, weather/time/disasters/environment; resource/population/trade/technology/danger overlays; inspection of people/buildings/settlements/events; timeline and recap; calm non-demanding focus presentation. Assets must be original, generated, procedural, or appropriately licensed and attributed.
+Smooth animated 2D world; responsive location-anchored pan/zoom from a civilization overview into distinct settlements, districts, homes, structures, and visible people; readable terrain/resources; stable factual character identity and activity; construction progress; era/condition buildings, roads, districts, farms, industry, infrastructure, ruins, advanced structures, weather/time/disasters/environment; resource/population/trade/technology/danger overlays; inspection of people/buildings/settlements/events; timeline and recap; calm non-demanding focus presentation. The v1 result must read as a polished, cohesive game rather than a debug dashboard or circle-and-block placeholder view. Assets must be original, generated, procedural, or appropriately licensed and attributed.
+
+### Sound, atmosphere, and game feel
+
+Quiet-by-default, optional local audio and restrained atmosphere may communicate actual focus actions, selection, construction/progress, danger, discovery, session completion, and recorded major events without affecting authoritative timing or outcomes. Persist master, music/ambience, effects, mute, calm, and reduced-effects choices; provide redundant visual/text cues; degrade silently when audio is unavailable; and use only original or properly licensed and attributed sounds. The result should make the world feel present without distracting a working user.
 
 ### Scale
 

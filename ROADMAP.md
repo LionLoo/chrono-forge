@@ -2,7 +2,7 @@
 
 `PRODUCT_SPEC.md` is the product contract and `PLAN.md` contains the decision-complete acceptance criteria, branches, and validation for each item. Milestones run in this order:
 
-Current checkpoint: M0-M8 are merged, independently reviewed, and hosted-verified on `main`. M9 is acceptance-complete locally on `feature/planetary-space-age` and pending its private PR, hosted CI, and merge. M9 integration, M10-M12 (including every M10.x release gate), and the private v1.0.0 release remain fully blocking.
+Current checkpoint: M0-M9 are merged, independently reviewed, and hosted-verified on `main`. M10 content coherence and long-run hardening is next. M10-M12 (including every M10.x release gate) and the private v1.0.0 release remain fully blocking.
 
 | Order | Milestone                                                    | Outcome                                                                                                            |
 | ----- | ------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------ |
