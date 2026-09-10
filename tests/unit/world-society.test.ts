@@ -106,11 +106,13 @@ describe('M4 society world integration', () => {
       .slice(-12);
 
     expect(atSixtyMinutes.config.societyYearTicks).toBe(NORMAL_YEAR_TICKS);
+    // M10 intentionally broadens persisted names/cultures while preserving the
+    // focus-window construction and resource semantics asserted below.
     expect([
       hashWorldState(initial),
       hashWorldState(atThirtyMinutes),
       hashWorldState(atSixtyMinutes),
-    ]).toEqual(['d7ecfee1', '35e132c0', 'f57f9d63']);
+    ]).toEqual(['b8329cd3', '15cdae26', '16def4b1']);
     expect(atThirtyMinutes.civilization.structures).not.toEqual(initial.civilization.structures);
     expect(atSixtyMinutes.civilization.stockpile).not.toEqual(
       atThirtyMinutes.civilization.stockpile,

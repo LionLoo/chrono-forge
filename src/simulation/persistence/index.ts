@@ -94,6 +94,7 @@ import {
 import {
   assertSpaceInvariants,
   createInitialSpace,
+  generatedCelestialName,
   type AlienCivilization,
   type CargoEndpoint,
   type CargoTransfer,
@@ -128,15 +129,16 @@ export const WORLD_SNAPSHOT_FORMAT = 'chrono-forge-world';
 // A strict persisted-payload shape change must increment all three values and retain a
 // parser for the prior format below. This keeps development saves from silently being
 // reinterpreted as a newer schema.
-export const WORLD_SNAPSHOT_FORMAT_VERSION = 10;
-export const WORLD_ENGINE_VERSION = 10;
-export const WORLD_CONTENT_VERSION = 10;
+export const WORLD_SNAPSHOT_FORMAT_VERSION = 11;
+export const WORLD_ENGINE_VERSION = 11;
+export const WORLD_CONTENT_VERSION = 11;
 
 const WORLD_SNAPSHOT_VERSION_SIX = 6;
 const WORLD_SNAPSHOT_VERSION_SEVEN = 7;
 const WORLD_SNAPSHOT_VERSION_EIGHT = 8;
 const WORLD_SNAPSHOT_VERSION_NINE = 9;
 const WORLD_SNAPSHOT_VERSION_TEN = 10;
+const WORLD_SNAPSHOT_VERSION_ELEVEN = 11;
 const MAX_WORLD_TILES = 1_000_000;
 const MAX_WORLD_SNAPSHOT_BYTES = 50 * 1024 * 1024;
 const MAX_EVENT_KIND_LENGTH = 64;
@@ -5270,6 +5272,67 @@ function deserializeVersionTen(envelope: UnknownRecord): WorldState {
   return world;
 }
 
+function assertCurrentContentNames(world: WorldState): void {
+  for (const body of world.space.bodies) {
+    if (/^Body-\d+$/.test(body.name)) {
+      throw new Error('Current snapshots may not retain legacy celestial placeholder names.');
+    }
+  }
+}
+
+/** M10 changes persisted procedural content without inventing a historical event. */
+function upgradeVersionTenContent(world: WorldState): WorldState {
+  const bodies = Object.freeze(
+    world.space.bodies.map((body) =>
+      /^Body-\d+$/.test(body.name)
+        ? Object.freeze({
+            ...body,
+            name: generatedCelestialName(world.seed, body.id, body.kind),
+          })
+        : body,
+    ),
+  );
+  const upgraded: WorldState = Object.freeze({
+    ...world,
+    space: Object.freeze({ ...world.space, bodies }),
+  });
+  assertCurrentContentNames(upgraded);
+  assertWorldInvariants(upgraded);
+  return upgraded;
+}
+
+/** Parses the strict v11 payload with M10's versioned procedural content. */
+function deserializeVersionEleven(envelope: UnknownRecord): WorldState {
+  assertExactKeys(
+    envelope,
+    ['checksum', 'contentVersion', 'engineVersion', 'format', 'formatVersion', 'payload'],
+    'World snapshot envelope',
+  );
+  if (
+    envelope.formatVersion !== WORLD_SNAPSHOT_VERSION_ELEVEN ||
+    envelope.engineVersion !== WORLD_SNAPSHOT_VERSION_ELEVEN ||
+    envelope.contentVersion !== WORLD_SNAPSHOT_VERSION_ELEVEN ||
+    typeof envelope.checksum !== 'string'
+  ) {
+    throw new Error('World snapshot version metadata is invalid.');
+  }
+  const payloadJson = JSON.stringify(envelope.payload);
+  if (hashCanonicalJson(payloadJson) !== envelope.checksum)
+    throw new Error('World snapshot checksum does not match its payload.');
+  const world = parseVersionTenWorldPayload(envelope.payload);
+  assertCurrentContentNames(world);
+  const canonical = canonicalWorldJson(world);
+  if (canonical !== payloadJson) {
+    let difference = 0;
+    while (difference < canonical.length && canonical[difference] === payloadJson[difference])
+      difference += 1;
+    throw new Error(
+      `World snapshot payload is not canonical at byte ${difference}: ${payloadJson.slice(difference, difference + 80)} != ${canonical.slice(difference, difference + 80)}.`,
+    );
+  }
+  return world;
+}
+
 function canonicalVersionTwoWorldJson(state: VersionTwoWorldState): string {
   return JSON.stringify({
     animals: Array.from(state.animals),
@@ -5359,6 +5422,7 @@ function canonicalVersionTwoWorldJson(state: VersionTwoWorldState): string {
 
 /** Serializes a canonical, versioned, internally checksummed simulation snapshot. */
 export function serializeWorldSnapshot(state: WorldState): string {
+  assertCurrentContentNames(state);
   const payloadJson = canonicalWorldJson(state);
   const checksum = hashCanonicalJson(payloadJson);
   return `{"checksum":"${checksum}","contentVersion":${WORLD_CONTENT_VERSION},"engineVersion":${WORLD_ENGINE_VERSION},"format":"${WORLD_SNAPSHOT_FORMAT}","formatVersion":${WORLD_SNAPSHOT_FORMAT_VERSION},"payload":${payloadJson}}`;
@@ -5371,8 +5435,11 @@ export function migrateWorldSnapshot(snapshot: string): string {
   if (formatVersion > WORLD_SNAPSHOT_FORMAT_VERSION) {
     throw new Error(`World snapshot version ${formatVersion} is newer than this application.`);
   }
+  if (formatVersion === WORLD_SNAPSHOT_VERSION_ELEVEN) {
+    return serializeWorldSnapshot(deserializeVersionEleven(envelope));
+  }
   if (formatVersion === WORLD_SNAPSHOT_VERSION_TEN) {
-    return serializeWorldSnapshot(deserializeVersionTen(envelope));
+    return serializeWorldSnapshot(upgradeVersionTenContent(deserializeVersionTen(envelope)));
   }
   if (formatVersion === WORLD_SNAPSHOT_VERSION_NINE) {
     return serializeWorldSnapshot(deserializeVersionNine(envelope));
@@ -5433,5 +5500,5 @@ export function migrateWorldSnapshot(snapshot: string): string {
 /** Loads and validates a supported snapshot without mutating its input. */
 export function deserializeWorldSnapshot(snapshot: string): WorldState {
   const migrated = migrateWorldSnapshot(snapshot);
-  return deserializeVersionTen(parseEnvelope(migrated));
+  return deserializeVersionEleven(parseEnvelope(migrated));
 }

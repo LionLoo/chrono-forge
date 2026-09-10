@@ -288,6 +288,7 @@ test('inspects and persists a Worker-owned mid-flight space world', async ({ pag
   await page.getByRole('button', { name: 'Open world inspection' }).click();
   const space = page.locator('.space-panel');
   await expect(space.getByRole('heading', { name: 'The wider system' })).toBeVisible();
+  await expect(space.locator('.space-body-list')).not.toContainText(/Body-\d+/);
   await expect(space.getByText('Autonomous program active')).toBeVisible();
   await expect(space.getByRole('list', { name: 'Space missions' })).toContainText('active');
   await page.getByRole('button', { name: 'Save now' }).click();
@@ -308,6 +309,7 @@ test('inspects contacted space facts at 100-200% with reduced effects', async ({
   await page.goto(origin);
   await importSavePackage(page, M9_E2E_ARCHIVES.contactedPackage, 'M9 contacted world');
   await page.getByRole('button', { name: 'Open world inspection' }).click();
+  await expect(page.locator('.space-body-list')).not.toContainText(/Body-\d+/);
   await expect(page.getByRole('list', { name: 'Alien civilizations' })).toContainText(
     /allied|cooperative|competitive|hostile/,
   );

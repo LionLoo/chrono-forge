@@ -20,6 +20,7 @@ import { createInitialDevelopment, developmentDto } from '../../src/simulation/d
 import { advancePathCache, requestPath } from '../../src/simulation/pathfinding/cache';
 import { createInitialSpace, spaceDto } from '../../src/simulation/space';
 import { createM9MatureWorld } from '../fixtures/m9-space-world';
+import m9E2eArchives from '../fixtures/saves/m9-e2e-archives.json';
 import legacyWorldV0 from '../fixtures/saves/world-v0.json';
 
 function legacySnapshot(worldJson: string): string {
@@ -129,6 +130,27 @@ function versionNineSnapshot(world: ReturnType<typeof createInitialWorld>): stri
     checksum: hashCanonicalJson(payloadJson),
     payload,
   });
+}
+
+function versionTenSnapshotWithPlaceholderBodies(
+  world: ReturnType<typeof createInitialWorld>,
+): string {
+  const envelope = JSON.parse(serializeWorldSnapshot(world)) as {
+    checksum: string;
+    contentVersion: number;
+    engineVersion: number;
+    formatVersion: number;
+    payload: { space: { bodies: Record<string, unknown>[] } };
+  };
+  envelope.payload.space.bodies = envelope.payload.space.bodies.map((body) => ({
+    ...body,
+    name: `Body-${String(body.id)}`,
+  }));
+  envelope.contentVersion = 10;
+  envelope.engineVersion = 10;
+  envelope.formatVersion = 10;
+  envelope.checksum = hashCanonicalJson(JSON.stringify(envelope.payload));
+  return JSON.stringify(envelope);
 }
 
 function versionTwoSnapshot(ticks = 15_000): {
@@ -760,7 +782,49 @@ describe('versioned world snapshots', () => {
     expect(serializeWorldSnapshot(loaded)).toBe(migrated);
   });
 
-  it('rejects checksummed v10 space authority with a missing ledger field', () => {
+  it('migrates v10 celestial placeholders to v11 without changing other body facts', () => {
+    const source = createM9MatureWorld();
+    const legacy = versionTenSnapshotWithPlaceholderBodies(source);
+    const legacyBodies = (
+      JSON.parse(legacy) as { payload: { space: { bodies: Record<string, unknown>[] } } }
+    ).payload.space.bodies.map((body) => ({ ...body, name: undefined }));
+    const migrated = migrateWorldSnapshot(legacy);
+    const loaded = deserializeWorldSnapshot(migrated);
+
+    expect(JSON.parse(migrated)).toMatchObject({
+      contentVersion: WORLD_SNAPSHOT_FORMAT_VERSION,
+      engineVersion: WORLD_SNAPSHOT_FORMAT_VERSION,
+      formatVersion: WORLD_SNAPSHOT_FORMAT_VERSION,
+    });
+    expect(loaded.space.bodies.map((body) => body.name)).not.toContainEqual(
+      expect.stringMatching(/^Body-\d+$/),
+    );
+    expect(loaded.space.bodies.map((body) => ({ ...body, name: undefined }))).toStrictEqual(
+      legacyBodies,
+    );
+    expect(loaded.eventLog).toStrictEqual(source.eventLog);
+    expect(canonicalWorldJson(loaded)).toBe(canonicalWorldJson(source));
+    expect(serializeWorldSnapshot(loaded)).toBe(migrated);
+  });
+
+  it.each([
+    ['mid-flight', m9E2eArchives.midFlightPackage],
+    ['contacted', m9E2eArchives.contactedPackage],
+  ])('loads the shipped M9 %s archive without visible celestial placeholders', (_name, text) => {
+    const savePackage = JSON.parse(text) as { snapshot: string };
+    const world = deserializeWorldSnapshot(savePackage.snapshot);
+
+    expect(world.space.bodies.map((body) => body.name)).not.toContainEqual(
+      expect.stringMatching(/^Body-\d+$/),
+    );
+    expect(JSON.parse(serializeWorldSnapshot(world))).toMatchObject({
+      contentVersion: WORLD_SNAPSHOT_FORMAT_VERSION,
+      engineVersion: WORLD_SNAPSHOT_FORMAT_VERSION,
+      formatVersion: WORLD_SNAPSHOT_FORMAT_VERSION,
+    });
+  });
+
+  it('rejects checksummed v11 space authority with a missing ledger field', () => {
     const envelope = JSON.parse(serializeWorldSnapshot(createInitialWorld([47, 53, 59, 61]))) as {
       checksum: string;
       payload: { space: { ledger: Record<string, unknown> } };

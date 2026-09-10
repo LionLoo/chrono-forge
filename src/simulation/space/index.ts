@@ -1,3 +1,4 @@
+import { CELESTIAL_NAME_STEMS } from '../content';
 import { deriveXoshiro128State, Xoshiro128StarStar, type Xoshiro128State } from '../random';
 
 /** M9's pure world-owned space authority. World applies every returned patch exactly once. */
@@ -457,6 +458,32 @@ function completeStock(): SpaceResourceStock {
   return zero();
 }
 
+function celestialName(stem: string, kind: CelestialBody['kind']): string {
+  const suffix =
+    kind === 'home' ? 'Hearth' : kind === 'planet' ? 'Reach' : kind === 'moon' ? 'Moon' : 'Drift';
+  return `${stem} ${suffix}`;
+}
+
+/**
+ * Stable release name for a generated body. This is exported so snapshot
+ * migrations can replace M9's exact `Body-N` placeholders without touching
+ * any physical, historical, or RNG authority.
+ */
+export function generatedCelestialName(
+  seed: Xoshiro128State,
+  bodyId: number,
+  kind: CelestialBody['kind'],
+): string {
+  integer(bodyId, 'Celestial body id');
+  if (bodyId < 1) throw new Error('Celestial body id must be positive.');
+  const naming = new Xoshiro128StarStar(deriveXoshiro128State(seed, 'm10-body-names'));
+  const firstNameIndex = naming.nextInt(CELESTIAL_NAME_STEMS.length);
+  return celestialName(
+    CELESTIAL_NAME_STEMS[(firstNameIndex + bodyId - 1) % CELESTIAL_NAME_STEMS.length]!,
+    kind,
+  );
+}
+
 /** Creation has no historical effect: every body, deposit, and alien is immutable/uncontacted. */
 export function createInitialSpace(seed: Xoshiro128State, tick: number): SpaceState {
   integer(tick, 'Space tick');
@@ -466,7 +493,7 @@ export function createInitialSpace(seed: Xoshiro128State, tick: number): SpaceSt
     frozen({
       id: 1,
       kind: 'home',
-      name: 'Body-1',
+      name: generatedCelestialName(seed, 1, 'home'),
       distance: 0,
       habitable: true,
       originalDeposit: frozen({ food: 0, water: 0, timber: 0, stone: 100, metal: 100 }),
@@ -474,6 +501,7 @@ export function createInitialSpace(seed: Xoshiro128State, tick: number): SpaceSt
     }),
   ];
   for (let id = 2; id <= count; id += 1) {
+    const kind = id % 3 === 0 ? 'asteroid' : id % 2 === 0 ? 'planet' : 'moon';
     const deposit = frozen({
       food: 0,
       water: 10 + system.nextInt(30),
@@ -484,8 +512,8 @@ export function createInitialSpace(seed: Xoshiro128State, tick: number): SpaceSt
     bodies.push(
       frozen({
         id,
-        kind: id % 3 === 0 ? 'asteroid' : id % 2 === 0 ? 'planet' : 'moon',
-        name: `Body-${id}`,
+        kind,
+        name: generatedCelestialName(seed, id, kind),
         distance: 2 + id * 3 + system.nextInt(5),
         habitable: system.nextInt(3) !== 0,
         originalDeposit: deposit,

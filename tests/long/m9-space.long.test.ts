@@ -15,7 +15,8 @@ const SCENARIOS = [
   {
     name: 'concord-orbit',
     seed: [7, 11, 13, 17] as const,
-    expectedHashes: ['6fd1de9c', 'a9f64693', 'caef75c2', '6af71a3f'],
+    // Renewed for M10's intentional persisted name/culture/celestial-content expansion.
+    expectedHashes: ['f300c305', 'e644b5be', '133837e3', '0338b636'],
     expectedOperations: {
       settlement: 587_432,
       society: 113_558,
@@ -29,7 +30,8 @@ const SCENARIOS = [
   {
     name: 'contested-frontier',
     seed: [37, 41, 43, 47] as const,
-    expectedHashes: ['fa6c9fd4', 'cb6bafbb', '8b761a19', '12e9a783'],
+    // Renewed for M10's intentional persisted name/culture/celestial-content expansion.
+    expectedHashes: ['c3858255', 'e159025d', '3e3f2a58', '75a326ec'],
     expectedOperations: {
       settlement: 571_260,
       society: 111_345,
