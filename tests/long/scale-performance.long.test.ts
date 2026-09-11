@@ -172,7 +172,8 @@ function percentile(samples: readonly number[], percentileValue: number): number
 
 function commit(): string {
   try {
-    return execFileSync('git', ['-c', `safe.directory=${process.cwd()}`, 'rev-parse', 'HEAD'], {
+    const repository = process.cwd().replaceAll('\\', '/');
+    return execFileSync('git', ['-c', `safe.directory=${repository}`, 'rev-parse', 'HEAD'], {
       encoding: 'utf8',
     }).trim();
   } catch {
