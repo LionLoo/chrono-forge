@@ -27,6 +27,7 @@ function context(tick: number, overrides: Partial<SpaceContext> = {}): SpaceCont
         institutionCount: 2,
         scarcity: 0,
         stability: 80,
+        hasAdvancedSettlement: true,
         infrastructure: 100,
         storedMaterial: 100,
         energyCapacity: 100,
@@ -105,6 +106,17 @@ describe('M9 pure space authority', () => {
       settlementId: 10,
       resources: { metal: -1 },
     });
+
+    expect(
+      advanceSpace(
+        state,
+        context(3, {
+          activeCivilizations: Object.freeze([
+            Object.freeze({ ...context(3).activeCivilizations[0]!, hasAdvancedSettlement: false }),
+          ]),
+        }),
+      ).state.programs[0]?.stage,
+    ).toBe('planetary-engineering');
   });
 
   it('moves only matching candidate provenance into a colony and preserves a historical manifest', () => {

@@ -4,6 +4,7 @@ import {
   assertCivilizationsInvariants,
   civilizationsDto,
   createInitialCivilizations,
+  deriveSettlementDevelopmentStage,
   selectCoMigrationPerson,
   selectConflictTargetCivilization,
   selectPoliticalSupportCivilization,
@@ -13,6 +14,7 @@ import {
   type CivilizationsInitialization,
   type CivilizationsState,
   type CommunityReserves,
+  type SettlementDevelopmentInput,
 } from '../civilizations';
 import {
   advanceDevelopment,
@@ -1661,6 +1663,86 @@ function civilizationMaterialStrength(state: WorldState, civilizationId: number)
     );
 }
 
+/** Factual, camera-independent inputs used by annual development and legacy migration. */
+export function settlementDevelopmentInputsForWorld(
+  state: WorldState,
+): readonly SettlementDevelopmentInput[] {
+  const primarySettlementId = state.civilizations.settlements[0]?.id ?? 0;
+  const knownKnowledgeIds = Object.freeze(
+    state.development.knowledge
+      .filter((knowledge) => knowledge.status === 'known')
+      .map((knowledge) => knowledge.id)
+      .sort(),
+  );
+  const operationalPrimaryStructures = state.civilization.structures.filter(
+    (structure) => structure.status === 'operational',
+  ).length;
+  const activeRoutes = state.civilizations.routes.filter((route) => route.status === 'active');
+  const ownedTileCounts = new Map<number, number>();
+  for (const ownerId of state.civilizations.tileOwners)
+    if (ownerId !== 0) ownedTileCounts.set(ownerId, (ownedTileCounts.get(ownerId) ?? 0) + 1);
+  return Object.freeze(
+    [...state.civilizations.settlements]
+      .sort((left, right) => left.id - right.id)
+      .map((settlement) => {
+        const routes = activeRoutes.filter(
+          (route) =>
+            route.firstSettlementId === settlement.id || route.secondSettlementId === settlement.id,
+        );
+        const routeVolume = routes.reduce((total, route) => total + route.volume, 0);
+        const ownedTiles = ownedTileCounts.get(settlement.id) ?? 0;
+        const memberSettlementCount =
+          state.civilizations.civilizations.find(
+            (civilization) => civilization.id === settlement.civilizationId,
+          )?.memberSettlementIds.length ?? 0;
+        const operationalStructures =
+          settlement.id === primarySettlementId ? operationalPrimaryStructures : 0;
+        const infrastructure = Math.min(
+          100,
+          operationalStructures * 12 +
+            routes.length * 8 +
+            Math.min(20, Math.trunc(routeVolume / 2)) +
+            Math.min(10, ownedTiles * 2) +
+            Math.min(12, memberSettlementCount * 4),
+        );
+        return Object.freeze({
+          settlementId: settlement.id,
+          operationalStructures,
+          infrastructure,
+          knownKnowledgeIds,
+        });
+      }),
+  );
+}
+
+/** Adds current stage facts to a pre-v12 world without inventing transition history. */
+export function upgradeSettlementDevelopment(state: WorldState): WorldState {
+  const inputs = new Map(
+    settlementDevelopmentInputsForWorld(state).map((input) => [input.settlementId, input] as const),
+  );
+  const next = Object.freeze({
+    ...state,
+    civilizations: Object.freeze({
+      ...state.civilizations,
+      settlements: Object.freeze(
+        state.civilizations.settlements.map((settlement) => {
+          const input = inputs.get(settlement.id);
+          if (input === undefined)
+            throw new Error('Settlement development migration input missing.');
+          return Object.freeze({
+            ...settlement,
+            developmentStage: deriveSettlementDevelopmentStage(settlement, input),
+            developmentStageChangedTick: state.tick,
+            developmentStageProvenance: 'v11-migration' as const,
+          });
+        }),
+      ),
+    }),
+  });
+  assertWorldInvariants(next);
+  return next;
+}
+
 export function createCivilizationsContext(state: WorldState, tick: number): CivilizationsContext {
   const year = Math.trunc(tick / state.config.societyYearTicks);
   const profile = m6Profile(state);
@@ -2080,6 +2162,12 @@ export function createCivilizationsContext(state: WorldState, tick: number): Civ
         : [Object.freeze({ tileIndex: settlement.centerTileIndex, nextSettlementId: 0 })];
     }),
   ]);
+  const activeSettlementIds = new Set(activeSettlements.map((settlement) => settlement.id));
+  const settlementDevelopmentInputs = Object.freeze(
+    settlementDevelopmentInputsForWorld(state).filter((input) =>
+      activeSettlementIds.has(input.settlementId),
+    ),
+  );
   return Object.freeze({
     tick,
     yearTicks: state.config.societyYearTicks,
@@ -2095,6 +2183,7 @@ export function createCivilizationsContext(state: WorldState, tick: number): Civ
     ruinSettlementIds,
     federationCivilizationIds,
     fragmentationCivilizationIds,
+    settlementDevelopmentInputs,
     territoryChanges,
   });
 }
@@ -2114,6 +2203,7 @@ function civilizationEventDetails(
   switch (event.kind) {
     case 'settlement-founded':
     case 'settlement-restored':
+    case 'settlement-stage-changed':
       return {
         ...pair('settlement'),
         targetKind: 'civilization',
@@ -2380,6 +2470,9 @@ export function createSpaceContext(state: WorldState, tick: number): SpaceContex
           energyCapacity,
           engineeringCapacity,
           interSettlementExchange: Math.min(100, routeVolume),
+          hasAdvancedSettlement: settlements.some(
+            (settlement) => settlement.developmentStage === 'advanced-city',
+          ),
           surfaceReserves: Object.freeze({ ...launchSettlement.reserves }),
         }),
       ];
@@ -3110,6 +3203,7 @@ export function assertWorldInvariants(state: WorldState): void {
     }
   };
   const eventsById = new Map<number, WorldEvent>();
+  const settlementDevelopmentEvents = new Set<string>();
   let previousEventId = 0;
   for (const event of state.eventLog) {
     if (
@@ -3140,7 +3234,33 @@ export function assertWorldInvariants(state: WorldState): void {
     if (!referenceExists(event.targetKind, event.targetId))
       throw new Error('World event target is invalid.');
     eventsById.set(event.id, event);
+    if (
+      event.kind === 'settlement-stage-changed' &&
+      event.subjectKind === 'settlement' &&
+      event.targetKind === 'civilization'
+    )
+      settlementDevelopmentEvents.add(`${event.subjectId}:${event.tick}:${event.amount}`);
     previousEventId = event.id;
+  }
+  const settlementDevelopmentRanks = new Map([
+    ['founding', 0],
+    ['village', 1],
+    ['town', 2],
+    ['city', 3],
+    ['advanced-city', 4],
+  ] as const);
+  for (const settlement of state.civilizations.settlements) {
+    if (settlement.developmentStageChangedTick > state.tick)
+      throw new Error('Settlement development cannot be ahead of world time.');
+    if (
+      settlement.developmentStageProvenance === 'observed' &&
+      !settlementDevelopmentEvents.has(
+        `${settlement.id}:${settlement.developmentStageChangedTick}:${settlementDevelopmentRanks.get(
+          settlement.developmentStage,
+        )}`,
+      )
+    )
+      throw new Error('Observed settlement development must retain its factual source event.');
   }
   for (const arrival of state.civilization.society.interpersonal.childArrivals) {
     const source = eventsById.get(arrival.eligibilityEventId);

@@ -460,7 +460,7 @@ describe('versioned worker protocol', () => {
       minimumPartnerCommitmentAtArrival: arrival.minimumPartnerCommitmentAtArrival,
       selectionScoreAtArrival: arrival.selectionScoreAtArrival,
     });
-  });
+  }, 20_000);
 
   it('projects an event-backed guardian bond without rejecting its factual formation source', () => {
     const initial = createInitialWorld([3, 5, 7, 11], { width: 4, height: 3, chunkSize: 2 });

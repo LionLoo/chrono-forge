@@ -13,6 +13,9 @@ const civilizations: CivilizationsPanelProps['civilizations'] = {
       cultureId: 1,
       centerTileIndex: 12,
       status: 'active',
+      developmentStage: 'advanced-city',
+      developmentStageChangedTick: 20_000,
+      developmentStageProvenance: 'observed',
       population: 24,
       stability: 73,
       reserves: { food: 40, water: 36, timber: 12, stone: 8, metal: 3 },
@@ -29,6 +32,9 @@ const civilizations: CivilizationsPanelProps['civilizations'] = {
       cultureId: 2,
       centerTileIndex: 31,
       status: 'conquered',
+      developmentStage: 'town',
+      developmentStageChangedTick: 7_000,
+      developmentStageProvenance: 'observed',
       population: 11,
       stability: 31,
       reserves: { food: 15, water: 21, timber: 5, stone: 17, metal: 4 },
@@ -138,6 +144,9 @@ describe('CivilizationsPanel', () => {
     const settlement = screen.getByRole('article', { name: 'Riverhome settlement facts' });
     expect(within(settlement).getByText('Population').nextElementSibling).toHaveTextContent('24');
     expect(within(settlement).getByText('Status').nextElementSibling).toHaveTextContent('active');
+    expect(within(settlement).getByText('Development').nextElementSibling).toHaveTextContent(
+      'advanced city',
+    );
     expect(within(settlement).getByText('Culture').nextElementSibling).toHaveTextContent(
       'Riverfolk',
     );

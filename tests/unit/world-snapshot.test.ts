@@ -77,11 +77,21 @@ function versionOneSnapshot(worldJson: string): string {
   });
 }
 
+function stripSettlementDevelopment(payload: Record<string, unknown>): void {
+  const civilizations = payload.civilizations as { settlements: Record<string, unknown>[] };
+  for (const settlement of civilizations.settlements) {
+    delete settlement.developmentStage;
+    delete settlement.developmentStageChangedTick;
+    delete settlement.developmentStageProvenance;
+  }
+}
+
 function versionSixSnapshot(world: ReturnType<typeof createInitialWorld>): string {
   const envelope = JSON.parse(serializeWorldSnapshot(world)) as {
     payload: Record<string, unknown>;
   };
   const payload = { ...envelope.payload };
+  stripSettlementDevelopment(payload);
   delete payload.populationScale;
   delete payload.pathCache;
   delete payload.space;
@@ -101,6 +111,7 @@ function versionSevenSnapshot(world: ReturnType<typeof createInitialWorld>): str
     payload: Record<string, unknown>;
   };
   const payload = { ...envelope.payload };
+  stripSettlementDevelopment(payload);
   delete payload.populationScale;
   delete payload.pathCache;
   delete payload.space;
@@ -120,6 +131,7 @@ function versionNineSnapshot(world: ReturnType<typeof createInitialWorld>): stri
     payload: Record<string, unknown>;
   };
   const payload = { ...envelope.payload };
+  stripSettlementDevelopment(payload);
   delete payload.space;
   const payloadJson = JSON.stringify(payload);
   return JSON.stringify({
@@ -140,15 +152,32 @@ function versionTenSnapshotWithPlaceholderBodies(
     contentVersion: number;
     engineVersion: number;
     formatVersion: number;
-    payload: { space: { bodies: Record<string, unknown>[] } };
+    payload: Record<string, unknown> & { space: { bodies: Record<string, unknown>[] } };
   };
   envelope.payload.space.bodies = envelope.payload.space.bodies.map((body) => ({
     ...body,
     name: `Body-${String(body.id)}`,
   }));
+  stripSettlementDevelopment(envelope.payload);
   envelope.contentVersion = 10;
   envelope.engineVersion = 10;
   envelope.formatVersion = 10;
+  envelope.checksum = hashCanonicalJson(JSON.stringify(envelope.payload));
+  return JSON.stringify(envelope);
+}
+
+function versionElevenSnapshot(world: ReturnType<typeof createInitialWorld>): string {
+  const envelope = JSON.parse(serializeWorldSnapshot(world)) as {
+    checksum: string;
+    contentVersion: number;
+    engineVersion: number;
+    formatVersion: number;
+    payload: Record<string, unknown>;
+  };
+  stripSettlementDevelopment(envelope.payload);
+  envelope.contentVersion = 11;
+  envelope.engineVersion = 11;
+  envelope.formatVersion = 11;
   envelope.checksum = hashCanonicalJson(JSON.stringify(envelope.payload));
   return JSON.stringify(envelope);
 }
@@ -807,6 +836,22 @@ describe('versioned world snapshots', () => {
     expect(serializeWorldSnapshot(loaded)).toBe(migrated);
   });
 
+  it('derives v11 settlement development at the saved tick without inventing history', () => {
+    const source = createM9MatureWorld();
+    const migrated = migrateWorldSnapshot(versionElevenSnapshot(source));
+    const loaded = deserializeWorldSnapshot(migrated);
+    const primary = loaded.civilizations.settlements[0]!;
+
+    expect(primary).toMatchObject({
+      developmentStage: 'advanced-city',
+      developmentStageChangedTick: source.tick,
+      developmentStageProvenance: 'v11-migration',
+    });
+    expect(loaded.eventLog).toStrictEqual(source.eventLog);
+    expect(loaded.eventLog.some((event) => event.kind === 'settlement-stage-changed')).toBe(false);
+    expect(serializeWorldSnapshot(loaded)).toBe(migrated);
+  });
+
   it.each([
     ['mid-flight', m9E2eArchives.midFlightPackage],
     ['contacted', m9E2eArchives.contactedPackage],
@@ -824,7 +869,7 @@ describe('versioned world snapshots', () => {
     });
   });
 
-  it('rejects checksummed v11 space authority with a missing ledger field', () => {
+  it('rejects checksummed v12 space authority with a missing ledger field', () => {
     const envelope = JSON.parse(serializeWorldSnapshot(createInitialWorld([47, 53, 59, 61]))) as {
       checksum: string;
       payload: { space: { ledger: Record<string, unknown> } };
@@ -834,6 +879,19 @@ describe('versioned world snapshots', () => {
 
     expect(() => deserializeWorldSnapshot(JSON.stringify(envelope))).toThrow(
       /space ledger.*(?:unexpected|missing)/i,
+    );
+  });
+
+  it('rejects a checksummed v12 settlement missing authoritative development', () => {
+    const envelope = JSON.parse(serializeWorldSnapshot(createInitialWorld([53, 59, 61, 67]))) as {
+      checksum: string;
+      payload: { civilizations: { settlements: Record<string, unknown>[] } };
+    };
+    delete envelope.payload.civilizations.settlements[0]!.developmentStage;
+    envelope.checksum = hashCanonicalJson(JSON.stringify(envelope.payload));
+
+    expect(() => deserializeWorldSnapshot(JSON.stringify(envelope))).toThrow(
+      /settlement.*(?:unexpected|missing)/i,
     );
   });
 

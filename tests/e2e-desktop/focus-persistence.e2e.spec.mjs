@@ -99,7 +99,7 @@ async function installActiveM9Archive(savePackage) {
 function expectM10Migration(actualSnapshot, legacySnapshot) {
   const actual = JSON.parse(actualSnapshot);
   const legacy = JSON.parse(legacySnapshot);
-  expect(actual).toMatchObject({ contentVersion: 11, engineVersion: 11, formatVersion: 11 });
+  expect(actual).toMatchObject({ contentVersion: 12, engineVersion: 12, formatVersion: 12 });
   expect(actual.payload.eventLog).toEqual(legacy.payload.eventLog);
   expect(actual.payload.space.bodies.map((body) => ({ ...body, name: undefined }))).toEqual(
     legacy.payload.space.bodies.map((body) => ({ ...body, name: undefined })),

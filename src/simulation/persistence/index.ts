@@ -115,6 +115,7 @@ import {
   canonicalWorldJson,
   civilizationsInitializationForWorld,
   initializeM8WorldAuthority,
+  upgradeSettlementDevelopment,
   type WorldChunk,
   type WorldConfig,
   type WorldEvent,
@@ -129,9 +130,9 @@ export const WORLD_SNAPSHOT_FORMAT = 'chrono-forge-world';
 // A strict persisted-payload shape change must increment all three values and retain a
 // parser for the prior format below. This keeps development saves from silently being
 // reinterpreted as a newer schema.
-export const WORLD_SNAPSHOT_FORMAT_VERSION = 11;
-export const WORLD_ENGINE_VERSION = 11;
-export const WORLD_CONTENT_VERSION = 11;
+export const WORLD_SNAPSHOT_FORMAT_VERSION = 12;
+export const WORLD_ENGINE_VERSION = 12;
+export const WORLD_CONTENT_VERSION = 12;
 
 const WORLD_SNAPSHOT_VERSION_SIX = 6;
 const WORLD_SNAPSHOT_VERSION_SEVEN = 7;
@@ -139,6 +140,7 @@ const WORLD_SNAPSHOT_VERSION_EIGHT = 8;
 const WORLD_SNAPSHOT_VERSION_NINE = 9;
 const WORLD_SNAPSHOT_VERSION_TEN = 10;
 const WORLD_SNAPSHOT_VERSION_ELEVEN = 11;
+const WORLD_SNAPSHOT_VERSION_TWELVE = 12;
 const MAX_WORLD_TILES = 1_000_000;
 const MAX_WORLD_SNAPSHOT_BYTES = 50 * 1024 * 1024;
 const MAX_EVENT_KIND_LENGTH = 64;
@@ -417,6 +419,14 @@ const CONFLICT_STATUSES = new Set(['active', 'resolved']);
 const RESIDENCY_SUBJECT_KINDS = new Set(['person', 'household']);
 const RUIN_CAUSES = new Set(['abandoned', 'conquered', 'collapse']);
 const CIVILIZATION_PROVENANCE = new Set(['initial', 'v5-migration', 'm6-founding']);
+const SETTLEMENT_DEVELOPMENT_STAGES = new Set([
+  'founding',
+  'village',
+  'town',
+  'city',
+  'advanced-city',
+]);
+const SETTLEMENT_DEVELOPMENT_PROVENANCE = new Set(['initial', 'v11-migration', 'observed']);
 
 function isRecord(value: unknown): value is UnknownRecord {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
@@ -959,6 +969,7 @@ function parseCivilizations(
   value: unknown,
   worldTick: number,
   tileCount: number,
+  includesSettlementDevelopment = false,
 ): CivilizationsState {
   if (!isRecord(value)) throw new Error('Snapshot civilizations must be an object.');
   assertExactKeys(
@@ -1025,6 +1036,9 @@ function parseCivilizations(
           'centerTileIndex',
           'civilizationId',
           'cultureId',
+          ...(includesSettlementDevelopment
+            ? ['developmentStage', 'developmentStageChangedTick', 'developmentStageProvenance']
+            : []),
           'endedTick',
           'foundedTick',
           'id',
@@ -1057,6 +1071,28 @@ function parseCivilizations(
         ) as Settlement['status'],
         population: safeInteger(candidate.population, `${name} population`),
         stability: safeInteger(candidate.stability, `${name} stability`, 0, 100),
+        developmentStage: includesSettlementDevelopment
+          ? (enumValue(
+              candidate.developmentStage,
+              SETTLEMENT_DEVELOPMENT_STAGES,
+              `${name} development stage`,
+            ) as Settlement['developmentStage'])
+          : 'founding',
+        developmentStageChangedTick: includesSettlementDevelopment
+          ? safeInteger(
+              candidate.developmentStageChangedTick,
+              `${name} development changed tick`,
+              0,
+              worldTick,
+            )
+          : safeInteger(candidate.foundedTick, `${name} founded tick`, 0, tick),
+        developmentStageProvenance: includesSettlementDevelopment
+          ? (enumValue(
+              candidate.developmentStageProvenance,
+              SETTLEMENT_DEVELOPMENT_PROVENANCE,
+              `${name} development provenance`,
+            ) as Settlement['developmentStageProvenance'])
+          : 'initial',
         reserves: parseReserves(candidate.reserves, `${name} reserves`),
         territoryHistory: Object.freeze(
           exactArray(candidate.territoryHistory, `${name} territory history`).map(
@@ -3790,7 +3826,11 @@ function parseVersionFiveWorldPayload(value: unknown, validate = true): WorldSta
   return current;
 }
 
-function parseVersionSixWorldPayload(value: unknown, validate = true): WorldState {
+function parseVersionSixWorldPayload(
+  value: unknown,
+  validate = true,
+  includesSettlementDevelopment = false,
+): WorldState {
   if (!isRecord(value)) throw new Error('Snapshot payload must be an object.');
   assertExactKeys(
     value,
@@ -3804,6 +3844,7 @@ function parseVersionSixWorldPayload(value: unknown, validate = true): WorldStat
     value.civilizations,
     world.tick,
     world.config.width * world.config.height,
+    includesSettlementDevelopment,
   );
   const current: WorldState = Object.freeze({
     ...world,
@@ -4710,6 +4751,7 @@ function parseSpaceState(value: unknown, worldTick: number): SpaceState {
 function parseVersionEightOrNineWorldPayload(
   value: unknown,
   includesResidentAllocator: boolean,
+  includesSettlementDevelopment = false,
 ): WorldState {
   if (!isRecord(value)) throw new Error('Snapshot payload must be an object.');
   assertExactKeys(
@@ -4727,7 +4769,7 @@ function parseVersionEightOrNineWorldPayload(
   const legacyPayload = { ...value };
   delete legacyPayload.populationScale;
   delete legacyPayload.pathCache;
-  const base = parseVersionSixWorldPayload(legacyPayload, false);
+  const base = parseVersionSixWorldPayload(legacyPayload, false, includesSettlementDevelopment);
   const current: WorldState = Object.freeze({
     ...base,
     populationScale: parsePopulationScale(
@@ -4749,7 +4791,10 @@ function parseVersionNineWorldPayload(value: unknown): WorldState {
   return parseVersionEightOrNineWorldPayload(value, true);
 }
 
-function parseVersionTenWorldPayload(value: unknown): WorldState {
+function parseVersionTenWorldPayload(
+  value: unknown,
+  includesSettlementDevelopment = false,
+): WorldState {
   if (!isRecord(value) || !isUnknownArray(value.eventLog))
     throw new Error('Snapshot payload must be an object with an event log.');
   assertExactKeys(
@@ -4773,7 +4818,11 @@ function parseVersionTenWorldPayload(value: unknown): WorldState {
       ENTITY_KINDS.has(candidate.subjectKind as EntityKind) &&
       ENTITY_KINDS.has(candidate.targetKind as EntityKind),
   );
-  const base = parseVersionNineWorldPayload(versionNinePayload);
+  const base = parseVersionEightOrNineWorldPayload(
+    versionNinePayload,
+    true,
+    includesSettlementDevelopment,
+  );
   const current: WorldState = Object.freeze({
     ...base,
     eventLog: parseWorldEvents(
@@ -4807,6 +4856,20 @@ function parseEnvelope(snapshot: string): UnknownRecord {
     throw new Error('World snapshot format is not supported.');
   }
   return parsed;
+}
+
+function canonicalPayloadWithoutSettlementDevelopment(world: WorldState): UnknownRecord {
+  const payload = JSON.parse(canonicalWorldJson(world)) as UnknownRecord;
+  const civilizations = payload.civilizations;
+  if (!isRecord(civilizations) || !isUnknownArray(civilizations.settlements))
+    throw new Error('Canonical civilizations payload is invalid.');
+  for (const settlement of civilizations.settlements) {
+    if (!isRecord(settlement)) throw new Error('Canonical settlement payload is invalid.');
+    delete settlement.developmentStage;
+    delete settlement.developmentStageChangedTick;
+    delete settlement.developmentStageProvenance;
+  }
+  return payload;
 }
 
 function deserializeVersionOne(envelope: UnknownRecord): LegacyWorldState {
@@ -4908,7 +4971,7 @@ function deserializeVersionFour(envelope: UnknownRecord): WorldState {
   if (hashCanonicalJson(payloadJson) !== envelope.checksum)
     throw new Error('World snapshot checksum does not match its payload.');
   const world = parseVersionFourWorldPayload(envelope.payload);
-  const canonicalPayload = JSON.parse(canonicalWorldJson(world)) as UnknownRecord;
+  const canonicalPayload = canonicalPayloadWithoutSettlementDevelopment(world);
   delete canonicalPayload.development;
   delete canonicalPayload.civilizations;
   delete canonicalPayload.populationScale;
@@ -4944,7 +5007,7 @@ function deserializeVersionFive(envelope: UnknownRecord): WorldState {
   if (hashCanonicalJson(payloadJson) !== envelope.checksum)
     throw new Error('World snapshot checksum does not match its payload.');
   const world = parseVersionFiveWorldPayload(envelope.payload);
-  const canonicalPayload = JSON.parse(canonicalWorldJson(world)) as UnknownRecord;
+  const canonicalPayload = canonicalPayloadWithoutSettlementDevelopment(world);
   delete canonicalPayload.civilizations;
   delete canonicalPayload.populationScale;
   delete canonicalPayload.pathCache;
@@ -4979,7 +5042,7 @@ function deserializeVersionedWorld(envelope: UnknownRecord, version: number): Wo
   if (hashCanonicalJson(payloadJson) !== envelope.checksum)
     throw new Error('World snapshot checksum does not match its payload.');
   const world = parseVersionSixWorldPayload(envelope.payload);
-  const canonicalPayload = JSON.parse(canonicalWorldJson(world)) as UnknownRecord;
+  const canonicalPayload = canonicalPayloadWithoutSettlementDevelopment(world);
   delete canonicalPayload.populationScale;
   delete canonicalPayload.pathCache;
   delete canonicalPayload.space;
@@ -5041,9 +5104,10 @@ function versionEightPopulationScalePayload(state: PopulationScaleState): Unknow
 
 function canonicalVersionEightWorldJson(world: WorldState): string {
   const currentPopulationScale = initializeM8WorldAuthority(world).populationScale;
-  const payload = JSON.parse(
-    canonicalWorldJson({ ...world, populationScale: currentPopulationScale }),
-  ) as UnknownRecord;
+  const payload = canonicalPayloadWithoutSettlementDevelopment({
+    ...world,
+    populationScale: currentPopulationScale,
+  });
   payload.populationScale = versionEightPopulationScalePayload(world.populationScale);
   delete payload.space;
   return JSON.stringify(payload);
@@ -5227,7 +5291,7 @@ function deserializeVersionNine(envelope: UnknownRecord): WorldState {
   if (hashCanonicalJson(payloadJson) !== envelope.checksum)
     throw new Error('World snapshot checksum does not match its payload.');
   const world = parseVersionNineWorldPayload(envelope.payload);
-  const canonicalPayload = JSON.parse(canonicalWorldJson(world)) as UnknownRecord;
+  const canonicalPayload = canonicalPayloadWithoutSettlementDevelopment(world);
   delete canonicalPayload.space;
   const canonical = JSON.stringify(canonicalPayload);
   if (canonical !== payloadJson) {
@@ -5260,7 +5324,7 @@ function deserializeVersionTen(envelope: UnknownRecord): WorldState {
   if (hashCanonicalJson(payloadJson) !== envelope.checksum)
     throw new Error('World snapshot checksum does not match its payload.');
   const world = parseVersionTenWorldPayload(envelope.payload);
-  const canonical = canonicalWorldJson(world);
+  const canonical = JSON.stringify(canonicalPayloadWithoutSettlementDevelopment(world));
   if (canonical !== payloadJson) {
     let difference = 0;
     while (difference < canonical.length && canonical[difference] === payloadJson[difference])
@@ -5320,6 +5384,38 @@ function deserializeVersionEleven(envelope: UnknownRecord): WorldState {
   if (hashCanonicalJson(payloadJson) !== envelope.checksum)
     throw new Error('World snapshot checksum does not match its payload.');
   const world = parseVersionTenWorldPayload(envelope.payload);
+  assertCurrentContentNames(world);
+  const canonical = JSON.stringify(canonicalPayloadWithoutSettlementDevelopment(world));
+  if (canonical !== payloadJson) {
+    let difference = 0;
+    while (difference < canonical.length && canonical[difference] === payloadJson[difference])
+      difference += 1;
+    throw new Error(
+      `World snapshot payload is not canonical at byte ${difference}: ${payloadJson.slice(difference, difference + 80)} != ${canonical.slice(difference, difference + 80)}.`,
+    );
+  }
+  return world;
+}
+
+/** Parses the strict v12 payload with authoritative settlement development. */
+function deserializeVersionTwelve(envelope: UnknownRecord): WorldState {
+  assertExactKeys(
+    envelope,
+    ['checksum', 'contentVersion', 'engineVersion', 'format', 'formatVersion', 'payload'],
+    'World snapshot envelope',
+  );
+  if (
+    envelope.formatVersion !== WORLD_SNAPSHOT_VERSION_TWELVE ||
+    envelope.engineVersion !== WORLD_SNAPSHOT_VERSION_TWELVE ||
+    envelope.contentVersion !== WORLD_SNAPSHOT_VERSION_TWELVE ||
+    typeof envelope.checksum !== 'string'
+  ) {
+    throw new Error('World snapshot version metadata is invalid.');
+  }
+  const payloadJson = JSON.stringify(envelope.payload);
+  if (hashCanonicalJson(payloadJson) !== envelope.checksum)
+    throw new Error('World snapshot checksum does not match its payload.');
+  const world = parseVersionTenWorldPayload(envelope.payload, true);
   assertCurrentContentNames(world);
   const canonical = canonicalWorldJson(world);
   if (canonical !== payloadJson) {
@@ -5435,38 +5531,47 @@ export function migrateWorldSnapshot(snapshot: string): string {
   if (formatVersion > WORLD_SNAPSHOT_FORMAT_VERSION) {
     throw new Error(`World snapshot version ${formatVersion} is newer than this application.`);
   }
+  if (formatVersion === WORLD_SNAPSHOT_VERSION_TWELVE) {
+    return serializeWorldSnapshot(deserializeVersionTwelve(envelope));
+  }
   if (formatVersion === WORLD_SNAPSHOT_VERSION_ELEVEN) {
-    return serializeWorldSnapshot(deserializeVersionEleven(envelope));
+    return serializeWorldSnapshot(upgradeSettlementDevelopment(deserializeVersionEleven(envelope)));
   }
   if (formatVersion === WORLD_SNAPSHOT_VERSION_TEN) {
-    return serializeWorldSnapshot(upgradeVersionTenContent(deserializeVersionTen(envelope)));
+    return serializeWorldSnapshot(
+      upgradeSettlementDevelopment(upgradeVersionTenContent(deserializeVersionTen(envelope))),
+    );
   }
   if (formatVersion === WORLD_SNAPSHOT_VERSION_NINE) {
-    return serializeWorldSnapshot(deserializeVersionNine(envelope));
+    return serializeWorldSnapshot(upgradeSettlementDevelopment(deserializeVersionNine(envelope)));
   }
   if (formatVersion === WORLD_SNAPSHOT_VERSION_EIGHT) {
-    return serializeWorldSnapshot(deserializeVersionEight(envelope));
+    return serializeWorldSnapshot(upgradeSettlementDevelopment(deserializeVersionEight(envelope)));
   }
   if (formatVersion === WORLD_SNAPSHOT_VERSION_SEVEN) {
-    return serializeWorldSnapshot(deserializeVersionSeven(envelope));
+    return serializeWorldSnapshot(upgradeSettlementDevelopment(deserializeVersionSeven(envelope)));
   }
   if (formatVersion === WORLD_SNAPSHOT_VERSION_SIX) {
-    return serializeWorldSnapshot(deserializeVersionSix(envelope));
+    return serializeWorldSnapshot(upgradeSettlementDevelopment(deserializeVersionSix(envelope)));
   }
   if (formatVersion === 5) {
-    return serializeWorldSnapshot(deserializeVersionFive(envelope));
+    return serializeWorldSnapshot(upgradeSettlementDevelopment(deserializeVersionFive(envelope)));
   }
   if (formatVersion === 4) {
-    return serializeWorldSnapshot(deserializeVersionFour(envelope));
+    return serializeWorldSnapshot(upgradeSettlementDevelopment(deserializeVersionFour(envelope)));
   }
   if (formatVersion === 3) {
-    return serializeWorldSnapshot(deserializeVersionThree(envelope));
+    return serializeWorldSnapshot(upgradeSettlementDevelopment(deserializeVersionThree(envelope)));
   }
   if (formatVersion === 2) {
-    return serializeWorldSnapshot(upgradeVersionTwo(deserializeVersionTwo(envelope)));
+    return serializeWorldSnapshot(
+      upgradeSettlementDevelopment(upgradeVersionTwo(deserializeVersionTwo(envelope))),
+    );
   }
   if (formatVersion === 1) {
-    return serializeWorldSnapshot(upgradeLegacyWorld(deserializeVersionOne(envelope)));
+    return serializeWorldSnapshot(
+      upgradeSettlementDevelopment(upgradeLegacyWorld(deserializeVersionOne(envelope))),
+    );
   }
   if (formatVersion !== 0)
     throw new Error(`World snapshot version ${formatVersion} is unsupported.`);
@@ -5494,11 +5599,11 @@ export function migrateWorldSnapshot(snapshot: string): string {
   if (canonicalLegacyWorldJson(world) !== envelope.worldJson) {
     throw new Error('Legacy world snapshot payload is not canonical.');
   }
-  return serializeWorldSnapshot(upgradeLegacyWorld(world));
+  return serializeWorldSnapshot(upgradeSettlementDevelopment(upgradeLegacyWorld(world)));
 }
 
 /** Loads and validates a supported snapshot without mutating its input. */
 export function deserializeWorldSnapshot(snapshot: string): WorldState {
   const migrated = migrateWorldSnapshot(snapshot);
-  return deserializeVersionEleven(parseEnvelope(migrated));
+  return deserializeVersionTwelve(parseEnvelope(migrated));
 }

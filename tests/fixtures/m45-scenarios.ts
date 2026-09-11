@@ -21,7 +21,7 @@ export const M45_SCENARIOS: readonly M45Scenario[] = Object.freeze([
     yearTicks: 5_000,
     horizonYears: 60,
     checkpointYears: Object.freeze([5, 25, 60] as const),
-    expectedHash: '4f10ec0a',
+    expectedHash: '6f682930',
     expectedOperations: 17_562,
   }),
   Object.freeze({
@@ -30,7 +30,7 @@ export const M45_SCENARIOS: readonly M45Scenario[] = Object.freeze([
     yearTicks: 5_000,
     horizonYears: 60,
     checkpointYears: Object.freeze([5, 25, 60] as const),
-    expectedHash: '9179d5ef',
+    expectedHash: '19d73aca',
     expectedOperations: 10_667,
   }),
   Object.freeze({
@@ -39,7 +39,7 @@ export const M45_SCENARIOS: readonly M45Scenario[] = Object.freeze([
     yearTicks: 5_000,
     horizonYears: 60,
     checkpointYears: Object.freeze([5, 25, 60] as const),
-    expectedHash: 'daef099c',
+    expectedHash: 'c4a19710',
     expectedOperations: 18_960,
   }),
 ]);

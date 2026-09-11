@@ -46,6 +46,7 @@ describe.sequential('M10 integrated 25-seed content-hardening catalogue', () => 
     let relationshipWorlds = 0;
     let crisisRecoveryWorlds = 0;
     let multiSettlementWorlds = 0;
+    let advancedCityWorlds = 0;
     const baselines: M10Baseline[] = [];
 
     for (const [scenarioIndex, scenario] of M10_SCENARIOS.entries()) {
@@ -115,6 +116,14 @@ describe.sequential('M10 integrated 25-seed content-hardening catalogue', () => 
       ) {
         multiSettlementWorlds += 1;
       }
+      if (
+        world.civilizations.settlements.some(
+          (settlement) =>
+            settlement.status === 'active' && settlement.developmentStage === 'advanced-city',
+        )
+      ) {
+        advancedCityWorlds += 1;
+      }
       if (scenarioIndex % 5 === 0) {
         const snapshot = serializeWorldSnapshot(world);
         const reloaded = deserializeWorldSnapshot(snapshot);
@@ -134,6 +143,7 @@ describe.sequential('M10 integrated 25-seed content-hardening catalogue', () => 
     expect.soft(relationshipWorlds, 'relationship worlds').toBeGreaterThanOrEqual(20);
     expect.soft(crisisRecoveryWorlds, 'crisis-recovery worlds').toBeGreaterThanOrEqual(15);
     expect.soft(multiSettlementWorlds, 'multi-settlement worlds').toBeGreaterThanOrEqual(15);
+    expect.soft(advancedCityWorlds, 'advanced-city worlds').toBeGreaterThanOrEqual(1);
     for (const requiredKind of [
       'shelter-operational',
       'local-exchange',
@@ -143,10 +153,11 @@ describe.sequential('M10 integrated 25-seed content-hardening catalogue', () => 
       'government-changed',
       'knowledge-discovered',
       'settlement-founded',
+      'settlement-stage-changed',
       'route-established',
     ]) {
       expect.soft(eventKinds.has(requiredKind), `catalogue missing ${requiredKind}`).toBe(true);
     }
     expect(baselines).toStrictEqual(M10_EXPECTED_BASELINES);
-  }, 1_200_000);
+  }, 1_800_000);
 });

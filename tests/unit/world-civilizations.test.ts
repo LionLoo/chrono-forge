@@ -5,6 +5,7 @@ import {
   assertWorldInvariants,
   createInitialWorld,
   hashWorldState,
+  settlementDevelopmentInputsForWorld,
   stepWorld,
 } from '../../src/simulation/world';
 
@@ -27,6 +28,10 @@ describe('M6 world-owned civilizations integration', () => {
       personResidencies.length,
     );
     expect(world.civilizations.tileOwners[world.civilization.centerTileIndex]).toBe(1);
+    expect(world.civilizations.settlements[0]).toMatchObject({
+      developmentStage: 'founding',
+      developmentStageProvenance: 'initial',
+    });
   });
 
   it('advances M6 only at civil-year boundaries and remains tick-partition deterministic', () => {
@@ -41,7 +46,81 @@ describe('M6 world-owned civilizations integration', () => {
     expect(partitioned.tick).toBe(direct.tick);
     expect(direct.civilizations.tick).toBe(direct.tick);
     expect(direct.civilizations.settlements.length).toBeGreaterThan(1);
+    expect(
+      direct.civilizations.settlements.some(
+        (settlement) => settlement.developmentStage !== 'founding',
+      ),
+    ).toBe(true);
+    expect(direct.eventLog.some((event) => event.kind === 'settlement-stage-changed')).toBe(true);
     expect(hashWorldState(partitioned)).toBe(hashWorldState(direct));
     expect(partitioned.civilizations).toStrictEqual(direct.civilizations);
+  });
+
+  it('rejects an observed settlement stage without its matching factual event', () => {
+    const world = createInitialWorld(M6_SCENARIOS[0]!.seed, {
+      societyYearTicks: M6_SCENARIOS[0]!.yearTicks,
+    });
+    const invalid = Object.freeze({
+      ...world,
+      civilizations: Object.freeze({
+        ...world.civilizations,
+        settlements: Object.freeze([
+          Object.freeze({
+            ...world.civilizations.settlements[0]!,
+            developmentStage: 'village' as const,
+            developmentStageProvenance: 'observed' as const,
+          }),
+        ]),
+      }),
+    });
+
+    expect(() => assertWorldInvariants(invalid)).toThrow('factual source event');
+  });
+
+  it('derives development inputs with one ownership pass at the maximum map bound', () => {
+    const world = createInitialWorld(M6_SCENARIOS[0]!.seed, {
+      societyYearTicks: M6_SCENARIOS[0]!.yearTicks,
+    });
+    const primary = world.civilizations.settlements[0]!;
+    const settlementIds = Array.from({ length: 32 }, (_, index) => index + 100);
+    const settlements = Object.freeze(
+      settlementIds.map((id, index) =>
+        Object.freeze({
+          ...primary,
+          id,
+          status: index < 8 ? ('active' as const) : ('abandoned' as const),
+          population: index < 8 ? 1 : 0,
+          endedTick: index < 8 ? null : 0,
+        }),
+      ),
+    );
+    const owners = Array.from(
+      { length: 1_000_000 },
+      (_, index) => settlementIds[index % settlementIds.length]!,
+    );
+    let ownershipInspections = 0;
+    const countedOwners = new Proxy(owners, {
+      get(target, property, receiver) {
+        if (property === Symbol.iterator)
+          return function* iterateOwners() {
+            for (const owner of target) {
+              ownershipInspections += 1;
+              yield owner;
+            }
+          };
+        return Reflect.get(target, property, receiver) as unknown;
+      },
+    });
+    const source = Object.freeze({
+      ...world,
+      civilizations: Object.freeze({
+        ...world.civilizations,
+        settlements,
+        tileOwners: countedOwners,
+      }),
+    });
+
+    expect(settlementDevelopmentInputsForWorld(source)).toHaveLength(32);
+    expect(ownershipInspections).toBe(1_000_000);
   });
 });

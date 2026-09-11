@@ -256,6 +256,13 @@ describe('simulation worker runtime', () => {
         .sort((left, right) => left.id - right.id)
         .map((settlement) => settlement.id),
     );
+    expect(
+      frame.civilizations.settlements.every((settlement) =>
+        ['founding', 'village', 'town', 'city', 'advanced-city'].includes(
+          settlement.developmentStage,
+        ),
+      ),
+    ).toBe(true);
   });
 
   it('bounds recent event batches while keeping older history Worker-browsable', () => {

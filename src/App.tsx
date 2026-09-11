@@ -246,6 +246,7 @@ export function App({ focusAlerts, focusClock, persistence, workerFactory }: App
         heading: settlement.name,
         lines: [
           `Settlement ${settlement.id}`,
+          `Development: ${settlement.developmentStage.replaceAll('-', ' ')}`,
           `Population ${settlement.population}`,
           `Status: ${settlement.status}`,
           `Stability ${settlement.stability}%`,

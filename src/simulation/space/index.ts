@@ -198,6 +198,7 @@ export interface SpaceCivilizationContext {
   readonly energyCapacity: number;
   readonly engineeringCapacity: number;
   readonly interSettlementExchange: number;
+  readonly hasAdvancedSettlement: boolean;
   readonly surfaceReserves: SpaceResourceStock;
 }
 export interface EligibleSpaceResident {
@@ -410,7 +411,8 @@ function nextStage(
     has(context, 'spaceflight') &&
     civ.energyCapacity >= 50 &&
     civ.engineeringCapacity >= 50 &&
-    civ.interSettlementExchange >= 20
+    civ.interSettlementExchange >= 20 &&
+    civ.hasAdvancedSettlement
   )
     return 'spaceflight';
   return stage;
@@ -645,6 +647,8 @@ export function advanceSpace(state: SpaceState, context: SpaceContext): SpaceAdv
     integer(civ.energyCapacity, 'Energy capacity');
     integer(civ.engineeringCapacity, 'Engineering capacity');
     integer(civ.interSettlementExchange, 'Inter-settlement exchange');
+    if (typeof civ.hasAdvancedSettlement !== 'boolean')
+      throw new Error('Advanced settlement context must be boolean.');
     stock(civ.surfaceReserves);
   }
   for (const [index, owner] of surfaceSettlementOwners.entries()) {

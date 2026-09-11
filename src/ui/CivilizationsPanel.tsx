@@ -54,6 +54,18 @@ function SettlementFacts({
           <dd>{settlement.stability}</dd>
         </div>
         <div>
+          <dt>Development</dt>
+          <dd>{formatLabel(settlement.developmentStage)}</dd>
+        </div>
+        <div>
+          <dt>Development changed</dt>
+          <dd>Tick {settlement.developmentStageChangedTick}</dd>
+        </div>
+        <div>
+          <dt>Development record</dt>
+          <dd>{formatLabel(settlement.developmentStageProvenance)}</dd>
+        </div>
+        <div>
           <dt>Culture</dt>
           <dd>{recordName(cultureNames, settlement.cultureId, 'Culture')}</dd>
         </div>
