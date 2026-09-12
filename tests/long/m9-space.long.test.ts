@@ -15,16 +15,18 @@ const SCENARIOS = [
   {
     name: 'concord-orbit',
     seed: [7, 11, 13, 17] as const,
-    // Renewed for M10's intentional persisted name/culture/celestial-content expansion.
-    expectedHashes: ['edca16c2', '8eafe6da', '876660ce', 'f623a9fd'],
+    // The first two M10-expanded hashes remain unchanged. The later two renew
+    // after the M10 lifecycle fix prevents estranged kin from oscillating into
+    // rivalry/enmity, removing six invalid society transition operations.
+    expectedHashes: ['edca16c2', '8eafe6da', '214c5e14', '0c6537ac'],
     expectedOperations: {
       settlement: 587_432,
-      society: 113_558,
+      society: 113_552,
       development: 240,
       civilizations: 3_832,
       scale: 618_600,
       space: 1_922,
-      total: 1_325_584,
+      total: 1_325_578,
     },
   },
   {

@@ -499,10 +499,16 @@ function transition(
       secondRole: 'peer',
       event: 'relationship-reconciled',
     };
+  if (edge.kind === 'estranged')
+    return {
+      kind: 'estranged',
+      firstRole: edge.firstRole,
+      secondRole: edge.secondRole,
+      event: null,
+    };
   if (
     (isDirectFamily(state, first.id, second.id) || isSibling(state, first.id, second.id)) &&
-    grievance >= 36 &&
-    edge.kind !== 'estranged'
+    grievance >= 36
   )
     return { kind: 'estranged', firstRole: 'peer', secondRole: 'peer', event: 'family-estranged' };
   if (grievance >= 75 && edge.kind !== 'enemy')

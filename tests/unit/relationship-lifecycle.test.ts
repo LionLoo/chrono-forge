@@ -204,6 +204,17 @@ describe('M4.5 deterministic relationship lifecycle', () => {
     );
     expect(estranged.events.some((event) => event.kind === 'family-estranged')).toBe(true);
 
+    const stillEstranged = advanceInterpersonalLifecycle(
+      at(estranged.state, YEAR),
+      input(kinPeople, YEAR, 100, 0),
+    );
+    expect(findActiveRelationship(stillEstranged.state, 1, 2)?.kind).toBe('estranged');
+    expect(
+      stillEstranged.events.some((event) =>
+        ['family-estranged', 'rivalry-formed', 'enmity-formed'].includes(event.kind),
+      ),
+    ).toBe(false);
+
     const mentorPeople = [
       { ...population[0]!, skills: [95, 10, 10, 10] as const },
       { ...population[1]!, skills: [10, 10, 10, 10] as const },
