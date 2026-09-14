@@ -1,5 +1,10 @@
 import { describe, expect, it } from 'vitest';
 
+import {
+  assertFactualEventSummary,
+  isPlayerVisibleEventKind,
+  normalizeFactualEventSummary,
+} from '../../src/simulation/events';
 import { deserializeWorldSnapshot, serializeWorldSnapshot } from '../../src/simulation/persistence';
 import { MAX_SOCIETY_RESIDENTS } from '../../src/simulation/society';
 import {
@@ -41,6 +46,7 @@ describe.sequential('M10 integrated 25-seed content-hardening catalogue', () => 
     const architectureStyles = new Set<string>();
     const personNameRoots = new Set<string>();
     const eventKinds = new Set<string>();
+    const normalizedDescriptionKinds = new Map<string, Set<string>>();
     const year25Knowledge = new Set<string>();
     let multiGenerationWorlds = 0;
     let relationshipWorlds = 0;
@@ -93,7 +99,18 @@ describe.sequential('M10 integrated 25-seed content-hardening catalogue', () => 
       for (const person of world.civilization.society.people) {
         personNameRoots.add(person.name.split('-')[0]!);
       }
-      for (const event of world.eventLog) eventKinds.add(event.kind);
+      for (const event of world.eventLog) {
+        eventKinds.add(event.kind);
+        expect(isPlayerVisibleEventKind(event.kind), `${scenario.name}: ${event.kind}`).toBe(true);
+        expect(
+          () => assertFactualEventSummary(event.summary),
+          `${scenario.name}: ${event.kind}`,
+        ).not.toThrow();
+        const normalized = normalizeFactualEventSummary(event.summary);
+        const kinds = normalizedDescriptionKinds.get(normalized) ?? new Set<string>();
+        kinds.add(event.kind);
+        normalizedDescriptionKinds.set(normalized, kinds);
+      }
 
       if (world.civilization.society.people.some((person) => person.generation >= 2)) {
         multiGenerationWorlds += 1;
@@ -131,6 +148,9 @@ describe.sequential('M10 integrated 25-seed content-hardening catalogue', () => 
         expect(serializeWorldSnapshot(reloaded), `${scenario.name} canonical reload`).toBe(
           snapshot,
         );
+        expect(reloaded.eventLog, `${scenario.name} factual prose reload`).toStrictEqual(
+          world.eventLog,
+        );
       }
     }
 
@@ -144,6 +164,14 @@ describe.sequential('M10 integrated 25-seed content-hardening catalogue', () => 
     expect.soft(crisisRecoveryWorlds, 'crisis-recovery worlds').toBeGreaterThanOrEqual(15);
     expect.soft(multiSettlementWorlds, 'multi-settlement worlds').toBeGreaterThanOrEqual(15);
     expect.soft(advancedCityWorlds, 'advanced-city worlds').toBeGreaterThanOrEqual(1);
+    for (const [normalized, kinds] of normalizedDescriptionKinds) {
+      expect
+        .soft(
+          kinds.size,
+          `generic description shared across kinds: ${normalized} (${[...kinds].join(', ')})`,
+        )
+        .toBe(1);
+    }
     for (const requiredKind of [
       'shelter-operational',
       'local-exchange',

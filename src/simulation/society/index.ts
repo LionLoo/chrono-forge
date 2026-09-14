@@ -5,6 +5,7 @@ import {
   CULTURE_NAME_STEMS,
   PERSON_NAME_ROOTS,
 } from '../content';
+import type { PlayerVisibleEventKind } from '../events';
 import { deriveXoshiro128State, type Xoshiro128State, Xoshiro128StarStar } from '../random';
 import {
   assertInterpersonalInvariants,
@@ -165,7 +166,7 @@ export interface SocietyOffer {
 
 export interface BiographyFact {
   readonly personId: number;
-  readonly kind: string;
+  readonly kind: PlayerVisibleEventKind;
   readonly source: SocietyEntityRef;
   readonly target: SocietyEntityRef;
   readonly summary: string;
@@ -220,7 +221,7 @@ export interface SocietySkillPatch {
 }
 
 export interface SocietyEventDraft {
-  readonly kind: string;
+  readonly kind: PlayerVisibleEventKind;
   readonly subject: SocietyEntityRef;
   readonly target: SocietyEntityRef;
   readonly amount: number;
@@ -242,7 +243,7 @@ export interface SocietyPulseResult {
 export interface SocietyAuthoritativeEvent {
   readonly id: number;
   readonly tick: number;
-  readonly kind: string;
+  readonly kind: PlayerVisibleEventKind;
   readonly subject: SocietyEntityRef;
   readonly target: SocietyEntityRef;
   readonly summary: string;
@@ -372,7 +373,7 @@ function summary(text: string): string {
 }
 
 function event(
-  kind: string,
+  kind: PlayerVisibleEventKind,
   subject: SocietyEntityRef,
   target: SocietyEntityRef,
   amount: number,
@@ -940,7 +941,7 @@ export function advanceSociety(state: SocietyState, input: SocietyPulseInput): S
     const culture = state.cultures.find((candidate) => candidate.id === person.cultureId)!;
     if (person.alive && !observation.alive) {
       deathIds.push(person.id);
-      const text = `${person.name} died from observed health loss.`;
+      const text = `${person.name} died from observed health loss in household ${person.householdId}.`;
       events.push(
         event(
           'person-died',
@@ -1007,7 +1008,7 @@ export function advanceSociety(state: SocietyState, input: SocietyPulseInput): S
         ref('institution', institution.id),
         leaderId === 0 ? ref('world', 0) : ref('person', leaderId),
         state.stability,
-        `The council selected ${people.find((person) => person.id === leaderId)?.name ?? 'no leader'} for ${institution.government}.`,
+        `Council ${institution.id} selected ${people.find((person) => person.id === leaderId)?.name ?? 'no leader'} for ${institution.government}.`,
       );
       events.push(governmentDraft);
       if (leaderId !== 0) addBiographyFact(facts, leaderId, governmentDraft);
@@ -1143,7 +1144,7 @@ export function advanceSociety(state: SocietyState, input: SocietyPulseInput): S
         ref('person', toolWorker!.id),
         ref('household', toolHousehold.id),
         recipeTools,
-        `${toolWorker!.name} crafted ${recipeTools} tools from timber and stone.`,
+        `${toolWorker!.name} crafted ${recipeTools} tools from timber and stone for household ${toolHousehold.id}.`,
       ),
     );
   }
@@ -1264,7 +1265,7 @@ export function advanceSociety(state: SocietyState, input: SocietyPulseInput): S
             ref('person', person.id),
             ref('household', person.householdId),
             ageYears,
-            `${person.name} died after ${ageYears} calendar years.`,
+            `${person.name} died after ${ageYears} calendar years in household ${person.householdId}.`,
           ),
         );
         facts.push({
@@ -1272,7 +1273,7 @@ export function advanceSociety(state: SocietyState, input: SocietyPulseInput): S
           kind: 'person-died',
           source: ref('person', person.id),
           target: ref('household', person.householdId),
-          summary: `${person.name} died after ${ageYears} calendar years.`,
+          summary: `${person.name} died after ${ageYears} calendar years in household ${person.householdId}.`,
         });
         return Object.freeze({ ...person, alive: false, health: 0, deathTick: input.tick });
       }
@@ -1420,7 +1421,7 @@ export function advanceSociety(state: SocietyState, input: SocietyPulseInput): S
         ref('person', second.id),
         ref('person', first.id),
         householdId,
-        `${second.name} left household ${second.householdId} to form household ${householdId}.`,
+        `${second.name} left a household shared with ${first.name} to form household ${householdId}.`,
       );
       events.push(formed, split);
       addBiographyFact(facts, first.id, formed);
@@ -1439,7 +1440,7 @@ export function advanceSociety(state: SocietyState, input: SocietyPulseInput): S
           ref('person', first.id),
           ref('person', second.id),
           householdId,
-          `Household ${!firstRemaining ? firstPrior.id : secondPrior.id} merged into household ${householdId}.`,
+          `${first.name} and ${second.name} merged household ${!firstRemaining ? firstPrior.id : secondPrior.id} into household ${householdId}.`,
         );
         events.push(merged);
         addBiographyFact(facts, first.id, merged);
@@ -1485,7 +1486,7 @@ export function advanceSociety(state: SocietyState, input: SocietyPulseInput): S
         ref('person', second.id),
         ref('person', first.id),
         householdId,
-        `${second.name} separated from household ${prior.id} into household ${householdId}.`,
+        `${second.name} separated from ${first.name} and moved from household ${prior.id} into household ${householdId}.`,
       );
       events.push(split);
       addBiographyFact(facts, first.id, split);
@@ -1792,7 +1793,7 @@ export function advanceSociety(state: SocietyState, input: SocietyPulseInput): S
         ref('person', id),
         ref('culture', culture.id),
         1,
-        `${draft.name} arrived from beyond the settlement.`,
+        `${draft.name} arrived from beyond the settlement and joined ${culture.name}.`,
       ),
     );
     facts.push({
@@ -1800,7 +1801,7 @@ export function advanceSociety(state: SocietyState, input: SocietyPulseInput): S
       kind: 'person-migrated',
       source: ref('person', id),
       target: ref('culture', culture.id),
-      summary: `${draft.name} arrived from beyond the settlement.`,
+      summary: `${draft.name} arrived from beyond the settlement and joined ${culture.name}.`,
     });
     const householdMigration = event(
       'household-migrated',
@@ -2301,7 +2302,7 @@ export function advanceSociety(state: SocietyState, input: SocietyPulseInput): S
         ref('institution', state.institution.id),
         ref('world', 0),
         stability,
-        'The settlement collapsed under scarcity and instability.',
+        `Council ${state.institution.id} recorded the settlement's collapse under scarcity and instability.`,
       ),
     );
   if (recovered)
@@ -2311,7 +2312,7 @@ export function advanceSociety(state: SocietyState, input: SocietyPulseInput): S
         ref('institution', state.institution.id),
         ref('world', 0),
         stability,
-        'The settlement recovered through renewed production and cooperation.',
+        `Council ${state.institution.id} recorded the settlement's recovery through renewed production and cooperation.`,
       ),
     );
   const leaderId = chooseLeader(people, households, interpersonal);
@@ -2331,7 +2332,7 @@ export function advanceSociety(state: SocietyState, input: SocietyPulseInput): S
       ref('institution', institution.id),
       leaderId === 0 ? ref('world', 0) : ref('person', leaderId),
       stability,
-      `The council selected ${people.find((person) => person.id === leaderId)?.name ?? 'no leader'} for ${government}.`,
+      `Council ${institution.id} selected ${people.find((person) => person.id === leaderId)?.name ?? 'no leader'} for ${government}.`,
     );
     events.push(governmentDraft);
     if (leaderId !== 0) addBiographyFact(facts, leaderId, governmentDraft);

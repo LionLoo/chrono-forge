@@ -1,3 +1,4 @@
+import type { CivilizationEventKind } from '../events';
 import { deriveXoshiro128State, Xoshiro128StarStar, type Xoshiro128State } from '../random';
 
 /** M6 is deliberately an annual, world-owned authority. World orchestration owns all patches. */
@@ -159,22 +160,7 @@ export interface CivilizationsInitialization {
 }
 
 export interface CivilizationEventDraft {
-  readonly kind:
-    | 'settlement-founded'
-    | 'route-established'
-    | 'route-disrupted'
-    | 'route-restored'
-    | 'diplomacy-changed'
-    | 'conflict-started'
-    | 'conflict-resolved'
-    | 'refugees-relocated'
-    | 'settlement-restored'
-    | 'settlement-ruined'
-    | 'settlement-stage-changed'
-    | 'federation-formed'
-    | 'civilization-fragmented'
-    | 'territory-changed'
-    | 'territory-history-summarized';
+  readonly kind: CivilizationEventKind;
   readonly subjectId: number;
   readonly targetId: number;
   readonly tick: number;
@@ -1011,7 +997,7 @@ export function advanceCivilizations(
         civilization.id,
         context.tick,
         1,
-        `${settlement.name} resumed life under post-conflict rule.`,
+        `${settlement.name} resumed life under post-conflict rule by ${civilization.name}.`,
       ),
     );
     operationCount += 1;
@@ -1125,7 +1111,7 @@ export function advanceCivilizations(
         civilizationId,
         context.tick,
         founding.siteScore,
-        `${founding.name} was founded.`,
+        `${founding.name} was founded as part of ${founding.civilizationName}.`,
       ),
     );
     operationCount += 1;
@@ -1185,7 +1171,7 @@ export function advanceCivilizations(
             secondSettlementId,
             context.tick,
             Math.abs(candidate.utility),
-            'A trade route was disrupted.',
+            `The trade route between ${settlements.find((settlement) => settlement.id === firstSettlementId)!.name} and ${settlements.find((settlement) => settlement.id === secondSettlementId)!.name} was disrupted at utility ${candidate.utility}.`,
           ),
         );
         operationCount += 1;
@@ -1207,7 +1193,7 @@ export function advanceCivilizations(
             secondSettlementId,
             context.tick,
             candidate.volume,
-            'A trade route resumed.',
+            `The trade route between ${settlements.find((settlement) => settlement.id === firstSettlementId)!.name} and ${settlements.find((settlement) => settlement.id === secondSettlementId)!.name} resumed at volume ${candidate.volume}.`,
           ),
         );
         operationCount += 1;
@@ -1251,7 +1237,7 @@ export function advanceCivilizations(
         secondSettlementId,
         context.tick,
         candidate.volume,
-        'A trade route was established.',
+        `A trade route between ${settlements.find((settlement) => settlement.id === firstSettlementId)!.name} and ${settlements.find((settlement) => settlement.id === secondSettlementId)!.name} opened at volume ${candidate.volume}.`,
       ),
     );
     operationCount += 1;
@@ -1301,7 +1287,7 @@ export function advanceCivilizations(
           secondCivilizationId,
           context.tick,
           Math.abs(candidate.score),
-          'Diplomatic standing changed.',
+          `${civilizations.find((civilization) => civilization.id === firstCivilizationId)!.name} and ${civilizations.find((civilization) => civilization.id === secondCivilizationId)!.name} established ${status} diplomacy at score ${candidate.score}.`,
         ),
       );
       operationCount += 1;
@@ -1320,7 +1306,7 @@ export function advanceCivilizations(
           secondCivilizationId,
           context.tick,
           Math.abs(candidate.score),
-          'Diplomatic standing changed.',
+          `${civilizations.find((civilization) => civilization.id === firstCivilizationId)!.name} and ${civilizations.find((civilization) => civilization.id === secondCivilizationId)!.name} changed to ${status} diplomacy at score ${candidate.score}.`,
         ),
       );
       operationCount += 1;
@@ -1377,7 +1363,7 @@ export function advanceCivilizations(
         candidate.defenderCivilizationId,
         context.tick,
         candidate.pressure,
-        'A conflict began.',
+        `${civilizations.find((civilization) => civilization.id === candidate.attackerCivilizationId)!.name} began a conflict against ${civilizations.find((civilization) => civilization.id === candidate.defenderCivilizationId)!.name} at pressure ${candidate.pressure}.`,
       ),
     );
     operationCount += 1;
@@ -1461,7 +1447,7 @@ export function advanceCivilizations(
         resolution.winnerCivilizationId,
         context.tick,
         conflict.pressure,
-        'A conflict resolved.',
+        `Conflict ${conflict.id} ended with ${civilizations.find((civilization) => civilization.id === resolution.winnerCivilizationId)!.name} prevailing at pressure ${conflict.pressure}.`,
       ),
     );
     operationCount += 1;
@@ -1525,8 +1511,8 @@ export function advanceCivilizations(
         context.tick,
         movedPeople,
         transfer.reason === 'refugee'
-          ? 'People found refuge in another settlement.'
-          : 'People migrated between settlements.',
+          ? `${movedPeople} people left ${from?.name ?? `settlement ${transfer.fromSettlementId}`} and found refuge in ${to?.name ?? `settlement ${transfer.toSettlementId}`}.`
+          : `${movedPeople} people migrated from ${from?.name ?? `settlement ${transfer.fromSettlementId}`} to ${to?.name ?? `settlement ${transfer.toSettlementId}`}.`,
       ),
     );
     operationCount += movedPeople;
@@ -1552,7 +1538,7 @@ export function advanceCivilizations(
         0,
         context.tick,
         1,
-        'A civilization entered a federation.',
+        `${civilization.name} entered a federation.`,
       ),
     );
     operationCount += 1;
@@ -1576,7 +1562,7 @@ export function advanceCivilizations(
         0,
         context.tick,
         1,
-        'A civilization fragmented.',
+        `${civilization.name} fragmented after its recorded political pressures.`,
       ),
     );
     operationCount += 1;
@@ -1686,7 +1672,9 @@ export function advanceCivilizations(
           change.nextSettlementId,
           context.tick,
           change.tileIndex,
-          'Territory changed hands.',
+          change.nextSettlementId === 0
+            ? `${settlement.name} released tile ${change.tileIndex} to unclaimed land.`
+            : `${settlement.name} claimed tile ${change.tileIndex}${previousSettlementId === 0 ? ' from unclaimed land' : ` from ${settlements.find((candidate) => candidate.id === previousSettlementId)?.name ?? `settlement ${previousSettlementId}`}`}.`,
         ),
       );
     } else {
@@ -1702,7 +1690,9 @@ export function advanceCivilizations(
           change.nextSettlementId,
           context.tick,
           1,
-          'Additional territory changes were summarized.',
+          change.nextSettlementId === 0
+            ? `${settlement.name} summarized one additional release of territory to unclaimed land.`
+            : `${settlement.name} summarized one additional territory change involving ${settlements.find((candidate) => candidate.id === change.nextSettlementId)?.name ?? `settlement ${change.nextSettlementId}`}.`,
         ),
       );
     }
@@ -1740,8 +1730,8 @@ export function advanceCivilizations(
         context.tick,
         settlementDevelopmentRank(nextStage),
         developed
-          ? `${settlement.name} developed into ${nextStage === 'advanced-city' ? 'an' : 'a'} ${stageLabel}.`
-          : `${settlement.name} contracted to ${stageLabel} status.`,
+          ? `${settlement.name} of ${civilizations.find((civilization) => civilization.id === settlement.civilizationId)!.name} developed into ${nextStage === 'advanced-city' ? 'an' : 'a'} ${stageLabel}.`
+          : `${settlement.name} of ${civilizations.find((civilization) => civilization.id === settlement.civilizationId)!.name} contracted to ${stageLabel} status.`,
       ),
     );
   }

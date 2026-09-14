@@ -1,4 +1,5 @@
 import { hashCanonicalJson } from '../canonical';
+import { isPlayerVisibleEventKind } from '../events';
 import {
   assertCivilizationsInvariants,
   migrateSingleSettlementCivilizations,
@@ -111,10 +112,12 @@ import {
 } from '../space';
 import {
   Biome,
+  assertWorldEventDescriptions,
   assertWorldInvariants,
   canonicalWorldJson,
   civilizationsInitializationForWorld,
   initializeM8WorldAuthority,
+  upgradeLegacyWorldEventDescriptions,
   upgradeSettlementDevelopment,
   type WorldChunk,
   type WorldConfig,
@@ -130,9 +133,9 @@ export const WORLD_SNAPSHOT_FORMAT = 'chrono-forge-world';
 // A strict persisted-payload shape change must increment all three values and retain a
 // parser for the prior format below. This keeps development saves from silently being
 // reinterpreted as a newer schema.
-export const WORLD_SNAPSHOT_FORMAT_VERSION = 12;
-export const WORLD_ENGINE_VERSION = 12;
-export const WORLD_CONTENT_VERSION = 12;
+export const WORLD_SNAPSHOT_FORMAT_VERSION = 13;
+export const WORLD_ENGINE_VERSION = 13;
+export const WORLD_CONTENT_VERSION = 13;
 
 const WORLD_SNAPSHOT_VERSION_SIX = 6;
 const WORLD_SNAPSHOT_VERSION_SEVEN = 7;
@@ -141,6 +144,7 @@ const WORLD_SNAPSHOT_VERSION_NINE = 9;
 const WORLD_SNAPSHOT_VERSION_TEN = 10;
 const WORLD_SNAPSHOT_VERSION_ELEVEN = 11;
 const WORLD_SNAPSHOT_VERSION_TWELVE = 12;
+const WORLD_SNAPSHOT_VERSION_THIRTEEN = 13;
 const MAX_WORLD_TILES = 1_000_000;
 const MAX_WORLD_SNAPSHOT_BYTES = 50 * 1024 * 1024;
 const MAX_EVENT_KIND_LENGTH = 64;
@@ -3021,7 +3025,13 @@ function parseSociety(
       );
       return Object.freeze({
         personId: safeInteger(candidate.personId, `Society biography fact ${index} person`, 1),
-        kind: finiteString(candidate.kind, `Society biography fact ${index} kind`),
+        kind: (() => {
+          const kind = finiteString(candidate.kind, `Society biography fact ${index} kind`);
+          if (!isPlayerVisibleEventKind(kind)) {
+            throw new Error(`Society biography fact ${index} kind is not supported.`);
+          }
+          return kind;
+        })(),
         source: parseEntityRef(candidate.source, `Society biography fact ${index} source`),
         target: parseEntityRef(candidate.target, `Society biography fact ${index} target`),
         summary: finiteString(candidate.summary, `Society biography fact ${index} summary`, 160),
@@ -3158,10 +3168,14 @@ function parseWorldEvents(
           `Snapshot event ${index} child arrival eligibility`,
         )
       : undefined;
+    const kind = finiteString(candidate.kind, `Snapshot event ${index} kind`);
+    if (!isPlayerVisibleEventKind(kind)) {
+      throw new Error(`Snapshot event ${index} kind is not supported.`);
+    }
     return Object.freeze({
       id: safeInteger(candidate.id, `Snapshot event ${index} id`, 1),
       tick: safeInteger(candidate.tick, `Snapshot event ${index} tick`, 0, tick),
-      kind: finiteString(candidate.kind, `Snapshot event ${index} kind`),
+      kind,
       summary: finiteString(candidate.summary, `Snapshot event ${index} summary`, 160),
       subjectKind,
       subjectId,
@@ -3399,14 +3413,18 @@ function legacyEventSummary(event: LegacyM3Event, civilization: LegacyCivilizati
 
 function typedLegacyEvents(state: VersionTwoWorldState): readonly SocietyWorldEvent[] {
   return Object.freeze(
-    state.eventLog.map((event) =>
-      Object.freeze({
+    state.eventLog.map((event) => {
+      if (!isPlayerVisibleEventKind(event.kind)) {
+        throw new Error(`Legacy event kind ${event.kind} is not supported.`);
+      }
+      return Object.freeze({
         ...event,
+        kind: event.kind,
         summary: legacyEventSummary(event, state.civilization),
         subjectKind: legacyEntityKind(event.subjectId, 'agent', state.civilization),
         targetKind: legacyEntityKind(event.targetId, 'structure', state.civilization),
-      }),
-    ),
+      });
+    }),
   );
 }
 
@@ -5429,6 +5447,39 @@ function deserializeVersionTwelve(envelope: UnknownRecord): WorldState {
   return world;
 }
 
+/** Parses the strict v13 payload with audited factual event descriptions. */
+function deserializeVersionThirteen(envelope: UnknownRecord): WorldState {
+  assertExactKeys(
+    envelope,
+    ['checksum', 'contentVersion', 'engineVersion', 'format', 'formatVersion', 'payload'],
+    'World snapshot envelope',
+  );
+  if (
+    envelope.formatVersion !== WORLD_SNAPSHOT_VERSION_THIRTEEN ||
+    envelope.engineVersion !== WORLD_SNAPSHOT_VERSION_THIRTEEN ||
+    envelope.contentVersion !== WORLD_SNAPSHOT_VERSION_THIRTEEN ||
+    typeof envelope.checksum !== 'string'
+  ) {
+    throw new Error('World snapshot version metadata is invalid.');
+  }
+  const payloadJson = JSON.stringify(envelope.payload);
+  if (hashCanonicalJson(payloadJson) !== envelope.checksum)
+    throw new Error('World snapshot checksum does not match its payload.');
+  const world = parseVersionTenWorldPayload(envelope.payload, true);
+  assertCurrentContentNames(world);
+  assertWorldEventDescriptions(world);
+  const canonical = canonicalWorldJson(world);
+  if (canonical !== payloadJson) {
+    let difference = 0;
+    while (difference < canonical.length && canonical[difference] === payloadJson[difference])
+      difference += 1;
+    throw new Error(
+      `World snapshot payload is not canonical at byte ${difference}: ${payloadJson.slice(difference, difference + 80)} != ${canonical.slice(difference, difference + 80)}.`,
+    );
+  }
+  return world;
+}
+
 function canonicalVersionTwoWorldJson(state: VersionTwoWorldState): string {
   return JSON.stringify({
     animals: Array.from(state.animals),
@@ -5519,6 +5570,7 @@ function canonicalVersionTwoWorldJson(state: VersionTwoWorldState): string {
 /** Serializes a canonical, versioned, internally checksummed simulation snapshot. */
 export function serializeWorldSnapshot(state: WorldState): string {
   assertCurrentContentNames(state);
+  assertWorldEventDescriptions(state);
   const payloadJson = canonicalWorldJson(state);
   const checksum = hashCanonicalJson(payloadJson);
   return `{"checksum":"${checksum}","contentVersion":${WORLD_CONTENT_VERSION},"engineVersion":${WORLD_ENGINE_VERSION},"format":"${WORLD_SNAPSHOT_FORMAT}","formatVersion":${WORLD_SNAPSHOT_FORMAT_VERSION},"payload":${payloadJson}}`;
@@ -5531,46 +5583,89 @@ export function migrateWorldSnapshot(snapshot: string): string {
   if (formatVersion > WORLD_SNAPSHOT_FORMAT_VERSION) {
     throw new Error(`World snapshot version ${formatVersion} is newer than this application.`);
   }
+  if (formatVersion === WORLD_SNAPSHOT_VERSION_THIRTEEN) {
+    return serializeWorldSnapshot(deserializeVersionThirteen(envelope));
+  }
   if (formatVersion === WORLD_SNAPSHOT_VERSION_TWELVE) {
-    return serializeWorldSnapshot(deserializeVersionTwelve(envelope));
+    return serializeWorldSnapshot(
+      upgradeLegacyWorldEventDescriptions(deserializeVersionTwelve(envelope)),
+    );
   }
   if (formatVersion === WORLD_SNAPSHOT_VERSION_ELEVEN) {
-    return serializeWorldSnapshot(upgradeSettlementDevelopment(deserializeVersionEleven(envelope)));
+    return serializeWorldSnapshot(
+      upgradeLegacyWorldEventDescriptions(
+        upgradeSettlementDevelopment(deserializeVersionEleven(envelope)),
+      ),
+    );
   }
   if (formatVersion === WORLD_SNAPSHOT_VERSION_TEN) {
     return serializeWorldSnapshot(
-      upgradeSettlementDevelopment(upgradeVersionTenContent(deserializeVersionTen(envelope))),
+      upgradeLegacyWorldEventDescriptions(
+        upgradeSettlementDevelopment(upgradeVersionTenContent(deserializeVersionTen(envelope))),
+      ),
     );
   }
   if (formatVersion === WORLD_SNAPSHOT_VERSION_NINE) {
-    return serializeWorldSnapshot(upgradeSettlementDevelopment(deserializeVersionNine(envelope)));
+    return serializeWorldSnapshot(
+      upgradeLegacyWorldEventDescriptions(
+        upgradeSettlementDevelopment(deserializeVersionNine(envelope)),
+      ),
+    );
   }
   if (formatVersion === WORLD_SNAPSHOT_VERSION_EIGHT) {
-    return serializeWorldSnapshot(upgradeSettlementDevelopment(deserializeVersionEight(envelope)));
+    return serializeWorldSnapshot(
+      upgradeLegacyWorldEventDescriptions(
+        upgradeSettlementDevelopment(deserializeVersionEight(envelope)),
+      ),
+    );
   }
   if (formatVersion === WORLD_SNAPSHOT_VERSION_SEVEN) {
-    return serializeWorldSnapshot(upgradeSettlementDevelopment(deserializeVersionSeven(envelope)));
+    return serializeWorldSnapshot(
+      upgradeLegacyWorldEventDescriptions(
+        upgradeSettlementDevelopment(deserializeVersionSeven(envelope)),
+      ),
+    );
   }
   if (formatVersion === WORLD_SNAPSHOT_VERSION_SIX) {
-    return serializeWorldSnapshot(upgradeSettlementDevelopment(deserializeVersionSix(envelope)));
+    return serializeWorldSnapshot(
+      upgradeLegacyWorldEventDescriptions(
+        upgradeSettlementDevelopment(deserializeVersionSix(envelope)),
+      ),
+    );
   }
   if (formatVersion === 5) {
-    return serializeWorldSnapshot(upgradeSettlementDevelopment(deserializeVersionFive(envelope)));
+    return serializeWorldSnapshot(
+      upgradeLegacyWorldEventDescriptions(
+        upgradeSettlementDevelopment(deserializeVersionFive(envelope)),
+      ),
+    );
   }
   if (formatVersion === 4) {
-    return serializeWorldSnapshot(upgradeSettlementDevelopment(deserializeVersionFour(envelope)));
+    return serializeWorldSnapshot(
+      upgradeLegacyWorldEventDescriptions(
+        upgradeSettlementDevelopment(deserializeVersionFour(envelope)),
+      ),
+    );
   }
   if (formatVersion === 3) {
-    return serializeWorldSnapshot(upgradeSettlementDevelopment(deserializeVersionThree(envelope)));
+    return serializeWorldSnapshot(
+      upgradeLegacyWorldEventDescriptions(
+        upgradeSettlementDevelopment(deserializeVersionThree(envelope)),
+      ),
+    );
   }
   if (formatVersion === 2) {
     return serializeWorldSnapshot(
-      upgradeSettlementDevelopment(upgradeVersionTwo(deserializeVersionTwo(envelope))),
+      upgradeLegacyWorldEventDescriptions(
+        upgradeSettlementDevelopment(upgradeVersionTwo(deserializeVersionTwo(envelope))),
+      ),
     );
   }
   if (formatVersion === 1) {
     return serializeWorldSnapshot(
-      upgradeSettlementDevelopment(upgradeLegacyWorld(deserializeVersionOne(envelope))),
+      upgradeLegacyWorldEventDescriptions(
+        upgradeSettlementDevelopment(upgradeLegacyWorld(deserializeVersionOne(envelope))),
+      ),
     );
   }
   if (formatVersion !== 0)
@@ -5599,11 +5694,13 @@ export function migrateWorldSnapshot(snapshot: string): string {
   if (canonicalLegacyWorldJson(world) !== envelope.worldJson) {
     throw new Error('Legacy world snapshot payload is not canonical.');
   }
-  return serializeWorldSnapshot(upgradeSettlementDevelopment(upgradeLegacyWorld(world)));
+  return serializeWorldSnapshot(
+    upgradeLegacyWorldEventDescriptions(upgradeSettlementDevelopment(upgradeLegacyWorld(world))),
+  );
 }
 
 /** Loads and validates a supported snapshot without mutating its input. */
 export function deserializeWorldSnapshot(snapshot: string): WorldState {
   const migrated = migrateWorldSnapshot(snapshot);
-  return deserializeVersionTwelve(parseEnvelope(migrated));
+  return deserializeVersionThirteen(parseEnvelope(migrated));
 }

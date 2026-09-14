@@ -102,7 +102,7 @@ export interface PersistenceGateway {
   exportSaveSlot(slotId: string): Promise<string>;
   importSaveSlot(savePackage: string): Promise<LoadedSave>;
   recordFocusSession(session: FocusSession, sourceEventIds: readonly number[]): Promise<void>;
-  listFocusSessions(): Promise<readonly FocusSession[]>;
+  listFocusSessions(sourceSave?: LoadedSave): Promise<readonly FocusSession[]>;
   loadSettings(): Promise<AppSettings>;
   saveSettings(settings: AppSettings): Promise<AppSettings>;
 }
@@ -194,12 +194,15 @@ export function createTauriPersistenceGateway(invoke: TauriInvoke): PersistenceG
         throw new TypeError('record_focus_session returned an unexpected result');
       }
     },
-    async listFocusSessions() {
+    async listFocusSessions(sourceSave) {
       const result = await invoke<unknown>('list_focus_sessions');
       if (!Array.isArray(result)) {
         throw new TypeError('list_focus_sessions returned a non-array result');
       }
-      return result.map(parseFocusSession);
+      const source = recapAuthority(sourceSave);
+      return result
+        .map(parseFocusSession)
+        .map((session) => withVerifiedStoredRecap(session, source));
     },
     async loadSettings() {
       return parseAppSettings(await invoke<unknown>('load_settings'));
@@ -381,15 +384,17 @@ export function createInMemoryPersistenceGateway(
       }
       sessions.set(session.sessionId, cloneFocusSession(session));
     },
-    async listFocusSessions() {
+    async listFocusSessions(sourceSave) {
       await Promise.resolve();
+      const source = recapAuthority(sourceSave);
       return [...sessions.values()]
         .sort(
           (left, right) =>
             right.startedAtMs - left.startedAtMs ||
             compareStableText(left.sessionId, right.sessionId),
         )
-        .map(cloneFocusSession);
+        .map(cloneFocusSession)
+        .map((session) => withVerifiedStoredRecap(session, source));
     },
     async loadSettings() {
       await Promise.resolve();
@@ -453,13 +458,17 @@ function parseLoadedSave(value: unknown): LoadedSave {
   );
   const savedAtMs = expectNonNegativeInteger(record.savedAtMs, 'savedAtMs');
   const snapshot = expectString(record.snapshot, 'snapshot');
-  validateSnapshot(snapshot);
-  const focusSession = record.focusSession === null ? null : parseFocusSession(record.focusSession);
-  if (focusSession !== null) {
-    validateFocusCheckpoint(summary.slotId, snapshot, focusSession, undefined);
-  }
+  const snapshotEvents = validateSnapshot(snapshot).eventLog;
   const checksum = expectString(record.checksum, 'checksum');
   validateChecksum(checksum, snapshot);
+  const source = createRecapAuthority(summary.slotId, snapshot, snapshotEvents);
+  const parsedFocusSession =
+    record.focusSession === null ? null : parseFocusSession(record.focusSession);
+  const focusSession =
+    parsedFocusSession === null ? null : withMigratedLegacyRecapCopies(parsedFocusSession, source);
+  if (focusSession !== null) {
+    validateFocusCheckpoint(summary.slotId, snapshot, focusSession, undefined, source.events);
+  }
   return {
     ...summary,
     recoveredGeneration,
@@ -469,6 +478,110 @@ function parseLoadedSave(value: unknown): LoadedSave {
     snapshot,
     checksum,
   };
+}
+
+type RecapSourceEvent = Readonly<{ id: number; summary: string; tick: number }>;
+
+interface RecapAuthority {
+  readonly slotId: string;
+  readonly events: readonly RecapSourceEvent[];
+  readonly eventsById: ReadonlyMap<number, RecapSourceEvent>;
+  readonly legacyEventsById: ReadonlyMap<number, RecapSourceEvent> | null;
+}
+
+function readLegacyRecapEvents(snapshot: string): ReadonlyMap<number, RecapSourceEvent> | null {
+  const envelope = expectRecord(JSON.parse(snapshot) as unknown, 'world snapshot envelope');
+  const formatVersion = expectNonNegativeInteger(
+    envelope.formatVersion,
+    'world snapshot formatVersion',
+  );
+  if (formatVersion >= 13) return null;
+
+  const payload: unknown =
+    formatVersion === 0
+      ? (JSON.parse(expectString(envelope.worldJson, 'legacy world snapshot worldJson')) as unknown)
+      : envelope.payload;
+  const payloadRecord = expectRecord(payload, 'world snapshot payload');
+  if (!Array.isArray(payloadRecord.eventLog)) return new Map();
+  const legacyEvents = new Map<number, RecapSourceEvent>();
+  for (const value of payloadRecord.eventLog) {
+    const event = expectRecord(value, 'legacy world event');
+    if (
+      typeof event.id === 'number' &&
+      typeof event.tick === 'number' &&
+      typeof event.summary === 'string'
+    ) {
+      legacyEvents.set(event.id, { id: event.id, summary: event.summary, tick: event.tick });
+    }
+  }
+  return legacyEvents;
+}
+
+function createRecapAuthority(
+  slotId: string,
+  snapshot: string,
+  events: readonly RecapSourceEvent[],
+): RecapAuthority {
+  return {
+    slotId,
+    events,
+    eventsById: new Map(events.map((event) => [event.id, event])),
+    legacyEventsById: readLegacyRecapEvents(snapshot),
+  };
+}
+
+function recapAuthority(sourceSave: LoadedSave | undefined): RecapAuthority | null {
+  if (sourceSave === undefined) return null;
+  validateChecksum(sourceSave.checksum, sourceSave.snapshot);
+  const events = validateSnapshot(sourceSave.snapshot).eventLog;
+  return createRecapAuthority(sourceSave.slotId, sourceSave.snapshot, events);
+}
+
+function withMigratedLegacyRecapCopies(
+  session: FocusSession,
+  source: RecapAuthority,
+): FocusSession {
+  if (session.recapEntries.length === 0 || source.legacyEventsById === null) return session;
+  const recapEntries = session.recapEntries.map((entry) => {
+    const legacy = source.legacyEventsById?.get(entry.id);
+    const migrated = source.eventsById.get(entry.id);
+    if (
+      legacy?.tick !== entry.tick ||
+      legacy.summary !== entry.summary ||
+      migrated?.tick !== entry.tick
+    ) {
+      return entry;
+    }
+    return { ...entry, summary: migrated.summary };
+  });
+  return { ...session, recapEntries };
+}
+
+function withVerifiedStoredRecap(
+  session: FocusSession,
+  source: RecapAuthority | null,
+): FocusSession {
+  if (session.recapEntries.length === 0) return session;
+  try {
+    if (source?.slotId !== session.slotId) throw new Error();
+    const normalized = withMigratedLegacyRecapCopies(session, source);
+    if (normalized.recapEventIds.some((eventId) => !source.eventsById.has(eventId))) {
+      throw new Error();
+    }
+    if (
+      normalized.recapEntries.some((entry) => {
+        const event = source.eventsById.get(entry.id);
+        return event?.tick !== entry.tick || event?.summary !== entry.summary;
+      })
+    ) {
+      throw new Error();
+    }
+    return normalized;
+  } catch {
+    // A detached or invalid historical copy cannot prove its prose against world
+    // authority. Preserve session accounting and event IDs, but render no claim.
+    return { ...session, recapEntries: [] };
+  }
 }
 
 function parseFocusSession(value: unknown): FocusSession {
@@ -606,11 +719,11 @@ function validateName(value: string): void {
   }
 }
 
-function validateSnapshot(value: string): void {
+function validateSnapshot(value: string): ReturnType<typeof deserializeWorldSnapshot> {
   if (typeof value !== 'string' || value.length === 0 || byteLength(value) > MAX_SNAPSHOT_BYTES) {
     throw new RangeError('snapshot must be nonempty and at most 50 MiB');
   }
-  deserializeWorldSnapshot(value);
+  return deserializeWorldSnapshot(value);
 }
 
 function validateChecksum(checksum: string, snapshot: string): void {
@@ -767,12 +880,13 @@ function validateFocusCheckpoint(
   snapshot: string,
   session: FocusSession,
   sourceEventIds: readonly number[] | undefined,
+  snapshotEventsOverride?: readonly RecapSourceEvent[],
 ): void {
   validateFocusSession(session);
   if (session.slotId !== slotId) {
     throw new TypeError('focus checkpoint session must belong to its save slot');
   }
-  const snapshotEvents = deserializeWorldSnapshot(snapshot).eventLog;
+  const snapshotEvents = snapshotEventsOverride ?? deserializeWorldSnapshot(snapshot).eventLog;
   const snapshotEventIds = snapshotEvents.map((event) => event.id);
   validateRecapReferences(session, snapshotEventIds);
   validateRecapCopiesAgainstSnapshot(session, snapshotEvents);

@@ -7,6 +7,7 @@ import {
   WORLD_SNAPSHOT_FORMAT_VERSION,
 } from '../../src/simulation/persistence';
 import {
+  assertWorldEventDescriptions,
   assertWorldInvariants,
   canonicalWorldJson,
   createInitialWorld,
@@ -852,6 +853,54 @@ describe('versioned world snapshots', () => {
     expect(serializeWorldSnapshot(loaded)).toBe(migrated);
   });
 
+  it('upgrades v12 generic event copy without changing the recorded event identity', () => {
+    const source = stepWorld(
+      createInitialWorld([7, 11, 13, 17], { societyYearTicks: ACCELERATED_YEAR_TICKS }),
+      20_000,
+    );
+    const envelope = JSON.parse(serializeWorldSnapshot(source)) as {
+      checksum: string;
+      contentVersion: number;
+      engineVersion: number;
+      formatVersion: number;
+      payload: {
+        civilization: {
+          agents: { memories: { eventId: number; summary: string }[] }[];
+        };
+        eventLog: (Record<string, unknown> & { id: number; kind: string; summary: string })[];
+      };
+    };
+    const legacyEvent = envelope.payload.eventLog.find(
+      (event) => event.kind === 'friendship-formed',
+    );
+    expect(legacyEvent).toBeDefined();
+    const originalEvent = { ...legacyEvent! };
+    legacyEvent!.summary = 'Two people changed relationship.';
+    for (const agent of envelope.payload.civilization.agents) {
+      for (const memory of agent.memories) {
+        if (memory.eventId === legacyEvent!.id) memory.summary = legacyEvent!.summary;
+      }
+    }
+    envelope.contentVersion = 12;
+    envelope.engineVersion = 12;
+    envelope.formatVersion = 12;
+    envelope.checksum = hashCanonicalJson(JSON.stringify(envelope.payload));
+
+    const loaded = deserializeWorldSnapshot(JSON.stringify(envelope));
+    const upgradedEvent = loaded.eventLog.find((event) => event.id === legacyEvent!.id)!;
+
+    expect({ ...upgradedEvent, summary: originalEvent.summary }).toStrictEqual(originalEvent);
+    expect(upgradedEvent.summary).not.toBe(legacyEvent!.summary);
+    expect(loaded.eventLog).toHaveLength(source.eventLog.length);
+    expect(
+      loaded.civilization.agents
+        .flatMap((agent) => agent.memories)
+        .filter((memory) => memory.eventId === upgradedEvent.id)
+        .every((memory) => memory.summary === upgradedEvent.summary),
+    ).toBe(true);
+    expect(() => assertWorldEventDescriptions(loaded)).not.toThrow();
+  });
+
   it.each([
     ['mid-flight', m9E2eArchives.midFlightPackage],
     ['contacted', m9E2eArchives.contactedPackage],
@@ -862,6 +911,10 @@ describe('versioned world snapshots', () => {
     expect(world.space.bodies.map((body) => body.name)).not.toContainEqual(
       expect.stringMatching(/^Body-\d+$/),
     );
+    expect(world.eventLog.map((event) => event.summary)).not.toContainEqual(
+      expect.stringMatching(/\bBody-\d+\b/),
+    );
+    expect(() => assertWorldEventDescriptions(world)).not.toThrow();
     expect(JSON.parse(serializeWorldSnapshot(world))).toMatchObject({
       contentVersion: WORLD_SNAPSHOT_FORMAT_VERSION,
       engineVersion: WORLD_SNAPSHOT_FORMAT_VERSION,
@@ -989,7 +1042,7 @@ describe('versioned world snapshots', () => {
         >;
         society.pendingBiographyFacts = [
           {
-            kind: 'recorded-structure',
+            kind: 'shelter-operational',
             personId: 1,
             source: { id: 1, kind: 'person' },
             summary: 'Recorded an impossible structure.',

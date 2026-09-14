@@ -58,7 +58,7 @@ describe('locked M4 long-horizon scenarios', () => {
         scenario.horizonTicks,
       );
       const society = world.civilization.society;
-      const eventKinds = new Set(world.eventLog.map((event) => event.kind));
+      const eventKinds = new Set<string>(world.eventLog.map((event) => event.kind));
 
       expect.soft(hashWorldState(world), `${scenario.name} hash`).toBe(scenario.expectedHash);
       expect

@@ -98,10 +98,10 @@ export const M10_WORLD_RELATIONSHIP_LIFECYCLE_SCENARIO: M10WorldRelationshipLife
     shortageIntervalYears: 2,
     shortageSeverity: 70,
     recoveryYears: 7,
-    pressuredHash: '1893ccd2',
+    pressuredHash: 'f2a01530',
     pressuredOperations: 10_059,
     pressuredLivingPeople: 25,
-    recoveredHash: '92ed79b0',
+    recoveredHash: '7299f0e8',
     recoveredOperations: 14_331,
     recoveredLivingPeople: 25,
     estrangements: Object.freeze([

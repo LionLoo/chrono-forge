@@ -227,7 +227,11 @@ describe.sequential('M10 controlled collapse-to-autonomous-recovery evidence', (
     );
     expect(
       recoveryEvents.some((event) =>
-        DISASTER_KINDS.some((definition) => definition.kind === event.kind),
+        DISASTER_KINDS.some(
+          (definition) =>
+            `${definition.kind}-started` === event.kind ||
+            `${definition.kind}-recovered` === event.kind,
+        ),
       ),
     ).toBe(false);
     expect(

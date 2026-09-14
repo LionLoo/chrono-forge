@@ -18,7 +18,7 @@ const SCENARIOS = [
     // The first two M10-expanded hashes remain unchanged. The later two renew
     // after the M10 lifecycle fix prevents estranged kin from oscillating into
     // rivalry/enmity, removing six invalid society transition operations.
-    expectedHashes: ['edca16c2', '8eafe6da', '214c5e14', '0c6537ac'],
+    expectedHashes: ['0dc1e8de', '1f538887', '8c38c58c', 'c9f18ba4'],
     expectedOperations: {
       settlement: 587_432,
       society: 113_552,
@@ -33,7 +33,7 @@ const SCENARIOS = [
     name: 'contested-frontier',
     seed: [37, 41, 43, 47] as const,
     // Renewed for M10's intentional persisted name/culture/celestial-content expansion.
-    expectedHashes: ['08159f63', '1a217d94', '979a2db3', '90f918cf'],
+    expectedHashes: ['9331b225', '780acdb6', '8ce47f15', '3748a1d3'],
     expectedOperations: {
       settlement: 571_260,
       society: 111_345,
