@@ -253,8 +253,8 @@ describe('FocusPersistencePanel offline progression', () => {
       height: 2,
       chunkSize: 2,
     });
-    const advancedWorld = appendWorldEvent(savedWorld, 'shared-work', savedWorld.tick, {
-      summary: 'Two inhabitants completed shared work.',
+    const advancedWorld = appendWorldEvent(savedWorld, 'offline-catch-up', savedWorld.tick, {
+      summary: `Bounded offline progression reached tick ${savedWorld.tick}.`,
     });
     const runningState = startFocus(
       createIdleFocusState(),
@@ -305,7 +305,7 @@ describe('FocusPersistencePanel offline progression', () => {
       const restored = (await gateway.loadSaveSlot('primary'))?.focusSession;
       expect(restored?.recapEventIds).toEqual([3]);
       expect(restored?.recapEntries).toEqual([
-        { id: 3, tick: 0, summary: 'Two inhabitants completed shared work.' },
+        { id: 3, tick: 0, summary: 'Bounded offline progression reached tick 0.' },
       ]);
     });
   });
@@ -462,6 +462,7 @@ describe('FocusPersistencePanel offline progression', () => {
   });
 
   it('scopes statistics and recaps to the active world slot', async () => {
+    const user = userEvent.setup();
     const gateway = createInMemoryPersistenceGateway(() => 1_000);
     await gateway.commitSaveSlot('primary', 'Founding world', snapshot);
     await gateway.commitSaveSlot('world-2', 'Second world', snapshot);
@@ -482,11 +483,17 @@ describe('FocusPersistencePanel offline progression', () => {
       120_500,
     );
     await gateway.recordFocusSession(
-      focusSessionFromState('primary-session', 'primary', primaryState, [1]),
+      {
+        ...focusSessionFromState('primary-session', 'primary', primaryState, [1]),
+        recapEntries: [{ id: 1, tick: 0, summary: 'The founding world formed.' }],
+      },
       [1],
     );
     await gateway.recordFocusSession(
-      focusSessionFromState('second-session', 'world-2', secondState, [1]),
+      {
+        ...focusSessionFromState('second-session', 'world-2', secondState, [1]),
+        recapEntries: [{ id: 1, tick: 0, summary: 'The founding world formed.' }],
+      },
       [1],
     );
     await gateway.saveSettings({
@@ -511,6 +518,14 @@ describe('FocusPersistencePanel offline progression', () => {
     expect(focused).not.toBeNull();
     expect(within(completed!).getByText('1')).toBeVisible();
     expect(within(focused!).getByText('2 min')).toBeVisible();
+    expect(screen.getByText('Tick 0: The founding world formed.')).toBeVisible();
+
+    await user.selectOptions(screen.getByRole('combobox', { name: 'Load local slot' }), 'primary');
+    await screen.findByText('Loaded Founding world.');
+    expect(screen.getByText('Tick 0: The founding world formed.')).toBeVisible();
+    expect(
+      within(screen.getByText('Focused time').closest('div')!).getByText('5 min'),
+    ).toBeVisible();
   });
 
   it('renders the latest persisted factual recap after the Worker event cache changes', async () => {

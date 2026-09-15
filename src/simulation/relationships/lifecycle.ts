@@ -1,3 +1,4 @@
+import type { RelationshipEventKind } from '../events';
 import { deriveXoshiro128State, Xoshiro128StarStar } from '../random';
 import {
   admitActiveRelationships,
@@ -47,21 +48,7 @@ export interface RelationshipLifecycleInput {
   readonly stability: number;
 }
 
-export type RelationshipLifecycleEventKind =
-  | 'relationship-formed'
-  | 'friendship-formed'
-  | 'close-friendship-formed'
-  | 'friendship-ended'
-  | 'rivalry-formed'
-  | 'enmity-formed'
-  | 'mentorship-formed'
-  | 'partnership-formed'
-  | 'long-term-partnership-formed'
-  | 'partnership-separated'
-  | 'family-estranged'
-  | 'relationship-reconciled'
-  | 'partner-widowed'
-  | 'sibling-bond-formed';
+export type RelationshipLifecycleEventKind = RelationshipEventKind;
 
 export interface RelationshipLifecycleEvent {
   readonly relationshipId: number;
@@ -214,6 +201,9 @@ function event(
     'sibling-bond-formed': 'formed a sibling bond',
   };
   const summary = `${first.name} and ${second.name} ${phrase[kind]}.`;
+  if (summary.length > 160) {
+    throw new Error('Relationship event summary exceeds the factual event bound.');
+  }
   return Object.freeze({
     relationshipId: edge.id,
     kind,
@@ -221,8 +211,7 @@ function event(
     secondPersonId: edge.secondPersonId,
     importance: kind === 'relationship-formed' ? 1 : 2,
     amount: clamp(amount),
-    summary:
-      summary.length <= 160 ? summary : `${first.name} and ${second.name} changed relationship.`,
+    summary,
   });
 }
 
@@ -499,10 +488,16 @@ function transition(
       secondRole: 'peer',
       event: 'relationship-reconciled',
     };
+  if (edge.kind === 'estranged')
+    return {
+      kind: 'estranged',
+      firstRole: edge.firstRole,
+      secondRole: edge.secondRole,
+      event: null,
+    };
   if (
     (isDirectFamily(state, first.id, second.id) || isSibling(state, first.id, second.id)) &&
-    grievance >= 36 &&
-    edge.kind !== 'estranged'
+    grievance >= 36
   )
     return { kind: 'estranged', firstRole: 'peer', secondRole: 'peer', event: 'family-estranged' };
   if (grievance >= 75 && edge.kind !== 'enemy')

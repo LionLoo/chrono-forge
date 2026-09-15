@@ -1,3 +1,4 @@
+import type { DevelopmentEventKind } from '../events';
 import { deriveXoshiro128State, Xoshiro128StarStar, type Xoshiro128State } from '../random';
 import { findActiveRelationship, type InterpersonalState } from '../relationships';
 import {
@@ -218,7 +219,7 @@ export interface DevelopmentContext {
 }
 
 export interface DevelopmentEvent {
-  readonly kind: string;
+  readonly kind: DevelopmentEventKind;
   readonly subjectKind: 'world' | 'person';
   readonly subjectId: number;
   readonly tick: number;
@@ -951,7 +952,11 @@ export function advanceDevelopment(
   });
 }
 
-function recordKind(status: KnowledgeStatus, first: string, recovery: string): string {
+function recordKind(
+  status: KnowledgeStatus,
+  first: 'knowledge-discovered',
+  recovery: 'knowledge-recovered',
+): 'knowledge-discovered' | 'knowledge-recovered' {
   return status === 'lost' ? recovery : first;
 }
 function recoveryAmount(

@@ -1,4 +1,5 @@
 import { findLocalPath } from '../pathfinding';
+import type { PlayerVisibleEventKind } from '../events';
 import { advancePathCache, requestPath, type PathCacheState } from '../pathfinding/cache';
 import { deriveXoshiro128State, type Xoshiro128State, Xoshiro128StarStar } from '../random';
 import type { ChildArrivalEligibilityEvidence } from '../relationships';
@@ -163,7 +164,7 @@ export interface SettlementTerrain {
 }
 
 export interface SettlementEventDraft {
-  readonly kind: string;
+  readonly kind: PlayerVisibleEventKind;
   readonly summary: string;
   readonly subjectKind: EntityKind;
   readonly subjectId: number;

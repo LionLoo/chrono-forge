@@ -5,9 +5,11 @@ import {
   createInMemoryPersistenceGateway,
   createTauriPersistenceGateway,
   type FocusSession,
+  type LoadedSave,
   type TauriInvoke,
 } from '../../src/adapters/persistence';
 import { checkpointFocus, createIdleFocusState, startFocus } from '../../src/focus';
+import { hashCanonicalJson } from '../../src/simulation/canonical';
 import { deserializeWorldSnapshot, serializeWorldSnapshot } from '../../src/simulation/persistence';
 import { createInitialWorld, stepWorld } from '../../src/simulation/world';
 
@@ -27,6 +29,22 @@ const snapshot = (value: string): string =>
   );
 const checksumOf = (value: string): string => createHash('sha256').update(value).digest('hex');
 const snapshotOneChecksum = checksumOf(snapshot('one'));
+
+function versionTwelveSnapshotWithLegacySummary(): string {
+  const envelope = JSON.parse(snapshot('one')) as {
+    checksum: string;
+    contentVersion: number;
+    engineVersion: number;
+    formatVersion: number;
+    payload: { eventLog: { summary: string }[] };
+  };
+  envelope.contentVersion = 12;
+  envelope.engineVersion = 12;
+  envelope.formatVersion = 12;
+  envelope.payload.eventLog[0]!.summary = 'Recorded world-generated.';
+  envelope.checksum = hashCanonicalJson(JSON.stringify(envelope.payload));
+  return JSON.stringify(envelope);
+}
 
 const completedFocusState = checkpointFocus(
   startFocus(
@@ -54,6 +72,144 @@ const completedSession: FocusSession = {
 };
 
 describe('persistence adapter', () => {
+  it('upgrades matching pre-v13 focus recap copies with their authoritative world summaries', async () => {
+    const legacySnapshot = versionTwelveSnapshotWithLegacySummary();
+    const legacySession = {
+      ...completedSession,
+      recapEntries: [{ id: 1, tick: 0, summary: 'Recorded world-generated.' }],
+    };
+    const invoke: TauriInvoke = async (command) => {
+      await Promise.resolve();
+      if (command !== 'load_save_slot_candidates') throw new Error(`unexpected ${command}`);
+      return [
+        {
+          slotId: 'alpha',
+          name: 'Alpha',
+          headGeneration: 1,
+          recoveredGeneration: 1,
+          recoveredFromCorruption: false,
+          savedAtMs: 1_000,
+          focusSession: legacySession,
+          snapshot: legacySnapshot,
+          checksum: checksumOf(legacySnapshot),
+        },
+      ] as never;
+    };
+
+    const loaded = await createTauriPersistenceGateway(invoke).loadSaveSlot('alpha');
+
+    expect(loaded?.focusSession?.recapEntries).toEqual([
+      { id: 1, tick: 0, summary: deserializeWorldSnapshot(legacySnapshot).eventLog[0]!.summary },
+    ]);
+  });
+
+  it('does not use legacy migration to conceal a tampered focus recap copy', async () => {
+    const legacySnapshot = versionTwelveSnapshotWithLegacySummary();
+    const invoke: TauriInvoke = async () => {
+      await Promise.resolve();
+      return [
+        {
+          slotId: 'alpha',
+          name: 'Alpha',
+          headGeneration: 1,
+          recoveredGeneration: 1,
+          recoveredFromCorruption: false,
+          savedAtMs: 1_000,
+          focusSession: {
+            ...completedSession,
+            recapEntries: [{ id: 1, tick: 0, summary: 'Invented recap.' }],
+          },
+          snapshot: legacySnapshot,
+          checksum: checksumOf(legacySnapshot),
+        },
+      ] as never;
+    };
+
+    await expect(createTauriPersistenceGateway(invoke).loadSaveSlot('alpha')).rejects.toThrow(
+      'exactly match authoritative saved-world events',
+    );
+  });
+
+  it('hides plausible focus-history prose that does not match retained world authority', async () => {
+    const invoke: TauriInvoke = async (command) => {
+      await Promise.resolve();
+      if (command === 'list_focus_sessions') {
+        return [
+          {
+            ...completedSession,
+            recapEntries: [
+              { id: 1, tick: 0, summary: 'A fabricated narrative passed validation.' },
+            ],
+          },
+        ] as never;
+      }
+      if (command === 'load_save_slot_candidates') {
+        return [
+          {
+            slotId: 'alpha',
+            name: 'Alpha',
+            headGeneration: 1,
+            recoveredGeneration: 1,
+            recoveredFromCorruption: false,
+            savedAtMs: 1_000,
+            focusSession: null,
+            snapshot: snapshot('one'),
+            checksum: snapshotOneChecksum,
+          },
+        ] as never;
+      }
+      throw new Error(`unexpected ${command}`);
+    };
+
+    const gateway = createTauriPersistenceGateway(invoke);
+    const sourceSave = await gateway.loadSaveSlot('alpha');
+    await expect(gateway.listFocusSessions(sourceSave ?? undefined)).resolves.toEqual([
+      { ...completedSession, recapEntries: [] },
+    ]);
+  });
+
+  it('verifies recap prose against one supplied active save without loading historical slots', async () => {
+    const calls: string[] = [];
+    const alphaSessions = Array.from({ length: 64 }, (_, index): FocusSession => ({
+      ...completedSession,
+      sessionId: `session-alpha-${index}`,
+    }));
+    const betaSession: FocusSession = {
+      ...completedSession,
+      sessionId: 'session-2',
+      slotId: 'beta',
+    };
+    const invoke: TauriInvoke = async (command) => {
+      await Promise.resolve();
+      calls.push(command);
+      if (command === 'list_focus_sessions') return [...alphaSessions, betaSession] as never;
+      throw new Error(`unexpected ${command}`);
+    };
+    const sourceSnapshot = snapshot('one');
+    let snapshotReads = 0;
+    const sourceSave: LoadedSave = {
+      slotId: 'alpha',
+      name: 'Alpha',
+      headGeneration: 1,
+      recoveredGeneration: 1,
+      recoveredFromCorruption: false,
+      savedAtMs: 1_000,
+      focusSession: null,
+      get snapshot() {
+        snapshotReads += 1;
+        return sourceSnapshot;
+      },
+      checksum: snapshotOneChecksum,
+    };
+
+    const listed = await createTauriPersistenceGateway(invoke).listFocusSessions(sourceSave);
+    expect(listed).toHaveLength(65);
+    expect(listed.slice(0, 64).every((session) => session.recapEntries.length === 1)).toBe(true);
+    expect(listed[64]).toEqual({ ...betaSession, recapEntries: [] });
+    expect(calls).toEqual(['list_focus_sessions']);
+    expect(snapshotReads).toBeLessThanOrEqual(3);
+  });
+
   it('uses narrow command names and camelCase Tauri arguments', async () => {
     const calls: { command: string; arguments_: Readonly<Record<string, unknown>> | undefined }[] =
       [];
@@ -152,7 +308,7 @@ describe('persistence adapter', () => {
     await expect(gateway.deleteSaveSlot('alpha')).resolves.toBe(true);
     await expect(gateway.exportSaveSlot('alpha')).resolves.toBe(savePackage);
     await expect(gateway.importSaveSlot(savePackage)).resolves.toEqual(loaded);
-    await expect(gateway.listFocusSessions()).resolves.toEqual([completedSession]);
+    await expect(gateway.listFocusSessions(loaded)).resolves.toEqual([completedSession]);
     await expect(gateway.loadSettings()).resolves.toEqual(DEFAULT_APP_SETTINGS);
   });
 
@@ -302,7 +458,7 @@ describe('persistence adapter', () => {
 
     expect(committed.focusSession).toEqual(completedSession);
     expect((await gateway.loadSaveSlot('alpha'))?.focusSession).toEqual(completedSession);
-    expect(await gateway.listFocusSessions()).toEqual([completedSession]);
+    expect(await gateway.listFocusSessions(committed)).toEqual([completedSession]);
     await expect(
       gateway.commitFocusCheckpoint(
         'alpha',
@@ -313,7 +469,7 @@ describe('persistence adapter', () => {
       ),
     ).rejects.toThrow('belong to its save slot');
     expect((await gateway.loadSaveSlot('alpha'))?.recoveredGeneration).toBe(1);
-    expect(await gateway.listFocusSessions()).toEqual([completedSession]);
+    expect(await gateway.listFocusSessions(committed)).toEqual([completedSession]);
   });
 
   it('uses the checkpoint command only after validating the exact snapshot pair', async () => {
@@ -445,7 +601,9 @@ describe('persistence adapter', () => {
     ).rejects.toThrow('exactly match authoritative saved-world events');
     expect(await gateway.deleteSaveSlot('alpha')).toBe(true);
     expect(await gateway.deleteSaveSlot('alpha')).toBe(false);
-    expect(await gateway.listFocusSessions()).toEqual([{ ...completedSession, slotId: null }]);
+    expect(await gateway.listFocusSessions()).toEqual([
+      { ...completedSession, slotId: null, recapEntries: [] },
+    ]);
 
     await expect(
       gateway.recordFocusSession({ ...completedSession, stateJson: '{' }, [1]),
@@ -471,10 +629,11 @@ describe('persistence adapter', () => {
     const gateway = createInMemoryPersistenceGateway();
     await gateway.commitSaveSlot('alpha', 'Alpha', snapshot('one'));
     await gateway.recordFocusSession(completedSession, [1]);
-    const sessions = await gateway.listFocusSessions();
+    const sourceSave = await gateway.loadSaveSlot('alpha');
+    const sessions = await gateway.listFocusSessions(sourceSave ?? undefined);
     expect(sessions).toEqual([completedSession]);
     (sessions[0]?.recapEventIds as number[]).push(99);
-    expect(await gateway.listFocusSessions()).toEqual([completedSession]);
+    expect(await gateway.listFocusSessions(sourceSave ?? undefined)).toEqual([completedSession]);
 
     const updated = { ...DEFAULT_APP_SETTINGS, focusToSimRatio: 42, calmMode: true };
     expect(await gateway.saveSettings(updated)).toEqual(updated);

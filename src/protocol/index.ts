@@ -9,7 +9,7 @@ import type {
 } from '../simulation/development';
 import { ACCELERATED_YEAR_TICKS, NORMAL_YEAR_TICKS } from '../simulation/society';
 
-export const WORKER_PROTOCOL_VERSION = 8;
+export const WORKER_PROTOCOL_VERSION = 9;
 export const MAX_ADVANCE_TICKS_PER_REQUEST = 1_000_000;
 
 export type WorkerProtocolVersion = typeof WORKER_PROTOCOL_VERSION;
@@ -226,6 +226,9 @@ export interface CivilizationSettlementProjection {
   readonly status: 'active' | 'abandoned' | 'conquered';
   readonly population: number;
   readonly stability: number;
+  readonly developmentStage: 'founding' | 'village' | 'town' | 'city' | 'advanced-city';
+  readonly developmentStageChangedTick: number;
+  readonly developmentStageProvenance: 'initial' | 'v11-migration' | 'observed';
   readonly reserves: CivilizationReservesProjection;
   readonly territoryHistory: readonly CivilizationTerritoryHistoryProjection[];
   readonly territoryHistorySummaryCount: number;

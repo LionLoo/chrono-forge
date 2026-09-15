@@ -15,29 +15,33 @@ const SCENARIOS = [
   {
     name: 'concord-orbit',
     seed: [7, 11, 13, 17] as const,
-    expectedHashes: ['6fd1de9c', 'a9f64693', 'caef75c2', '6af71a3f'],
+    // The first two M10-expanded hashes remain unchanged. The later two renew
+    // after the M10 lifecycle fix prevents estranged kin from oscillating into
+    // rivalry/enmity, removing six invalid society transition operations.
+    expectedHashes: ['0dc1e8de', '1f538887', '8c38c58c', 'c9f18ba4'],
     expectedOperations: {
       settlement: 587_432,
-      society: 113_558,
+      society: 113_552,
       development: 240,
-      civilizations: 2_893,
+      civilizations: 3_832,
       scale: 618_600,
       space: 1_922,
-      total: 1_324_645,
+      total: 1_325_578,
     },
   },
   {
     name: 'contested-frontier',
     seed: [37, 41, 43, 47] as const,
-    expectedHashes: ['fa6c9fd4', 'cb6bafbb', '8b761a19', '12e9a783'],
+    // Renewed for M10's intentional persisted name/culture/celestial-content expansion.
+    expectedHashes: ['9331b225', '780acdb6', '8ce47f15', '3748a1d3'],
     expectedOperations: {
       settlement: 571_260,
       society: 111_345,
       development: 240,
-      civilizations: 4_435,
+      civilizations: 5_524,
       scale: 881_902,
       space: 738,
-      total: 1_569_920,
+      total: 1_571_009,
     },
   },
 ] as const;
@@ -119,6 +123,7 @@ describe.sequential('M9 accelerated planetary and space scenarios', () => {
       world: WorldState;
       missionSignature: string[];
       colonySignature: string[];
+      totals: ReturnType<typeof operationTotals>;
     }[] = [];
 
     for (const scenario of SCENARIOS) {
@@ -171,13 +176,22 @@ describe.sequential('M9 accelerated planetary and space scenarios', () => {
           `${colony.civilizationId}:${colony.cultureId}:${colony.bodyId}:${colony.cultureDivergence}`,
       );
       const totals = operationTotals(world);
-      expect(hashes).toStrictEqual(scenario.expectedHashes);
-      expect(totals).toStrictEqual(scenario.expectedOperations);
-      results.push({ name: scenario.name, hashes, world, missionSignature, colonySignature });
+      results.push({
+        name: scenario.name,
+        hashes,
+        world,
+        missionSignature,
+        colonySignature,
+        totals,
+      });
     }
 
+    for (const [index, scenario] of SCENARIOS.entries()) {
+      expect(results[index]!.hashes).toStrictEqual(scenario.expectedHashes);
+      expect(results[index]!.totals).toStrictEqual(scenario.expectedOperations);
+    }
     expect(results[0]!.hashes).not.toStrictEqual(results[1]!.hashes);
     expect(results[0]!.missionSignature).not.toStrictEqual(results[1]!.missionSignature);
     expect(results[0]!.colonySignature).not.toStrictEqual(results[1]!.colonySignature);
-  }, 900_000);
+  }, 1_800_000);
 });

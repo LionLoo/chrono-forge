@@ -96,6 +96,30 @@ async function installActiveM9Archive(savePackage) {
   }, savePackage);
 }
 
+function expectM10Migration(actualSnapshot, legacySnapshot) {
+  const actual = JSON.parse(actualSnapshot);
+  const legacy = JSON.parse(legacySnapshot);
+  expect(actual).toMatchObject({ contentVersion: 13, engineVersion: 13, formatVersion: 13 });
+  const withoutSummary = (event) => {
+    const copy = { ...event };
+    delete copy.summary;
+    return copy;
+  };
+  expect(actual.payload.eventLog.map(withoutSummary)).toEqual(
+    legacy.payload.eventLog.map(withoutSummary),
+  );
+  for (const event of actual.payload.eventLog) {
+    expect(event.summary).toMatch(/[.!?]$/);
+    expect(event.summary.length).toBeGreaterThan(0);
+    expect(event.summary.length).toBeLessThanOrEqual(160);
+    expect(event.summary).not.toMatch(/\b(?:Body-\d+|undefined|null|NaN)\b/);
+  }
+  expect(actual.payload.space.bodies.map((body) => ({ ...body, name: undefined }))).toEqual(
+    legacy.payload.space.bodies.map((body) => ({ ...body, name: undefined })),
+  );
+  expect(actual.payload.space.bodies.map((body) => body.name).join(' ')).not.toMatch(/Body-\d+/);
+}
+
 describe('native focus persistence', () => {
   it('starts, pauses, saves, relaunches, resumes, and completes through real SQLite IPC', async () => {
     await $('#focus-title').waitForDisplayed();
@@ -270,6 +294,7 @@ describe('native focus persistence', () => {
     const missionList = await $('ul[aria-label="Space missions"]');
     await missionList.waitForDisplayed();
     expect(await missionList.getText()).toContain('active');
+    expect(await (await $('.space-body-list')).getText()).not.toMatch(/Body-\d+/);
     await $('button=Save now').click();
     await browser.waitUntil(
       async () => (await $('.persistence-status').getText()).includes('World saved manually.'),
@@ -278,7 +303,7 @@ describe('native focus persistence', () => {
     const candidates = await browser.tauri.execute(({ core }) =>
       core.invoke('load_save_slot_candidates', { slotId: 'm9-mid-flight' }),
     );
-    expect(candidates[0]?.snapshot).toBe(expectedMidFlight);
+    expectM10Migration(candidates[0]?.snapshot, expectedMidFlight);
   });
 
   it('relaunches an exact post-contact M9 save through SQLite and the real Worker', async () => {
@@ -293,6 +318,7 @@ describe('native focus persistence', () => {
     const alienList = await $('ul[aria-label="Alien civilizations"]');
     await alienList.waitForDisplayed();
     expect(await alienList.getText()).toMatch(/allied|cooperative|competitive|hostile/);
+    expect(await (await $('.space-body-list')).getText()).not.toMatch(/Body-\d+/);
     expect(await (await $('.space-panel details summary')).getText()).toMatch(
       /Logistics: \d+ cargo and \d+ communications in transit/,
     );
@@ -304,6 +330,6 @@ describe('native focus persistence', () => {
     const candidates = await browser.tauri.execute(({ core }) =>
       core.invoke('load_save_slot_candidates', { slotId: 'm9-contacted' }),
     );
-    expect(candidates[0]?.snapshot).toBe(expectedContacted);
+    expectM10Migration(candidates[0]?.snapshot, expectedContacted);
   });
 });

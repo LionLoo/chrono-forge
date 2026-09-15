@@ -6,6 +6,7 @@ import {
   assertCivilizationsInvariants,
   civilizationsDto,
   createInitialCivilizations,
+  deriveSettlementDevelopmentStage,
   migrateSingleSettlementCivilizations,
   selectCoMigrationPerson,
   selectConflictTargetCivilization,
@@ -53,6 +54,7 @@ function context(
     ruinSettlementIds: Object.freeze([]),
     federationCivilizationIds: Object.freeze([]),
     fragmentationCivilizationIds: Object.freeze([]),
+    settlementDevelopmentInputs: Object.freeze([]),
     territoryChanges: Object.freeze([]),
     ...overrides,
   });
@@ -70,11 +72,136 @@ describe('M6 civilizations authority', () => {
     expect(initial.conflicts).toStrictEqual([]);
     expect(initial.ruins).toStrictEqual([]);
     expect(initial.settlements[0]?.territoryHistory).toStrictEqual([]);
+    expect(initial.settlements[0]).toMatchObject({
+      developmentStage: 'founding',
+      developmentStageChangedTick: 0,
+      developmentStageProvenance: 'initial',
+    });
     expect(migrated.settlements[0]?.provenance).toBe('v5-migration');
     expect(migrated.civilizations[0]?.provenance).toBe('v5-migration');
     expect(migrated.settlements[0]?.foundedTick).toBe(77);
     assertCivilizationsInvariants(initial);
     assertCivilizationsInvariants(migrated);
+  });
+
+  it('advances and regresses one factual settlement stage per year with hysteresis', () => {
+    const initial = createInitialCivilizations(SEED, 0, {
+      ...initialization(),
+      personIds: Object.freeze(Array.from({ length: 30 }, (_, index) => index + 11)),
+      stability: 70,
+    });
+    const developmentInput = Object.freeze({
+      settlementId: 1,
+      operationalStructures: 2,
+      infrastructure: 40,
+      knownKnowledgeIds: Object.freeze(['agriculture', 'mechanics', 'advanced-energy']),
+    });
+
+    let state = initial;
+    for (const [year, expected] of [
+      [1, 'village'],
+      [2, 'town'],
+      [3, 'city'],
+      [4, 'advanced-city'],
+    ] as const) {
+      const result = advanceCivilizations(
+        state,
+        context(YEAR * year, {
+          settlementDevelopmentInputs: Object.freeze([developmentInput]),
+        }),
+      );
+      state = result.state;
+      expect(state.settlements[0]).toMatchObject({
+        developmentStage: expected,
+        developmentStageChangedTick: YEAR * year,
+        developmentStageProvenance: 'observed',
+      });
+      expect(result.events.at(-1)).toMatchObject({
+        kind: 'settlement-stage-changed',
+        subjectId: 1,
+        targetId: 2,
+      });
+    }
+
+    const regressed = advanceCivilizations(
+      state,
+      context(YEAR * 5, {
+        economies: Object.freeze([
+          {
+            settlementId: 1,
+            production: Object.freeze({ food: 0, water: 0, timber: 0, stone: 0, metal: 0 }),
+            consumption: Object.freeze({ food: 0, water: 0, timber: 0, stone: 0, metal: 0 }),
+            stabilityDelta: -40,
+          },
+        ]),
+        settlementDevelopmentInputs: Object.freeze([
+          Object.freeze({
+            settlementId: 1,
+            operationalStructures: 0,
+            infrastructure: 0,
+            knownKnowledgeIds: Object.freeze([]),
+          }),
+        ]),
+      }),
+    );
+    expect(regressed.state.settlements[0]).toMatchObject({
+      developmentStage: 'city',
+      developmentStageChangedTick: YEAR * 5,
+      developmentStageProvenance: 'observed',
+    });
+    expect(regressed.events.at(-1)?.summary).toContain('contracted');
+  });
+
+  it('derives the highest fact-supported migration stage without gradual history', () => {
+    expect(
+      deriveSettlementDevelopmentStage(
+        { population: 30, stability: 70 },
+        {
+          settlementId: 1,
+          operationalStructures: 2,
+          infrastructure: 40,
+          knownKnowledgeIds: Object.freeze(['agriculture', 'mechanics', 'advanced-energy']),
+        },
+      ),
+    ).toBe('advanced-city');
+  });
+
+  it('retains a stage inside its hysteresis band without emitting false history', () => {
+    const initial = createInitialCivilizations(SEED, 0, {
+      ...initialization(),
+      personIds: Object.freeze([11, 12, 13, 14]),
+      stability: 30,
+    });
+    const promoted = advanceCivilizations(
+      initial,
+      context(YEAR, {
+        settlementDevelopmentInputs: Object.freeze([
+          Object.freeze({
+            settlementId: 1,
+            operationalStructures: 0,
+            infrastructure: 8,
+            knownKnowledgeIds: Object.freeze([]),
+          }),
+        ]),
+      }),
+    );
+    const retained = advanceCivilizations(
+      promoted.state,
+      context(YEAR * 2, {
+        settlementDevelopmentInputs: Object.freeze([
+          Object.freeze({
+            settlementId: 1,
+            operationalStructures: 0,
+            infrastructure: 4,
+            knownKnowledgeIds: Object.freeze([]),
+          }),
+        ]),
+      }),
+    );
+
+    expect(promoted.state.settlements[0]?.developmentStage).toBe('village');
+    expect(retained.state.settlements[0]?.developmentStage).toBe('village');
+    expect(retained.events).toStrictEqual([]);
   });
 
   it('is deterministic, conserves founding reserves through an explicit delta, and preserves references', () => {

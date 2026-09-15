@@ -176,6 +176,9 @@ function projectCivilizations(state: WorldState): CivilizationsProjection {
       status: settlement.status,
       population: settlement.population,
       stability: settlement.stability,
+      developmentStage: settlement.developmentStage,
+      developmentStageChangedTick: settlement.developmentStageChangedTick,
+      developmentStageProvenance: settlement.developmentStageProvenance,
       reserves: Object.freeze({ ...settlement.reserves }),
       territoryHistory: Object.freeze(
         stableIdSorted(settlement.territoryHistory).map((history) => Object.freeze({ ...history })),

@@ -77,10 +77,9 @@ async function loadWorkspace(
     'events' | 'loadSnapshot' | 'performOfflineCatchUp' | 'requestSave'
   >,
 ): Promise<WorkspaceData> {
-  const [loadedSettings, listedSlots, history] = await Promise.all([
+  const [loadedSettings, listedSlots] = await Promise.all([
     runtime.gateway.loadSettings(),
     runtime.gateway.listSaveSlots(),
-    runtime.gateway.listFocusSessions(),
   ]);
   let settings = loadedSettings;
   let slots = listedSlots;
@@ -138,6 +137,7 @@ async function loadWorkspace(
       }
     }
   }
+  const history = await runtime.gateway.listFocusSessions(activeSave);
   return {
     activeSave,
     history,
@@ -392,7 +392,7 @@ function FocusWorkspace({
     async (loadedSave?: LoadedSave): Promise<void> => {
       const [nextSlots, nextHistory] = await Promise.all([
         runtime.gateway.listSaveSlots(),
-        runtime.gateway.listFocusSessions(),
+        runtime.gateway.listFocusSessions(loadedSave ?? activeSaveRef.current),
       ]);
       setSlots(nextSlots);
       setHistory(nextHistory);
@@ -598,7 +598,7 @@ function FocusWorkspace({
       const [loadedSettings, nextSlots, nextHistory] = await Promise.all([
         runtime.gateway.loadSettings(),
         runtime.gateway.listSaveSlots(),
-        runtime.gateway.listFocusSessions(),
+        runtime.gateway.listFocusSessions(loaded),
       ]);
       const nextSettings =
         loadedSettings.activeSlotId === loaded.slotId

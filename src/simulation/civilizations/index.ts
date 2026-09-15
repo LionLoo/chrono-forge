@@ -1,3 +1,4 @@
+import type { CivilizationEventKind } from '../events';
 import { deriveXoshiro128State, Xoshiro128StarStar, type Xoshiro128State } from '../random';
 
 /** M6 is deliberately an annual, world-owned authority. World orchestration owns all patches. */
@@ -19,6 +20,8 @@ export const MAX_PROJECTED_RESIDENCIES = 128;
 const MARKET_RESOURCES = Object.freeze(['food', 'water', 'timber', 'stone', 'metal'] as const);
 
 export type SettlementStatus = 'active' | 'abandoned' | 'conquered';
+export type SettlementDevelopmentStage = 'founding' | 'village' | 'town' | 'city' | 'advanced-city';
+export type SettlementDevelopmentProvenance = 'initial' | 'v11-migration' | 'observed';
 export type CivilizationStatus = 'independent' | 'federated' | 'fragmented' | 'collapsed';
 export type DiplomacyStatus = 'neutral' | 'allied' | 'rival' | 'at-war';
 export type ConflictStatus = 'active' | 'resolved';
@@ -57,6 +60,9 @@ export interface Settlement {
   readonly status: SettlementStatus;
   readonly population: number;
   readonly stability: number;
+  readonly developmentStage: SettlementDevelopmentStage;
+  readonly developmentStageChangedTick: number;
+  readonly developmentStageProvenance: SettlementDevelopmentProvenance;
   readonly reserves: CommunityReserves;
   readonly territoryHistory: readonly TerritoryHistoryRecord[];
   readonly territoryHistorySummaryCount: number;
@@ -154,21 +160,7 @@ export interface CivilizationsInitialization {
 }
 
 export interface CivilizationEventDraft {
-  readonly kind:
-    | 'settlement-founded'
-    | 'route-established'
-    | 'route-disrupted'
-    | 'route-restored'
-    | 'diplomacy-changed'
-    | 'conflict-started'
-    | 'conflict-resolved'
-    | 'refugees-relocated'
-    | 'settlement-restored'
-    | 'settlement-ruined'
-    | 'federation-formed'
-    | 'civilization-fragmented'
-    | 'territory-changed'
-    | 'territory-history-summarized';
+  readonly kind: CivilizationEventKind;
   readonly subjectId: number;
   readonly targetId: number;
   readonly tick: number;
@@ -226,6 +218,13 @@ export interface TerritoryChangeInput {
   readonly nextSettlementId: number;
 }
 
+export interface SettlementDevelopmentInput {
+  readonly settlementId: number;
+  readonly operationalStructures: number;
+  readonly infrastructure: number;
+  readonly knownKnowledgeIds: readonly string[];
+}
+
 export interface ResidencyTransferInput {
   readonly fromSettlementId: number;
   readonly toSettlementId: number;
@@ -249,6 +248,7 @@ export interface CivilizationsContext {
   readonly ruinSettlementIds: readonly number[];
   readonly federationCivilizationIds: readonly number[];
   readonly fragmentationCivilizationIds: readonly number[];
+  readonly settlementDevelopmentInputs: readonly SettlementDevelopmentInput[];
   readonly territoryChanges: readonly TerritoryChangeInput[];
 }
 
@@ -310,6 +310,96 @@ function validateInteger(
 
 function validatePercent(value: number, label: string): void {
   validateInteger(value, label, 0, 100);
+}
+
+const SETTLEMENT_DEVELOPMENT_STAGES = Object.freeze([
+  'founding',
+  'village',
+  'town',
+  'city',
+  'advanced-city',
+] as const satisfies readonly SettlementDevelopmentStage[]);
+
+function settlementDevelopmentRank(stage: SettlementDevelopmentStage): number {
+  return SETTLEMENT_DEVELOPMENT_STAGES.indexOf(stage);
+}
+
+function hasKnowledge(input: SettlementDevelopmentInput, knowledgeId: string): boolean {
+  return input.knownKnowledgeIds.includes(knowledgeId);
+}
+
+function qualifiesForStage(
+  population: number,
+  stability: number,
+  input: SettlementDevelopmentInput,
+  stage: SettlementDevelopmentStage,
+  retain: boolean,
+): boolean {
+  if (stage === 'founding') return true;
+  if (stage === 'village')
+    return (
+      population >= (retain ? 2 : 4) &&
+      stability >= (retain ? 20 : 30) &&
+      (input.operationalStructures >= 1 || input.infrastructure >= (retain ? 4 : 8))
+    );
+  if (stage === 'town')
+    return (
+      population >= (retain ? 6 : 8) &&
+      stability >= (retain ? 30 : 40) &&
+      input.infrastructure >= (retain ? 8 : 12) &&
+      hasKnowledge(input, 'agriculture')
+    );
+  if (stage === 'city')
+    return (
+      population >= (retain ? 12 : 16) &&
+      stability >= (retain ? 40 : 50) &&
+      input.infrastructure >= (retain ? 15 : 20) &&
+      hasKnowledge(input, 'mechanics')
+    );
+  return (
+    population >= (retain ? 18 : 24) &&
+    stability >= (retain ? 45 : 55) &&
+    input.infrastructure >= (retain ? 24 : 30) &&
+    hasKnowledge(input, 'advanced-energy')
+  );
+}
+
+/** Highest stage supported by current factual state, used only for conservative migration. */
+export function deriveSettlementDevelopmentStage(
+  settlement: Pick<Settlement, 'population' | 'stability'>,
+  input: SettlementDevelopmentInput,
+): SettlementDevelopmentStage {
+  for (let rank = SETTLEMENT_DEVELOPMENT_STAGES.length - 1; rank >= 1; rank -= 1) {
+    const stage = SETTLEMENT_DEVELOPMENT_STAGES[rank]!;
+    if (qualifiesForStage(settlement.population, settlement.stability, input, stage, false))
+      return stage;
+  }
+  return 'founding';
+}
+
+function nextObservedDevelopmentStage(
+  settlement: Settlement,
+  input: SettlementDevelopmentInput,
+): SettlementDevelopmentStage {
+  const rank = settlementDevelopmentRank(settlement.developmentStage);
+  const next = SETTLEMENT_DEVELOPMENT_STAGES[rank + 1];
+  if (
+    next !== undefined &&
+    qualifiesForStage(settlement.population, settlement.stability, input, next, false)
+  )
+    return next;
+  if (
+    rank > 0 &&
+    !qualifiesForStage(
+      settlement.population,
+      settlement.stability,
+      input,
+      settlement.developmentStage,
+      true,
+    )
+  )
+    return SETTLEMENT_DEVELOPMENT_STAGES[rank - 1]!;
+  return settlement.developmentStage;
 }
 
 function validateName(value: string, label: string): void {
@@ -475,6 +565,9 @@ function createBaseline(
         status: 'active',
         population: input.personIds.length,
         stability: input.stability,
+        developmentStage: 'founding',
+        developmentStageChangedTick: tick,
+        developmentStageProvenance: 'initial',
         reserves: freezeReserves(input.reserves),
         territoryHistory: Object.freeze([]),
         territoryHistorySummaryCount: 0,
@@ -655,7 +748,15 @@ function applyMarketExchange(settlements: Settlement[], route: TradeRoute): numb
 }
 
 function validateContext(state: CivilizationsState, context: CivilizationsContext): void {
-  if (!Number.isSafeInteger(context.tick) || context.tick <= state.tick)
+  const latestDevelopmentTick = state.settlements.reduce(
+    (latest, settlement) => Math.max(latest, settlement.developmentStageChangedTick),
+    state.tick,
+  );
+  if (
+    !Number.isSafeInteger(context.tick) ||
+    context.tick <= state.tick ||
+    context.tick < latestDevelopmentTick
+  )
     throw new Error('Civilization annual context tick must advance state.');
   validateInteger(context.yearTicks, 'Civilization annual year ticks', 1);
   freezeReserves(context.foundingReserveAvailable);
@@ -666,6 +767,7 @@ function validateContext(state: CivilizationsState, context: CivilizationsContex
     context.conflictCandidates.length > MAX_ACTIVE_CONFLICTS ||
     context.residencyTransfers.length > MAX_MIGRATION_CHOICES ||
     (context.recoveredSettlementIds?.length ?? 0) > MAX_ACTIVE_SETTLEMENTS ||
+    context.settlementDevelopmentInputs.length > MAX_ACTIVE_SETTLEMENTS ||
     context.territoryChanges.length > MAX_TERRITORY_HISTORY_PER_SETTLEMENT
   )
     throw new Error('Civilization annual candidate cap exceeded.');
@@ -696,6 +798,24 @@ function validateContext(state: CivilizationsState, context: CivilizationsContex
     freezeReserves(economy.consumption);
     validateInteger(economy.stabilityDelta, 'Community stability delta', -100, 100);
     validateInteger(economy.populationDelta ?? 0, 'Community population delta', 0, 16);
+  }
+  const developmentSettlementIds = new Set<number>();
+  for (const input of context.settlementDevelopmentInputs) {
+    if (!ids.has(input.settlementId))
+      throw new Error('Settlement development references an unknown settlement.');
+    if (developmentSettlementIds.has(input.settlementId))
+      throw new Error('Settlement development inputs must be unique.');
+    developmentSettlementIds.add(input.settlementId);
+    validateInteger(input.operationalStructures, 'Settlement operational structures', 0, 64);
+    validateInteger(input.infrastructure, 'Settlement infrastructure', 0, 100);
+    if (
+      input.knownKnowledgeIds.length > 64 ||
+      input.knownKnowledgeIds.some(
+        (knowledgeId) =>
+          typeof knowledgeId !== 'string' || knowledgeId.length < 1 || knowledgeId.length > 80,
+      )
+    )
+      throw new Error('Settlement knowledge inputs must be bounded identifiers.');
   }
   for (const candidate of context.routeCandidates) {
     if (!ids.has(candidate.firstSettlementId) || !ids.has(candidate.secondSettlementId))
@@ -877,7 +997,7 @@ export function advanceCivilizations(
         civilization.id,
         context.tick,
         1,
-        `${settlement.name} resumed life under post-conflict rule.`,
+        `${settlement.name} resumed life under post-conflict rule by ${civilization.name}.`,
       ),
     );
     operationCount += 1;
@@ -914,6 +1034,9 @@ export function advanceCivilizations(
       status: 'active',
       population: new Set(founding.personIds).size,
       stability: founding.stability,
+      developmentStage: 'founding',
+      developmentStageChangedTick: context.tick,
+      developmentStageProvenance: 'initial',
       reserves: freezeReserves(founding.reserveTransfer),
       territoryHistory: Object.freeze([]),
       territoryHistorySummaryCount: 0,
@@ -988,7 +1111,7 @@ export function advanceCivilizations(
         civilizationId,
         context.tick,
         founding.siteScore,
-        `${founding.name} was founded.`,
+        `${founding.name} was founded as part of ${founding.civilizationName}.`,
       ),
     );
     operationCount += 1;
@@ -1048,7 +1171,7 @@ export function advanceCivilizations(
             secondSettlementId,
             context.tick,
             Math.abs(candidate.utility),
-            'A trade route was disrupted.',
+            `The trade route between ${settlements.find((settlement) => settlement.id === firstSettlementId)!.name} and ${settlements.find((settlement) => settlement.id === secondSettlementId)!.name} was disrupted at utility ${candidate.utility}.`,
           ),
         );
         operationCount += 1;
@@ -1070,7 +1193,7 @@ export function advanceCivilizations(
             secondSettlementId,
             context.tick,
             candidate.volume,
-            'A trade route resumed.',
+            `The trade route between ${settlements.find((settlement) => settlement.id === firstSettlementId)!.name} and ${settlements.find((settlement) => settlement.id === secondSettlementId)!.name} resumed at volume ${candidate.volume}.`,
           ),
         );
         operationCount += 1;
@@ -1114,7 +1237,7 @@ export function advanceCivilizations(
         secondSettlementId,
         context.tick,
         candidate.volume,
-        'A trade route was established.',
+        `A trade route between ${settlements.find((settlement) => settlement.id === firstSettlementId)!.name} and ${settlements.find((settlement) => settlement.id === secondSettlementId)!.name} opened at volume ${candidate.volume}.`,
       ),
     );
     operationCount += 1;
@@ -1164,7 +1287,7 @@ export function advanceCivilizations(
           secondCivilizationId,
           context.tick,
           Math.abs(candidate.score),
-          'Diplomatic standing changed.',
+          `${civilizations.find((civilization) => civilization.id === firstCivilizationId)!.name} and ${civilizations.find((civilization) => civilization.id === secondCivilizationId)!.name} established ${status} diplomacy at score ${candidate.score}.`,
         ),
       );
       operationCount += 1;
@@ -1183,7 +1306,7 @@ export function advanceCivilizations(
           secondCivilizationId,
           context.tick,
           Math.abs(candidate.score),
-          'Diplomatic standing changed.',
+          `${civilizations.find((civilization) => civilization.id === firstCivilizationId)!.name} and ${civilizations.find((civilization) => civilization.id === secondCivilizationId)!.name} changed to ${status} diplomacy at score ${candidate.score}.`,
         ),
       );
       operationCount += 1;
@@ -1240,7 +1363,7 @@ export function advanceCivilizations(
         candidate.defenderCivilizationId,
         context.tick,
         candidate.pressure,
-        'A conflict began.',
+        `${civilizations.find((civilization) => civilization.id === candidate.attackerCivilizationId)!.name} began a conflict against ${civilizations.find((civilization) => civilization.id === candidate.defenderCivilizationId)!.name} at pressure ${candidate.pressure}.`,
       ),
     );
     operationCount += 1;
@@ -1324,7 +1447,7 @@ export function advanceCivilizations(
         resolution.winnerCivilizationId,
         context.tick,
         conflict.pressure,
-        'A conflict resolved.',
+        `Conflict ${conflict.id} ended with ${civilizations.find((civilization) => civilization.id === resolution.winnerCivilizationId)!.name} prevailing at pressure ${conflict.pressure}.`,
       ),
     );
     operationCount += 1;
@@ -1388,8 +1511,8 @@ export function advanceCivilizations(
         context.tick,
         movedPeople,
         transfer.reason === 'refugee'
-          ? 'People found refuge in another settlement.'
-          : 'People migrated between settlements.',
+          ? `${movedPeople} people left ${from?.name ?? `settlement ${transfer.fromSettlementId}`} and found refuge in ${to?.name ?? `settlement ${transfer.toSettlementId}`}.`
+          : `${movedPeople} people migrated from ${from?.name ?? `settlement ${transfer.fromSettlementId}`} to ${to?.name ?? `settlement ${transfer.toSettlementId}`}.`,
       ),
     );
     operationCount += movedPeople;
@@ -1415,7 +1538,7 @@ export function advanceCivilizations(
         0,
         context.tick,
         1,
-        'A civilization entered a federation.',
+        `${civilization.name} entered a federation.`,
       ),
     );
     operationCount += 1;
@@ -1439,7 +1562,7 @@ export function advanceCivilizations(
         0,
         context.tick,
         1,
-        'A civilization fragmented.',
+        `${civilization.name} fragmented after its recorded political pressures.`,
       ),
     );
     operationCount += 1;
@@ -1549,7 +1672,9 @@ export function advanceCivilizations(
           change.nextSettlementId,
           context.tick,
           change.tileIndex,
-          'Territory changed hands.',
+          change.nextSettlementId === 0
+            ? `${settlement.name} released tile ${change.tileIndex} to unclaimed land.`
+            : `${settlement.name} claimed tile ${change.tileIndex}${previousSettlementId === 0 ? ' from unclaimed land' : ` from ${settlements.find((candidate) => candidate.id === previousSettlementId)?.name ?? `settlement ${previousSettlementId}`}`}.`,
         ),
       );
     } else {
@@ -1565,11 +1690,50 @@ export function advanceCivilizations(
           change.nextSettlementId,
           context.tick,
           1,
-          'Additional territory changes were summarized.',
+          change.nextSettlementId === 0
+            ? `${settlement.name} summarized one additional release of territory to unclaimed land.`
+            : `${settlement.name} summarized one additional territory change involving ${settlements.find((candidate) => candidate.id === change.nextSettlementId)?.name ?? `settlement ${change.nextSettlementId}`}.`,
         ),
       );
     }
     operationCount += 1;
+  }
+
+  // 8. Settlement development changes at most one adjacent stage per annual pulse.
+  const developmentBySettlement = new Map(
+    context.settlementDevelopmentInputs.map((input) => [input.settlementId, input] as const),
+  );
+  for (const settlement of [...settlements].sort((left, right) => left.id - right.id)) {
+    if (settlement.status !== 'active') continue;
+    const input = developmentBySettlement.get(settlement.id);
+    if (input === undefined) continue;
+    operationCount += 1;
+    const nextStage = nextObservedDevelopmentStage(settlement, input);
+    if (nextStage === settlement.developmentStage || events.length >= MAX_CIVILIZATION_EVENTS)
+      continue;
+    const developed =
+      settlementDevelopmentRank(nextStage) > settlementDevelopmentRank(settlement.developmentStage);
+    const settlementIndex = settlements.findIndex((candidate) => candidate.id === settlement.id);
+    const stageLabel = nextStage.replace('-', ' ');
+    settlements[settlementIndex] = frozen({
+      ...settlement,
+      developmentStage: nextStage,
+      developmentStageChangedTick: context.tick,
+      developmentStageProvenance: 'observed',
+    });
+    appendEvent(
+      events,
+      event(
+        'settlement-stage-changed',
+        settlement.id,
+        settlement.civilizationId,
+        context.tick,
+        settlementDevelopmentRank(nextStage),
+        developed
+          ? `${settlement.name} of ${civilizations.find((civilization) => civilization.id === settlement.civilizationId)!.name} developed into ${nextStage === 'advanced-city' ? 'an' : 'a'} ${stageLabel}.`
+          : `${settlement.name} of ${civilizations.find((civilization) => civilization.id === settlement.civilizationId)!.name} contracted to ${stageLabel} status.`,
+      ),
+    );
   }
 
   // One deterministic draw keeps the isolated persisted stream active without influencing another authority.
@@ -1729,6 +1893,22 @@ export function assertCivilizationsInvariants(state: CivilizationsState): void {
     );
     validateInteger(settlement.population, 'Settlement population');
     validatePercent(settlement.stability, 'Settlement stability');
+    if (!SETTLEMENT_DEVELOPMENT_STAGES.includes(settlement.developmentStage))
+      throw new Error('Settlement development stage is invalid.');
+    validateInteger(
+      settlement.developmentStageChangedTick,
+      'Settlement development changed tick',
+      settlement.foundedTick,
+    );
+    if (
+      !(['initial', 'v11-migration', 'observed'] as const).includes(
+        settlement.developmentStageProvenance,
+      ) ||
+      (settlement.developmentStageProvenance === 'initial' &&
+        (settlement.developmentStage !== 'founding' ||
+          settlement.developmentStageChangedTick !== settlement.foundedTick))
+    )
+      throw new Error('Settlement development provenance is invalid.');
     freezeReserves(settlement.reserves);
     if (settlement.territoryHistory.length > MAX_TERRITORY_HISTORY_PER_SETTLEMENT)
       throw new Error('Settlement territory history exceeds its cap.');
@@ -1890,9 +2070,23 @@ export function civilizationsDto(state: CivilizationsState): Readonly<Record<str
     routes: state.routes.map((route) => ({ ...route })),
     ruins: state.ruins.map((ruin) => ({ ...ruin })),
     settlements: state.settlements.map((settlement) => ({
-      ...settlement,
+      id: settlement.id,
+      civilizationId: settlement.civilizationId,
+      name: settlement.name,
+      cultureId: settlement.cultureId,
+      centerTileIndex: settlement.centerTileIndex,
+      status: settlement.status,
+      population: settlement.population,
+      stability: settlement.stability,
+      developmentStage: settlement.developmentStage,
+      developmentStageChangedTick: settlement.developmentStageChangedTick,
+      developmentStageProvenance: settlement.developmentStageProvenance,
       reserves: { ...settlement.reserves },
       territoryHistory: settlement.territoryHistory.map((history) => ({ ...history })),
+      territoryHistorySummaryCount: settlement.territoryHistorySummaryCount,
+      foundedTick: settlement.foundedTick,
+      endedTick: settlement.endedTick,
+      provenance: settlement.provenance,
     })),
     tick: state.tick,
     tileOwners: [...state.tileOwners],

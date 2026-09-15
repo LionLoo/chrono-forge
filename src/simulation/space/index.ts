@@ -1,3 +1,5 @@
+import { CELESTIAL_NAME_STEMS } from '../content';
+import type { SpaceEventKind } from '../events';
 import { deriveXoshiro128State, Xoshiro128StarStar, type Xoshiro128State } from '../random';
 
 /** M9's pure world-owned space authority. World applies every returned patch exactly once. */
@@ -197,6 +199,7 @@ export interface SpaceCivilizationContext {
   readonly energyCapacity: number;
   readonly engineeringCapacity: number;
   readonly interSettlementExchange: number;
+  readonly hasAdvancedSettlement: boolean;
   readonly surfaceReserves: SpaceResourceStock;
 }
 export interface EligibleSpaceResident {
@@ -234,20 +237,7 @@ export interface SpaceSurfaceResourceDelta {
   }>;
 }
 export interface SpaceEventDraft {
-  readonly kind:
-    | 'space-program-advanced'
-    | 'spacecraft-launched'
-    | 'mission-arrived'
-    | 'colony-founded'
-    | 'cargo-departed'
-    | 'cargo-arrived'
-    | 'cargo-lost'
-    | 'communication-delivered'
-    | 'alien-contacted'
-    | 'space-relation-changed'
-    | 'colony-abandoned'
-    | 'colony-population-grown'
-    | 'colony-diverged';
+  readonly kind: SpaceEventKind;
   readonly subjectKind: SpaceReferentKind;
   readonly subjectId: number;
   readonly targetKind: SpaceReferentKind;
@@ -409,7 +399,8 @@ function nextStage(
     has(context, 'spaceflight') &&
     civ.energyCapacity >= 50 &&
     civ.engineeringCapacity >= 50 &&
-    civ.interSettlementExchange >= 20
+    civ.interSettlementExchange >= 20 &&
+    civ.hasAdvancedSettlement
   )
     return 'spaceflight';
   return stage;
@@ -457,6 +448,32 @@ function completeStock(): SpaceResourceStock {
   return zero();
 }
 
+function celestialName(stem: string, kind: CelestialBody['kind']): string {
+  const suffix =
+    kind === 'home' ? 'Hearth' : kind === 'planet' ? 'Reach' : kind === 'moon' ? 'Moon' : 'Drift';
+  return `${stem} ${suffix}`;
+}
+
+/**
+ * Stable release name for a generated body. This is exported so snapshot
+ * migrations can replace M9's exact `Body-N` placeholders without touching
+ * any physical, historical, or RNG authority.
+ */
+export function generatedCelestialName(
+  seed: Xoshiro128State,
+  bodyId: number,
+  kind: CelestialBody['kind'],
+): string {
+  integer(bodyId, 'Celestial body id');
+  if (bodyId < 1) throw new Error('Celestial body id must be positive.');
+  const naming = new Xoshiro128StarStar(deriveXoshiro128State(seed, 'm10-body-names'));
+  const firstNameIndex = naming.nextInt(CELESTIAL_NAME_STEMS.length);
+  return celestialName(
+    CELESTIAL_NAME_STEMS[(firstNameIndex + bodyId - 1) % CELESTIAL_NAME_STEMS.length]!,
+    kind,
+  );
+}
+
 /** Creation has no historical effect: every body, deposit, and alien is immutable/uncontacted. */
 export function createInitialSpace(seed: Xoshiro128State, tick: number): SpaceState {
   integer(tick, 'Space tick');
@@ -466,7 +483,7 @@ export function createInitialSpace(seed: Xoshiro128State, tick: number): SpaceSt
     frozen({
       id: 1,
       kind: 'home',
-      name: 'Body-1',
+      name: generatedCelestialName(seed, 1, 'home'),
       distance: 0,
       habitable: true,
       originalDeposit: frozen({ food: 0, water: 0, timber: 0, stone: 100, metal: 100 }),
@@ -474,6 +491,7 @@ export function createInitialSpace(seed: Xoshiro128State, tick: number): SpaceSt
     }),
   ];
   for (let id = 2; id <= count; id += 1) {
+    const kind = id % 3 === 0 ? 'asteroid' : id % 2 === 0 ? 'planet' : 'moon';
     const deposit = frozen({
       food: 0,
       water: 10 + system.nextInt(30),
@@ -484,8 +502,8 @@ export function createInitialSpace(seed: Xoshiro128State, tick: number): SpaceSt
     bodies.push(
       frozen({
         id,
-        kind: id % 3 === 0 ? 'asteroid' : id % 2 === 0 ? 'planet' : 'moon',
-        name: `Body-${id}`,
+        kind,
+        name: generatedCelestialName(seed, id, kind),
         distance: 2 + id * 3 + system.nextInt(5),
         habitable: system.nextInt(3) !== 0,
         originalDeposit: deposit,
@@ -617,6 +635,8 @@ export function advanceSpace(state: SpaceState, context: SpaceContext): SpaceAdv
     integer(civ.energyCapacity, 'Energy capacity');
     integer(civ.engineeringCapacity, 'Engineering capacity');
     integer(civ.interSettlementExchange, 'Inter-settlement exchange');
+    if (typeof civ.hasAdvancedSettlement !== 'boolean')
+      throw new Error('Advanced settlement context must be boolean.');
     stock(civ.surfaceReserves);
   }
   for (const [index, owner] of surfaceSettlementOwners.entries()) {
@@ -667,6 +687,14 @@ export function advanceSpace(state: SpaceState, context: SpaceContext): SpaceAdv
   const programRng = new Xoshiro128StarStar(state.programRng);
   const missionRng = new Xoshiro128StarStar(state.missionRng);
   const contactRng = new Xoshiro128StarStar(state.contactRng);
+  const bodyLabel = (bodyId: number): string =>
+    state.bodies.find((body) => body.id === bodyId)?.name ?? `body ${bodyId}`;
+  const endpointLabel = (endpoint: CargoEndpoint): string =>
+    endpoint.kind === 'settlement'
+      ? `settlement ${endpoint.settlementId}`
+      : endpoint.kind === 'colony'
+        ? `colony ${endpoint.colonyId}`
+        : `alien civilization ${endpoint.alienId}`;
   const surfaceOwnerMatches = (endpoint: CargoEndpoint): boolean =>
     endpoint.kind !== 'settlement' ||
     surfaceSettlementOwners.some(
@@ -737,7 +765,7 @@ export function advanceSpace(state: SpaceState, context: SpaceContext): SpaceAdv
         civ.id,
         context.tick,
         1,
-        `Program reached ${stage}.`,
+        `Program ${program.id} for civilization ${civ.id} reached ${stage.replaceAll('-', ' ')}.`,
       ),
     );
     operations += 1;
@@ -796,7 +824,7 @@ export function advanceSpace(state: SpaceState, context: SpaceContext): SpaceAdv
           mission.destinationBodyId,
           context.tick,
           mission.manifestPassengerIds.length,
-          'Mission arrived on schedule.',
+          `Spacecraft ${mission.spacecraftId} completed its ${mission.kind} mission at ${bodyLabel(mission.destinationBodyId)} on schedule.`,
         ),
       );
       if (mission.kind === 'colony') {
@@ -823,7 +851,7 @@ export function advanceSpace(state: SpaceState, context: SpaceContext): SpaceAdv
             colony.bodyId,
             context.tick,
             colony.residentIds.length,
-            'A colony was founded from exact ordinary residents.',
+            `Colony ${colony.id} was founded on ${bodyLabel(colony.bodyId)} by ${colony.residentIds.length} exact ordinary residents.`,
           ),
         );
         const alien = aliens.find((item) => item.homeBodyId === colony.bodyId);
@@ -839,7 +867,7 @@ export function advanceSpace(state: SpaceState, context: SpaceContext): SpaceAdv
               colony.id,
               context.tick,
               1,
-              'Generated alien intelligence was contacted.',
+              `Alien civilization ${alien.id} from ${bodyLabel(alien.homeBodyId)} contacted colony ${colony.id}.`,
             ),
           );
           const civ = civilizations.find((item) => item.id === colony.civilizationId);
@@ -867,7 +895,7 @@ export function advanceSpace(state: SpaceState, context: SpaceContext): SpaceAdv
                 civ.id,
                 context.tick,
                 relation.tension,
-                `Relation became ${status}.`,
+                `Alien civilization ${alien.id} and civilization ${civ.id} established a ${status} relation at tension ${relation.tension}.`,
               ),
             );
           }
@@ -951,7 +979,9 @@ export function advanceSpace(state: SpaceState, context: SpaceContext): SpaceAdv
               : transfer.destination.alienId,
           context.tick,
           transfer.manifestCargo.metal,
-          delivered ? 'Cargo arrived.' : 'Cargo was lost.',
+          delivered
+            ? `Cargo from ${endpointLabel(transfer.origin)} reached ${endpointLabel(transfer.destination)} with ${transfer.manifestCargo.metal} metal.`
+            : `Cargo from ${endpointLabel(transfer.origin)} bound for ${endpointLabel(transfer.destination)} was lost with ${transfer.manifestCargo.metal} metal.`,
         ),
       );
       cargoArrivals += 1;
@@ -970,7 +1000,7 @@ export function advanceSpace(state: SpaceState, context: SpaceContext): SpaceAdv
           message.destinationBodyId,
           context.tick,
           1,
-          'Delayed communication delivered.',
+          `A delayed ${message.topic} communication from ${bodyLabel(message.originBodyId)} reached ${bodyLabel(message.destinationBodyId)}.`,
         ),
       );
       if (
@@ -1115,7 +1145,7 @@ export function advanceSpace(state: SpaceState, context: SpaceContext): SpaceAdv
         destination.id,
         context.tick,
         passengerIds.length,
-        'Contextual spacecraft launch departed.',
+        `Spacecraft ${ship.id} launched from ${bodyLabel(1)} toward ${bodyLabel(destination.id)} with ${passengerIds.length} passengers.`,
       ),
     );
     launches += 1;
@@ -1195,7 +1225,7 @@ export function advanceSpace(state: SpaceState, context: SpaceContext): SpaceAdv
             : destination.alienId,
         context.tick,
         amount.metal,
-        'Interworld cargo departed.',
+        `Cargo departed ${endpointLabel(origin)} for ${endpointLabel(destination)} with ${amount.metal} metal.`,
       ),
     );
     operations += 1;
@@ -1216,7 +1246,7 @@ export function advanceSpace(state: SpaceState, context: SpaceContext): SpaceAdv
             colony.civilizationId,
             context.tick,
             colony.residentIds.length,
-            'The colony was abandoned after losing active terrestrial support.',
+            `Colony ${colony.id} was abandoned after losing support from civilization ${colony.civilizationId}.`,
           ),
         );
         operations += 1;
@@ -1301,7 +1331,7 @@ export function advanceSpace(state: SpaceState, context: SpaceContext): SpaceAdv
           colony.bodyId,
           context.tick,
           1,
-          'Colony population grew within food and water capacity.',
+          `Colony ${colony.id} on ${bodyLabel(colony.bodyId)} added one resident within its food and water capacity.`,
         ),
       );
       addEvent(
@@ -1313,7 +1343,7 @@ export function advanceSpace(state: SpaceState, context: SpaceContext): SpaceAdv
           colony.bodyId,
           context.tick,
           colonies[index].cultureDivergence,
-          'Colony culture diverged gradually.',
+          `Colony ${colony.id} on ${bodyLabel(colony.bodyId)} reached culture divergence ${colonies[index].cultureDivergence}.`,
         ),
       );
     }
@@ -1368,7 +1398,7 @@ export function advanceSpace(state: SpaceState, context: SpaceContext): SpaceAdv
           civ.id,
           context.tick,
           tension,
-          `Relation became ${status}.`,
+          `Alien civilization ${alien.id} and civilization ${civ.id} changed to a ${status} relation at tension ${tension}.`,
         ),
       );
     const colony = colonies.find(
@@ -1404,7 +1434,7 @@ export function advanceSpace(state: SpaceState, context: SpaceContext): SpaceAdv
           alien.id,
           context.tick,
           1,
-          'Conflict caused a recorded cargo loss.',
+          `Colony ${colony.id} lost one metal cargo unit during conflict with alien civilization ${alien.id}.`,
         ),
       );
     }

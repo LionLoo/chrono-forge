@@ -1,9 +1,15 @@
 import { hashCanonicalJson } from '../canonical';
 import {
+  assertFactualEventSummary,
+  isPlayerVisibleEventKind,
+  type PlayerVisibleEventKind,
+} from '../events';
+import {
   advanceCivilizations,
   assertCivilizationsInvariants,
   civilizationsDto,
   createInitialCivilizations,
+  deriveSettlementDevelopmentStage,
   selectCoMigrationPerson,
   selectConflictTargetCivilization,
   selectPoliticalSupportCivilization,
@@ -13,6 +19,7 @@ import {
   type CivilizationsInitialization,
   type CivilizationsState,
   type CommunityReserves,
+  type SettlementDevelopmentInput,
 } from '../civilizations';
 import {
   advanceDevelopment,
@@ -117,7 +124,7 @@ export interface WorldChunk {
 export interface WorldEvent {
   readonly id: number;
   readonly tick: number;
-  readonly kind: string;
+  readonly kind: PlayerVisibleEventKind;
   readonly summary: string;
   readonly subjectKind: WorldEntityKind;
   readonly subjectId: number;
@@ -129,7 +136,7 @@ export interface WorldEvent {
 }
 
 export interface WorldEventDetails {
-  readonly summary?: string;
+  readonly summary: string;
   readonly subjectKind?: WorldEntityKind;
   readonly subjectId?: number;
   readonly targetKind?: WorldEntityKind;
@@ -257,6 +264,314 @@ function worldReferenceExists(state: WorldState, kind: WorldEntityKind, id: numb
     case 'alien-civilization':
       return state.space.aliens.some((alien) => alien.id === id);
   }
+}
+
+type WorldReferenceLabelIndex = ReadonlyMap<string, readonly string[]>;
+
+function worldReferenceLabelKey(kind: WorldEntityKind, id: number): string {
+  return `${kind}:${id}`;
+}
+
+function createWorldReferenceLabelIndex(state: WorldState): WorldReferenceLabelIndex {
+  const labels = new Map<string, readonly string[]>();
+  const add = (kind: WorldEntityKind, id: number, values: readonly string[]): void => {
+    labels.set(worldReferenceLabelKey(kind, id), Object.freeze([...values]));
+  };
+  for (const person of state.civilization.agents)
+    add('person', person.id, [person.name, `person ${person.id}`]);
+  for (const structure of state.civilization.structures)
+    add('structure', structure.id, [
+      `${structure.kind} ${structure.id}`,
+      `structure ${structure.id}`,
+    ]);
+  for (const household of state.civilization.society.households)
+    add('household', household.id, [`household ${household.id}`]);
+  for (const culture of state.civilization.society.cultures)
+    add('culture', culture.id, [culture.name, `culture ${culture.id}`]);
+  for (const group of state.civilization.society.groups)
+    add('group', group.id, [group.name, `group ${group.id}`]);
+  const institution = state.civilization.society.institution;
+  add('institution', institution.id, [
+    `${institution.kind} ${institution.id}`,
+    `institution ${institution.id}`,
+  ]);
+  for (const settlement of state.civilizations.settlements)
+    add('settlement', settlement.id, [settlement.name, `settlement ${settlement.id}`]);
+  for (const civilization of state.civilizations.civilizations)
+    add('civilization', civilization.id, [civilization.name, `civilization ${civilization.id}`]);
+  for (const route of state.civilizations.routes) add('route', route.id, [`route ${route.id}`]);
+  for (const conflict of state.civilizations.conflicts)
+    add('conflict', conflict.id, [`conflict ${conflict.id}`]);
+  for (const ruin of state.civilizations.ruins) add('ruin', ruin.id, [`ruin ${ruin.id}`]);
+  for (const body of state.space.bodies)
+    add('celestial-body', body.id, [body.name, `body ${body.id}`]);
+  for (const program of state.space.programs)
+    add('space-program', program.id, [`program ${program.id}`]);
+  for (const spacecraft of state.space.spacecraft)
+    add('spacecraft', spacecraft.id, [`spacecraft ${spacecraft.id}`]);
+  for (const colony of state.space.colonies)
+    add('space-colony', colony.id, [`colony ${colony.id}`]);
+  for (const alien of state.space.aliens)
+    add('alien-civilization', alien.id, [`alien civilization ${alien.id}`]);
+  return labels;
+}
+
+function worldReferenceLabels(
+  state: WorldState,
+  kind: WorldEntityKind,
+  id: number,
+  index?: WorldReferenceLabelIndex,
+): readonly string[] {
+  if (index !== undefined) return index.get(worldReferenceLabelKey(kind, id)) ?? Object.freeze([]);
+  switch (kind) {
+    case 'world':
+      return Object.freeze([]);
+    case 'person': {
+      const person = state.civilization.agents.find((agent) => agent.id === id);
+      return person === undefined
+        ? Object.freeze([])
+        : Object.freeze([person.name, `person ${id}`]);
+    }
+    case 'structure': {
+      const structure = state.civilization.structures.find((candidate) => candidate.id === id);
+      return structure === undefined
+        ? Object.freeze([])
+        : Object.freeze([`${structure.kind} ${id}`, `structure ${id}`]);
+    }
+    case 'household':
+      return Object.freeze([`household ${id}`]);
+    case 'culture': {
+      const culture = state.civilization.society.cultures.find((candidate) => candidate.id === id);
+      return culture === undefined
+        ? Object.freeze([])
+        : Object.freeze([culture.name, `culture ${id}`]);
+    }
+    case 'group': {
+      const group = state.civilization.society.groups.find((candidate) => candidate.id === id);
+      return group === undefined ? Object.freeze([]) : Object.freeze([group.name, `group ${id}`]);
+    }
+    case 'institution': {
+      const institution = state.civilization.society.institution;
+      return institution.id === id
+        ? Object.freeze([`${institution.kind} ${id}`, `institution ${id}`])
+        : Object.freeze([]);
+    }
+    case 'settlement': {
+      const settlement = state.civilizations.settlements.find((candidate) => candidate.id === id);
+      return settlement === undefined
+        ? Object.freeze([])
+        : Object.freeze([settlement.name, `settlement ${id}`]);
+    }
+    case 'civilization': {
+      const civilization = state.civilizations.civilizations.find(
+        (candidate) => candidate.id === id,
+      );
+      return civilization === undefined
+        ? Object.freeze([])
+        : Object.freeze([civilization.name, `civilization ${id}`]);
+    }
+    case 'route':
+      return Object.freeze([`route ${id}`]);
+    case 'conflict':
+      return Object.freeze([`conflict ${id}`]);
+    case 'ruin':
+      return Object.freeze([`ruin ${id}`]);
+    case 'celestial-body': {
+      const body = state.space.bodies.find((candidate) => candidate.id === id);
+      return body === undefined ? Object.freeze([]) : Object.freeze([body.name, `body ${id}`]);
+    }
+    case 'space-program':
+      return Object.freeze([`program ${id}`]);
+    case 'spacecraft':
+      return Object.freeze([`spacecraft ${id}`]);
+    case 'space-colony':
+      return Object.freeze([`colony ${id}`]);
+    case 'alien-civilization':
+      return Object.freeze([`alien civilization ${id}`]);
+  }
+}
+
+function assertSummaryNamesReference(
+  state: WorldState,
+  kind: WorldEntityKind,
+  id: number,
+  summary: string,
+  role: 'subject' | 'target',
+  index?: WorldReferenceLabelIndex,
+): void {
+  if (kind === 'world') return;
+  const normalized = summary.toLowerCase();
+  const labels = worldReferenceLabels(state, kind, id, index);
+  if (labels.length === 0 || !labels.some((label) => normalized.includes(label.toLowerCase()))) {
+    throw new RangeError(`Factual event summary must identify its ${role}.`);
+  }
+}
+
+function worldEventDescriptionIsValid(
+  state: WorldState,
+  event: WorldEvent,
+  index?: WorldReferenceLabelIndex,
+): boolean {
+  try {
+    if (!isPlayerVisibleEventKind(event.kind)) return false;
+    assertFactualEventSummary(event.summary);
+    assertSummaryNamesReference(
+      state,
+      event.subjectKind,
+      event.subjectId,
+      event.summary,
+      'subject',
+      index,
+    );
+    assertSummaryNamesReference(
+      state,
+      event.targetKind,
+      event.targetId,
+      event.summary,
+      'target',
+      index,
+    );
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/** Rejects current-format event prose that is generic, placeholder-bearing, or omits typed participants. */
+export function assertWorldEventDescriptions(state: WorldState): void {
+  const index = createWorldReferenceLabelIndex(state);
+  for (const event of state.eventLog) {
+    if (!worldEventDescriptionIsValid(state, event, index)) {
+      throw new Error(`World event ${event.id} has invalid factual description copy.`);
+    }
+  }
+}
+
+function replaceLegacyCelestialLabels(state: WorldState, summary: string): string {
+  return summary.replace(/\bBody-(\d+)\b/g, (placeholder, idText: string) => {
+    const id = Number(idText);
+    return state.space.bodies.find((body) => body.id === id)?.name ?? placeholder;
+  });
+}
+
+function eventReferenceLabel(
+  state: WorldState,
+  kind: WorldEntityKind,
+  id: number,
+  compact = false,
+  index?: WorldReferenceLabelIndex,
+): string {
+  if (kind === 'world') return 'the world';
+  const labels = worldReferenceLabels(state, kind, id, index);
+  if (labels.length === 0) return `${kind.replaceAll('-', ' ')} ${id}`;
+  return labels[compact ? labels.length - 1 : 0]!;
+}
+
+function upgradedLegacyEventSummary(
+  state: WorldState,
+  event: WorldEvent,
+  index: WorldReferenceLabelIndex,
+): string {
+  const replaced = replaceLegacyCelestialLabels(state, event.summary);
+  const replacedEvent = Object.freeze({ ...event, summary: replaced });
+  if (worldEventDescriptionIsValid(state, replacedEvent, index)) return replaced;
+
+  const participantLabels = [
+    ...(event.subjectKind === 'world'
+      ? []
+      : [eventReferenceLabel(state, event.subjectKind, event.subjectId, false, index)]),
+    ...(event.targetKind === 'world'
+      ? []
+      : [eventReferenceLabel(state, event.targetKind, event.targetId, false, index)]),
+  ].filter((label, index, labels) => labels.indexOf(label) === index);
+  const participants =
+    participantLabels.length === 0
+      ? `The event recorded amount ${event.amount}.`
+      : `It involved ${participantLabels.join(' and ')} with recorded amount ${event.amount}.`;
+  const contextual = `At tick ${event.tick}: ${replaced} ${participants}`;
+  const contextualEvent = Object.freeze({ ...event, summary: contextual });
+  if (contextual.length <= 160 && worldEventDescriptionIsValid(state, contextualEvent, index)) {
+    return contextual;
+  }
+
+  const compactLabels = [
+    ...(event.subjectKind === 'world'
+      ? []
+      : [eventReferenceLabel(state, event.subjectKind, event.subjectId, true, index)]),
+    ...(event.targetKind === 'world'
+      ? []
+      : [eventReferenceLabel(state, event.targetKind, event.targetId, true, index)]),
+  ].filter((label, index, labels) => labels.indexOf(label) === index);
+  const eventLabel = event.kind.replaceAll('-', ' ');
+  const fallback =
+    compactLabels.length === 0
+      ? `At tick ${event.tick}, ${eventLabel} was recorded for the world with amount ${event.amount}.`
+      : `At tick ${event.tick}, ${eventLabel} involved ${compactLabels.join(' and ')} with recorded amount ${event.amount}.`;
+  const fallbackEvent = Object.freeze({ ...event, summary: fallback });
+  if (!worldEventDescriptionIsValid(state, fallbackEvent, index)) {
+    throw new Error(`World event ${event.id} could not be upgraded to factual description copy.`);
+  }
+  return fallback;
+}
+
+/** Upgrades legacy display copy without changing event identity, references, ticks, or amounts. */
+export function upgradeLegacyWorldEventDescriptions(state: WorldState): WorldState {
+  const index = createWorldReferenceLabelIndex(state);
+  const summariesByEventId = new Map<number, string>();
+  const eventLog = Object.freeze(
+    state.eventLog.map((event) => {
+      const summary = upgradedLegacyEventSummary(state, event, index);
+      summariesByEventId.set(event.id, summary);
+      return summary === event.summary ? event : Object.freeze({ ...event, summary });
+    }),
+  );
+  const society = state.civilization.society;
+  const pendingBiographyFacts = Object.freeze(
+    society.pendingBiographyFacts.map((fact) => {
+      const summary = upgradedLegacyEventSummary(
+        state,
+        Object.freeze({
+          id: 1,
+          tick: state.tick,
+          kind: fact.kind,
+          summary: fact.summary,
+          subjectKind: fact.source.kind,
+          subjectId: fact.source.id,
+          targetKind: fact.target.kind,
+          targetId: fact.target.id,
+          tileIndex: -1,
+          amount: 0,
+        }),
+        index,
+      );
+      return summary === fact.summary ? fact : Object.freeze({ ...fact, summary });
+    }),
+  );
+  const agents = Object.freeze(
+    state.civilization.agents.map((agent) =>
+      Object.freeze({
+        ...agent,
+        memories: Object.freeze(
+          agent.memories.map((memory) => {
+            const summary = summariesByEventId.get(memory.eventId) ?? memory.summary;
+            return summary === memory.summary ? memory : Object.freeze({ ...memory, summary });
+          }),
+        ),
+      }),
+    ),
+  );
+  const upgraded = Object.freeze({
+    ...state,
+    eventLog,
+    civilization: Object.freeze({
+      ...state.civilization,
+      agents,
+      society: Object.freeze({ ...society, pendingBiographyFacts }),
+    }),
+  });
+  assertWorldInvariants(upgraded);
+  assertWorldEventDescriptions(upgraded);
+  return upgraded;
 }
 
 export const DEFAULT_WORLD_CONFIG: WorldConfig = Object.freeze({
@@ -1085,23 +1400,23 @@ function developmentContext(state: WorldState, tick: number): DevelopmentContext
 }
 
 function developmentSummary(event: DevelopmentEvent, development: DevelopmentState): string {
+  const label = (value: string): string => value.replaceAll('-', ' ');
   if (event.kind === 'knowledge-discovered')
-    return `${event.knowledgeId ?? 'Knowledge'} was discovered through contextual experimentation.`;
+    return `${label(event.knowledgeId!)} was discovered through contextual experimentation at progress ${event.amount}.`;
   if (event.kind === 'knowledge-recovered')
-    return `${event.knowledgeId ?? 'Knowledge'} was recovered through renewed practice.`;
+    return `${label(event.knowledgeId!)} was recovered through renewed practice at progress ${event.amount}.`;
   if (event.kind === 'knowledge-lost')
-    return `${event.knowledgeId ?? 'Knowledge'} was lost during social or resource collapse.`;
+    return `${label(event.knowledgeId!)} was lost during social or resource collapse from progress ${event.amount}.`;
   if (event.kind.endsWith('-intervened'))
-    return `A ${event.kind.slice(0, -'-intervened'.length)} intervention altered conditions near tile ${event.targetTileIndex ?? -1}.`;
+    return `A ${label(event.kind.slice(0, -'-intervened'.length))} intervention of intensity ${event.amount} altered modeled conditions near tile ${event.targetTileIndex!}.`;
   if (event.kind.endsWith('-started')) {
     const crisis = development.activeCrises.find((candidate) => candidate.id === event.crisisId);
-    return crisis === undefined
-      ? `${event.kind.slice(0, -'-started'.length)} conditions became critical.`
-      : `A ${crisis.kind} began after ${crisis.triggerCondition} reached ${crisis.triggerValue}.`;
+    if (crisis === undefined) throw new Error('Started development event lost its crisis source.');
+    return `A ${label(crisis.kind)} crisis ${crisis.id} began after ${label(crisis.triggerCondition)} reached ${crisis.triggerValue}, with severity ${crisis.severity}.`;
   }
   if (event.kind.endsWith('-recovered'))
-    return `The settlement recovered autonomously from the ${event.kind.slice(0, -'-recovered'.length)}.`;
-  return `Development conditions changed through ${event.kind}.`;
+    return `The settlement recovered autonomously from the ${label(event.kind.slice(0, -'-recovered'.length))} crisis after recorded severity ${event.amount}.`;
+  throw new Error(`Development event ${event.kind} lacks factual copy.`);
 }
 
 function crisisKindsStarted(
@@ -1293,7 +1608,7 @@ function applyDevelopmentResult(
         kind: 'person-died',
         source: Object.freeze({ kind: 'person' as const, id: person.id }),
         target: Object.freeze({ kind: 'household' as const, id: person.householdId }),
-        summary: `${person.name} died during modeled crisis conditions.`,
+        summary: `${person.name} died during modeled crisis conditions in household ${person.householdId}.`,
       }),
     );
   const households = Object.freeze(
@@ -1423,7 +1738,7 @@ function applyDevelopmentResult(
   }
   for (const person of crisisPeople.filter((candidate) => killedIds.has(candidate.id))) {
     next = appendWorldEvent(next, 'person-died', tick, {
-      summary: `${person.name} died during modeled crisis conditions.`,
+      summary: `${person.name} died during modeled crisis conditions in household ${person.householdId}.`,
       subjectKind: 'person',
       subjectId: person.id,
       targetKind: 'household',
@@ -1659,6 +1974,86 @@ function civilizationMaterialStrength(state: WorldState, civilizationId: number)
         settlement.reserves.metal,
       0,
     );
+}
+
+/** Factual, camera-independent inputs used by annual development and legacy migration. */
+export function settlementDevelopmentInputsForWorld(
+  state: WorldState,
+): readonly SettlementDevelopmentInput[] {
+  const primarySettlementId = state.civilizations.settlements[0]?.id ?? 0;
+  const knownKnowledgeIds = Object.freeze(
+    state.development.knowledge
+      .filter((knowledge) => knowledge.status === 'known')
+      .map((knowledge) => knowledge.id)
+      .sort(),
+  );
+  const operationalPrimaryStructures = state.civilization.structures.filter(
+    (structure) => structure.status === 'operational',
+  ).length;
+  const activeRoutes = state.civilizations.routes.filter((route) => route.status === 'active');
+  const ownedTileCounts = new Map<number, number>();
+  for (const ownerId of state.civilizations.tileOwners)
+    if (ownerId !== 0) ownedTileCounts.set(ownerId, (ownedTileCounts.get(ownerId) ?? 0) + 1);
+  return Object.freeze(
+    [...state.civilizations.settlements]
+      .sort((left, right) => left.id - right.id)
+      .map((settlement) => {
+        const routes = activeRoutes.filter(
+          (route) =>
+            route.firstSettlementId === settlement.id || route.secondSettlementId === settlement.id,
+        );
+        const routeVolume = routes.reduce((total, route) => total + route.volume, 0);
+        const ownedTiles = ownedTileCounts.get(settlement.id) ?? 0;
+        const memberSettlementCount =
+          state.civilizations.civilizations.find(
+            (civilization) => civilization.id === settlement.civilizationId,
+          )?.memberSettlementIds.length ?? 0;
+        const operationalStructures =
+          settlement.id === primarySettlementId ? operationalPrimaryStructures : 0;
+        const infrastructure = Math.min(
+          100,
+          operationalStructures * 12 +
+            routes.length * 8 +
+            Math.min(20, Math.trunc(routeVolume / 2)) +
+            Math.min(10, ownedTiles * 2) +
+            Math.min(12, memberSettlementCount * 4),
+        );
+        return Object.freeze({
+          settlementId: settlement.id,
+          operationalStructures,
+          infrastructure,
+          knownKnowledgeIds,
+        });
+      }),
+  );
+}
+
+/** Adds current stage facts to a pre-v12 world without inventing transition history. */
+export function upgradeSettlementDevelopment(state: WorldState): WorldState {
+  const inputs = new Map(
+    settlementDevelopmentInputsForWorld(state).map((input) => [input.settlementId, input] as const),
+  );
+  const next = Object.freeze({
+    ...state,
+    civilizations: Object.freeze({
+      ...state.civilizations,
+      settlements: Object.freeze(
+        state.civilizations.settlements.map((settlement) => {
+          const input = inputs.get(settlement.id);
+          if (input === undefined)
+            throw new Error('Settlement development migration input missing.');
+          return Object.freeze({
+            ...settlement,
+            developmentStage: deriveSettlementDevelopmentStage(settlement, input),
+            developmentStageChangedTick: state.tick,
+            developmentStageProvenance: 'v11-migration' as const,
+          });
+        }),
+      ),
+    }),
+  });
+  assertWorldInvariants(next);
+  return next;
 }
 
 export function createCivilizationsContext(state: WorldState, tick: number): CivilizationsContext {
@@ -2080,6 +2475,12 @@ export function createCivilizationsContext(state: WorldState, tick: number): Civ
         : [Object.freeze({ tileIndex: settlement.centerTileIndex, nextSettlementId: 0 })];
     }),
   ]);
+  const activeSettlementIds = new Set(activeSettlements.map((settlement) => settlement.id));
+  const settlementDevelopmentInputs = Object.freeze(
+    settlementDevelopmentInputsForWorld(state).filter((input) =>
+      activeSettlementIds.has(input.settlementId),
+    ),
+  );
   return Object.freeze({
     tick,
     yearTicks: state.config.societyYearTicks,
@@ -2095,6 +2496,7 @@ export function createCivilizationsContext(state: WorldState, tick: number): Civ
     ruinSettlementIds,
     federationCivilizationIds,
     fragmentationCivilizationIds,
+    settlementDevelopmentInputs,
     territoryChanges,
   });
 }
@@ -2114,6 +2516,7 @@ function civilizationEventDetails(
   switch (event.kind) {
     case 'settlement-founded':
     case 'settlement-restored':
+    case 'settlement-stage-changed':
       return {
         ...pair('settlement'),
         targetKind: 'civilization',
@@ -2380,6 +2783,9 @@ export function createSpaceContext(state: WorldState, tick: number): SpaceContex
           energyCapacity,
           engineeringCapacity,
           interSettlementExchange: Math.min(100, routeVolume),
+          hasAdvancedSettlement: settlements.some(
+            (settlement) => settlement.developmentStage === 'advanced-city',
+          ),
           surfaceReserves: Object.freeze({ ...launchSettlement.reserves }),
         }),
       ];
@@ -2675,12 +3081,12 @@ export function stepWorld(state: WorldState, ticks = 1): WorldState {
 /** Appends one factual event with the next stable id to an immutable world snapshot. */
 export function appendWorldEvent(
   state: WorldState,
-  kind: string,
-  eventTick = state.tick,
-  details: WorldEventDetails = {},
+  kind: PlayerVisibleEventKind,
+  eventTick: number,
+  details: WorldEventDetails,
 ): WorldState {
-  if (kind.length === 0 || kind.length > 64) {
-    throw new RangeError('World event kind must contain 1 through 64 characters.');
+  if (!isPlayerVisibleEventKind(kind)) {
+    throw new RangeError('World event kind must be part of the player-visible factual catalogue.');
   }
   if (
     !Number.isSafeInteger(eventTick) ||
@@ -2698,7 +3104,7 @@ export function appendWorldEvent(
   const targetKind = details.targetKind ?? 'world';
   const tileIndex = details.tileIndex ?? -1;
   const amount = details.amount ?? 0;
-  const summary = details.summary ?? `Recorded ${kind} at tick ${eventTick}.`;
+  const summary = details.summary;
   if (
     !isEntityKind(subjectKind) ||
     !isEntityKind(targetKind) ||
@@ -2720,6 +3126,9 @@ export function appendWorldEvent(
   ) {
     throw new RangeError('World event references must be canonical non-negative IDs and amounts.');
   }
+  assertFactualEventSummary(summary);
+  assertSummaryNamesReference(state, subjectKind, subjectId, summary, 'subject');
+  assertSummaryNamesReference(state, targetKind, targetId, summary, 'target');
   const event = Object.freeze({
     id: state.nextEventId,
     tick: eventTick,
@@ -2861,7 +3270,7 @@ export function applyRecordedSupplyShortage(state: WorldState, severity: number)
   });
   assertWorldInvariants(shocked);
   let recorded = appendWorldEvent(shocked, 'supply-shortage', state.tick, {
-    summary: `A recorded supply shortage of severity ${severity} depleted settlement stores.`,
+    summary: `A recorded supply shortage of severity ${severity} depleted stores overseen by council ${society.institution.id}.`,
     subjectKind: 'world',
     subjectId: 0,
     targetKind: 'institution',
@@ -2871,7 +3280,7 @@ export function applyRecordedSupplyShortage(state: WorldState, severity: number)
   });
   if (enteredCollapse) {
     recorded = appendWorldEvent(recorded, 'settlement-collapsed', state.tick, {
-      summary: 'The settlement collapsed under a recorded supply shortage.',
+      summary: `Council ${society.institution.id} recorded the settlement's collapse under the supply shortage.`,
       subjectKind: 'institution',
       subjectId: society.institution.id,
       targetKind: 'world',
@@ -3110,6 +3519,7 @@ export function assertWorldInvariants(state: WorldState): void {
     }
   };
   const eventsById = new Map<number, WorldEvent>();
+  const settlementDevelopmentEvents = new Set<string>();
   let previousEventId = 0;
   for (const event of state.eventLog) {
     if (
@@ -3140,7 +3550,33 @@ export function assertWorldInvariants(state: WorldState): void {
     if (!referenceExists(event.targetKind, event.targetId))
       throw new Error('World event target is invalid.');
     eventsById.set(event.id, event);
+    if (
+      event.kind === 'settlement-stage-changed' &&
+      event.subjectKind === 'settlement' &&
+      event.targetKind === 'civilization'
+    )
+      settlementDevelopmentEvents.add(`${event.subjectId}:${event.tick}:${event.amount}`);
     previousEventId = event.id;
+  }
+  const settlementDevelopmentRanks = new Map([
+    ['founding', 0],
+    ['village', 1],
+    ['town', 2],
+    ['city', 3],
+    ['advanced-city', 4],
+  ] as const);
+  for (const settlement of state.civilizations.settlements) {
+    if (settlement.developmentStageChangedTick > state.tick)
+      throw new Error('Settlement development cannot be ahead of world time.');
+    if (
+      settlement.developmentStageProvenance === 'observed' &&
+      !settlementDevelopmentEvents.has(
+        `${settlement.id}:${settlement.developmentStageChangedTick}:${settlementDevelopmentRanks.get(
+          settlement.developmentStage,
+        )}`,
+      )
+    )
+      throw new Error('Observed settlement development must retain its factual source event.');
   }
   for (const arrival of state.civilization.society.interpersonal.childArrivals) {
     const source = eventsById.get(arrival.eligibilityEventId);

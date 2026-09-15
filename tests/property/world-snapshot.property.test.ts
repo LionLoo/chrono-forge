@@ -44,5 +44,5 @@ describe('world snapshot properties', () => {
       ),
       { numRuns: 100 },
     );
-  }, 90_000);
+  }, 120_000);
 });

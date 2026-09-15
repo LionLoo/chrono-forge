@@ -15,3 +15,5 @@ This file is the human-reviewed inventory. Release builds also generate exact de
 | xoshiro128** 1.1 reference | Public domain dedication with unrestricted fallback | Deterministic RNG port; source: https://prng.di.unimi.it/xoshiro128starstar.c |
 
 No copyrighted game assets may be copied into this repository. Every font, image, texture, sound, and generated asset must have its source, license, generation method, and permitted distribution recorded here or in `assets/ATTRIBUTION.md` before it enters a release build.
+
+Project-original artwork and its generated packaging variants are inventoried in `assets/ATTRIBUTION.md` and machine-checked against `assets/attribution.json`.

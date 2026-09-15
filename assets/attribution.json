@@ -1,0 +1,21 @@
+{
+  "schemaVersion": 1,
+  "assetGroups": [
+    {
+      "id": "chrono-forge-brand-mark",
+      "paths": ["public/chrono-forge-mark.svg"],
+      "source": "Original Chrono Forge artwork authored for this repository.",
+      "license": "MIT",
+      "creationMethod": "Hand-authored SVG using geometric vector shapes.",
+      "distribution": "May be bundled and redistributed with Chrono Forge under the repository MIT license."
+    },
+    {
+      "id": "chrono-forge-application-icons",
+      "paths": ["src-tauri/icons/**"],
+      "source": "Derived locally from public/chrono-forge-mark.svg.",
+      "license": "MIT",
+      "creationMethod": "Raster and platform icon variants generated with the Tauri icon tool from the project-original brand mark.",
+      "distribution": "May be bundled and redistributed with Chrono Forge under the repository MIT license."
+    }
+  ]
+}

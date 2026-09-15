@@ -256,13 +256,20 @@ describe('simulation worker runtime', () => {
         .sort((left, right) => left.id - right.id)
         .map((settlement) => settlement.id),
     );
+    expect(
+      frame.civilizations.settlements.every((settlement) =>
+        ['founding', 'village', 'town', 'city', 'advanced-city'].includes(
+          settlement.developmentStage,
+        ),
+      ),
+    ).toBe(true);
   });
 
   it('bounds recent event batches while keeping older history Worker-browsable', () => {
     let world = createInitialWorld([1, 2, 3, 4], { width: 4, height: 3, chunkSize: 2 });
     for (let index = 0; index < MAX_RECENT_WORKER_EVENTS + 12; index += 1) {
-      world = appendWorldEvent(world, 'bounded-history-fixture', world.tick, {
-        summary: `Recorded bounded history fixture ${index + 1}.`,
+      world = appendWorldEvent(world, 'offline-catch-up', world.tick, {
+        summary: `Bounded offline history fixture ${index + 1} reached tick ${world.tick}.`,
       });
     }
     const responses: WorkerToUiMessage[] = [];

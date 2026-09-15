@@ -20,11 +20,21 @@ import { ACCELERATED_YEAR_TICKS } from '../../src/simulation/society';
 
 const seed = [0x1234_5678, 0x9abc_def0, 0x0fed_cba9, 0x8765_4321] as const;
 
+function stripSettlementDevelopment(payload: Record<string, unknown>): void {
+  const civilizations = payload.civilizations as { settlements: Record<string, unknown>[] };
+  for (const settlement of civilizations.settlements) {
+    delete settlement.developmentStage;
+    delete settlement.developmentStageChangedTick;
+    delete settlement.developmentStageProvenance;
+  }
+}
+
 function v7Snapshot(world: ReturnType<typeof createInitialWorld>): string {
   const envelope = JSON.parse(serializeWorldSnapshot(world)) as {
     payload: Record<string, unknown>;
   };
   const payload = { ...envelope.payload };
+  stripSettlementDevelopment(payload);
   delete payload.populationScale;
   delete payload.pathCache;
   delete payload.space;
@@ -44,6 +54,7 @@ function v8Snapshot(world: ReturnType<typeof createInitialWorld>): string {
     payload: Record<string, unknown>;
   };
   const payload = structuredClone(envelope.payload);
+  stripSettlementDevelopment(payload);
   delete payload.space;
   const scale = payload.populationScale as Record<string, unknown>;
   delete scale.nextResidentId;
@@ -377,6 +388,7 @@ describe('M8 world scale authority', () => {
     envelope.engineVersion = 8;
     envelope.formatVersion = 8;
     delete envelope.payload.space;
+    stripSettlementDevelopment(envelope.payload);
     envelope.checksum = hashCanonicalJson(JSON.stringify(envelope.payload));
 
     const migrated = migrateWorldSnapshot(JSON.stringify(envelope));

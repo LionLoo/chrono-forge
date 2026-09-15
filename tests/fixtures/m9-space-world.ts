@@ -4,6 +4,7 @@ import {
   assertWorldInvariants,
   createInitialWorld,
   reconcileWorldPopulationAuthority,
+  upgradeSettlementDevelopment,
   type WorldState,
 } from '../../src/simulation/world';
 
@@ -83,6 +84,9 @@ export function createM9MatureWorld(): WorldState {
         status: 'active' as const,
         population: 10,
         stability: 90,
+        developmentStage: 'founding' as const,
+        developmentStageChangedTick: 0,
+        developmentStageProvenance: 'initial' as const,
         reserves: M9_FIXTURE_RESERVES,
         territoryHistory: Object.freeze([]),
         territoryHistorySummaryCount: 0,
@@ -120,6 +124,7 @@ export function createM9MatureWorld(): WorldState {
     development: matureDevelopment(initial.development),
   });
   const reconciled = reconcileWorldPopulationAuthority(prepared);
-  assertWorldInvariants(reconciled);
-  return reconciled;
+  const mature = upgradeSettlementDevelopment(reconciled);
+  assertWorldInvariants(mature);
+  return mature;
 }

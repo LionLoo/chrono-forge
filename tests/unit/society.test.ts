@@ -9,6 +9,7 @@ import {
   type SocietyPulseInput,
   type SocietyState,
 } from '../../src/simulation/society';
+import type { PlayerVisibleEventKind } from '../../src/simulation/events';
 
 function observations(state?: SocietyState): readonly SocietyPersonObservation[] {
   if (state !== undefined) {
@@ -307,7 +308,7 @@ describe('deterministic living societies core', () => {
     const historical: {
       id: number;
       tick: number;
-      kind: string;
+      kind: PlayerVisibleEventKind;
       subject: { kind: 'person'; id: number };
       target: { kind: 'person'; id: number };
       summary: string;
@@ -319,7 +320,7 @@ describe('deterministic living societies core', () => {
       'family-estranged',
       'relationship-reconciled',
     ] as const;
-    const allKinds = [
+    const allKinds: readonly PlayerVisibleEventKind[] = [
       ...milestoneKinds,
       ...Array.from({ length: 20 }, (_, index) =>
         index % 2 === 0 ? 'resource-shared' : 'knowledge-shared',
