@@ -1,12 +1,12 @@
 # Progress
 
-Last updated: 2026-09-20
+Last updated: 2026-09-21
 
 ## Release state
 
 - Goal: build, verify, package, and privately release the complete Chrono Forge v1.0.0 contract; never stop at a prototype, partial roadmap, or milestone gate.
 - Current milestone: M10.1 focus-session engagement and return value is active on `release/v1-focus-session-engagement` from exact merged M10 main `a96526b0419efb50ab2851739b18f35547e5b3be`.
-- Delivery state: M10 is delivered. PR #14 merged sequentially at `a96526b0419efb50ab2851739b18f35547e5b3be`; merge-head run `35031561510` is fully green. M10.1 is implemented in the current worktree, independently reviewed with no remaining release-relevant finding, and green through the complete local exact-tree gate, including covered, aggregate-long, Rust, browser, native, SBOM, production-boundary, package-build, and real-browser visual checks. Commit/push/PR, hosted final-head CI, and merge remain open. There is no M10.1 acceptance claim yet.
+- Delivery state: M10 is delivered. PR #14 merged sequentially at `a96526b0419efb50ab2851739b18f35547e5b3be`; merge-head run `35031561510` is fully green. M10.1 implementation commit `7ec71e03945f4e1727147f9a24c68b9925f5dca6` is pushed, independently reviewed with no remaining release-relevant finding, and green through the complete local exact-tree gate, including covered, aggregate-long, Rust, browser, native, SBOM, production-boundary, package-build, and real-browser visual checks. PR #15 is open; hosted final-head CI, review-thread inspection, and merge remain open. There is no M10.1 acceptance claim yet.
 - Spending safety: never use an API key, purchased credits, promotional credits, usage-reset credits, or the owner's credit balance. Weekly allowance percentage is informational and never pauses or blocks work.
 - v1.0 completion: not satisfied. M10.1, M10.2, M10.5-M10.9, M11, M12, clean installed-artifact verification, tag, checksums, final artifacts, and private GitHub release remain independently release-blocking.
 
@@ -47,8 +47,8 @@ Last updated: 2026-09-20
 
 ## Active risks and blockers
 
-- M10.1 product code and deterministic evidence are implemented, independently reviewed, and complete through the local exact-tree gate but remain uncommitted. Commit/push/PR, green exact-head aggregate `Required`, resolved review threads, and merge remain mandatory.
-- Live `gh auth status -h github.com` on 2026-09-20 reports the saved `LionLoo` token invalid. Git transport will be tested after the local commit; if it cannot push, reauthentication is the external delivery blocker. Old authentication notes are not being reused.
+- M10.1 product code and deterministic evidence are implemented, independently reviewed, committed at `7ec71e03945f4e1727147f9a24c68b9925f5dca6`, and pushed. PR #15 is open; green exact-head aggregate `Required`, resolved review threads, and merge remain mandatory.
+- Live `gh auth status -h github.com` on 2026-09-21 still reports the saved `LionLoo` CLI token invalid. Host Git transport succeeds, and root used the same host credential non-interactively to open PR #15 without exposing it. The invalid CLI token is no longer a delivery blocker, but GitHub API operations must continue through the stored host credential unless CLI authentication is repaired.
 - The private repository cannot enforce branch protection (HTTP 403), so root must manually enforce independent review plus green aggregate `Required` CI before every merge.
 - M10.1, M10.2, M10.5-M10.9, M11, and M12 remain independently blocking. This checkpoint does not pre-accept focus-session return value, sound/atmosphere, release-quality graphics, bug hunts/stabilization, world lifecycle, release-candidate, or release requirements.
 - Windows signing credentials are not established. Do not invent, purchase, or expose credentials; use the documented private unsigned fallback unless authorized credentials already exist at release time.
@@ -61,4 +61,4 @@ Last updated: 2026-09-20
 
 ## Exact next action
 
-Commit only the reviewed M10.1 paths, test Git transport, push, open one PR, wait for green final-head `Required`, resolve every review thread, and merge sequentially. If both Git transport and GitHub CLI remain unauthenticated, stop after the durable local commit and request GitHub reauthentication.
+Commit and push this PR-state handoff, then wait for green final-head aggregate `Required` on PR #15, inspect and resolve every review thread, and merge sequentially. Verify the exact merge head and merge-head `Required` run before starting M10.2.
