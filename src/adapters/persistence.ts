@@ -5,6 +5,11 @@
  */
 
 import { rehydrateFocusState, type FocusState } from '../focus';
+import {
+  projectFocusCheckpoint,
+  validateFocusSessionReview,
+  type FocusSessionReview,
+} from '../focus/session-review';
 import { deserializeWorldSnapshot } from '../simulation/persistence';
 
 const MAX_SNAPSHOT_BYTES = 50 * 1024 * 1024;
@@ -55,6 +60,8 @@ export interface FocusSession {
   readonly recapEventIds: readonly number[];
   /** Empty only for conservative migration of sessions stored before factual recap copy existed. */
   readonly recapEntries: readonly FocusRecapEntry[];
+  /** Absent only for sessions written before M10.1 factual before/after review existed. */
+  readonly review?: FocusSessionReview | null | undefined;
 }
 
 export interface AppSettings {
@@ -111,6 +118,12 @@ export type TauriInvoke = <Result>(
   command: string,
   arguments_?: Readonly<Record<string, unknown>>,
 ) => Promise<Result>;
+
+interface NativeFocusSessionRecord {
+  readonly session: FocusSession;
+  readonly authoritySession: FocusSession | null;
+  readonly checkpointGeneration: number | null;
+}
 
 async function loadNativeSemanticSave(
   invoke: TauriInvoke,
@@ -199,10 +212,14 @@ export function createTauriPersistenceGateway(invoke: TauriInvoke): PersistenceG
       if (!Array.isArray(result)) {
         throw new TypeError('list_focus_sessions returned a non-array result');
       }
-      const source = recapAuthority(sourceSave);
-      return result
-        .map(parseFocusSession)
-        .map((session) => withVerifiedStoredRecap(session, source));
+      const records = result.map(parseNativeFocusSessionRecord);
+      const authority = focusHistoryAuthority(
+        sourceSave,
+        records.flatMap((record) =>
+          record.authoritySession === null ? [] : [record.authoritySession],
+        ),
+      );
+      return records.map((record) => withVerifiedStoredEvidence(record.session, authority));
     },
     async loadSettings() {
       return parseAppSettings(await invoke<unknown>('load_settings'));
@@ -238,6 +255,7 @@ export function createInMemoryPersistenceGateway(
 ): PersistenceGateway {
   const slots = new Map<string, InMemorySlot>();
   const sessions = new Map<string, FocusSession>();
+  const sessionAuthorities = new Map<string, FocusSession>();
   let settings = { ...DEFAULT_APP_SETTINGS };
 
   const load = (slotId: string): LoadedSave | null => {
@@ -301,6 +319,7 @@ export function createInMemoryPersistenceGateway(
     slots.set(slotId, slot);
     if (focusSession !== null) {
       sessions.set(focusSession.sessionId, cloneFocusSession(focusSession));
+      sessionAuthorities.set(focusSession.sessionId, cloneFocusSession(focusSession));
     }
     return load(slotId) ?? fail('committed in-memory slot was not readable');
   };
@@ -337,6 +356,7 @@ export function createInMemoryPersistenceGateway(
         for (const [sessionId, session] of sessions) {
           if (session.slotId === slotId) {
             sessions.set(sessionId, { ...session, slotId: null });
+            sessionAuthorities.delete(sessionId);
           }
         }
         if (settings.activeSlotId === slotId) {
@@ -386,7 +406,7 @@ export function createInMemoryPersistenceGateway(
     },
     async listFocusSessions(sourceSave) {
       await Promise.resolve();
-      const source = recapAuthority(sourceSave);
+      const authority = focusHistoryAuthority(sourceSave, [...sessionAuthorities.values()]);
       return [...sessions.values()]
         .sort(
           (left, right) =>
@@ -394,7 +414,7 @@ export function createInMemoryPersistenceGateway(
             compareStableText(left.sessionId, right.sessionId),
         )
         .map(cloneFocusSession)
-        .map((session) => withVerifiedStoredRecap(session, source));
+        .map((session) => withVerifiedStoredEvidence(session, authority));
     },
     async loadSettings() {
       await Promise.resolve();
@@ -489,6 +509,11 @@ interface RecapAuthority {
   readonly legacyEventsById: ReadonlyMap<number, RecapSourceEvent> | null;
 }
 
+interface FocusHistoryAuthority {
+  readonly recap: RecapAuthority | null;
+  readonly checkpointsBySessionId: ReadonlyMap<string, FocusSession>;
+}
+
 function readLegacyRecapEvents(snapshot: string): ReadonlyMap<number, RecapSourceEvent> | null {
   const envelope = expectRecord(JSON.parse(snapshot) as unknown, 'world snapshot envelope');
   const formatVersion = expectNonNegativeInteger(
@@ -530,11 +555,38 @@ function createRecapAuthority(
   };
 }
 
-function recapAuthority(sourceSave: LoadedSave | undefined): RecapAuthority | null {
-  if (sourceSave === undefined) return null;
-  validateChecksum(sourceSave.checksum, sourceSave.snapshot);
-  const events = validateSnapshot(sourceSave.snapshot).eventLog;
-  return createRecapAuthority(sourceSave.slotId, sourceSave.snapshot, events);
+function focusHistoryAuthority(
+  sourceSave: LoadedSave | undefined,
+  retainedAuthorities: readonly FocusSession[] = [],
+): FocusHistoryAuthority {
+  if (sourceSave === undefined) {
+    return { recap: null, checkpointsBySessionId: new Map() };
+  }
+  const snapshot = sourceSave.snapshot;
+  validateChecksum(sourceSave.checksum, snapshot);
+  const events = validateSnapshot(snapshot).eventLog;
+  const recap = createRecapAuthority(sourceSave.slotId, snapshot, events);
+  const checkpointsBySessionId = new Map<string, FocusSession>();
+  for (const checkpoint of retainedAuthorities) {
+    validateFocusSession(checkpoint);
+    if (checkpoint.slotId === sourceSave.slotId) {
+      checkpointsBySessionId.set(checkpoint.sessionId, cloneFocusSession(checkpoint));
+    }
+  }
+  if (sourceSave.focusSession !== null) {
+    validateFocusCheckpoint(
+      sourceSave.slotId,
+      snapshot,
+      sourceSave.focusSession,
+      undefined,
+      events,
+    );
+    checkpointsBySessionId.set(
+      sourceSave.focusSession.sessionId,
+      cloneFocusSession(sourceSave.focusSession),
+    );
+  }
+  return { recap, checkpointsBySessionId };
 }
 
 function withMigratedLegacyRecapCopies(
@@ -584,25 +636,83 @@ function withVerifiedStoredRecap(
   }
 }
 
-function parseFocusSession(value: unknown): FocusSession {
-  const record = expectRecord(value, 'focus session');
+function hasSameCheckpointIdentity(session: FocusSession, checkpoint: FocusSession): boolean {
+  return (
+    session.sessionId === checkpoint.sessionId &&
+    session.slotId === checkpoint.slotId &&
+    session.startedAtMs === checkpoint.startedAtMs &&
+    session.endedAtMs === checkpoint.endedAtMs &&
+    session.plannedFocusMs === checkpoint.plannedFocusMs &&
+    session.focusedMs === checkpoint.focusedMs &&
+    session.plannedBreakMs === checkpoint.plannedBreakMs &&
+    session.breakMs === checkpoint.breakMs &&
+    session.issuedSimulationTicks === checkpoint.issuedSimulationTicks &&
+    session.status === checkpoint.status &&
+    session.stateJson === checkpoint.stateJson
+  );
+}
+
+function withVerifiedStoredEvidence(
+  session: FocusSession,
+  authority: FocusHistoryAuthority,
+): FocusSession {
+  const checkpoint = authority.checkpointsBySessionId.get(session.sessionId);
+  if (checkpoint !== undefined && hasSameCheckpointIdentity(session, checkpoint)) {
+    return cloneFocusSession(checkpoint);
+  }
+  const normalized = withVerifiedStoredRecap(session, authority.recap);
+  if (normalized.review === undefined || normalized.review === null) return normalized;
+  // Standalone history is useful for accounting, but before/after facts are
+  // displayable only when an exact validated checkpoint generation proves them.
+  return { ...normalized, review: null };
+}
+
+function parseNativeFocusSessionRecord(value: unknown): NativeFocusSessionRecord {
+  const record = expectRecord(value, 'stored focus session');
   expectExactKeys(
     record,
-    [
-      'sessionId',
-      'slotId',
-      'startedAtMs',
-      'endedAtMs',
-      'plannedFocusMs',
-      'focusedMs',
-      'plannedBreakMs',
-      'breakMs',
-      'issuedSimulationTicks',
-      'status',
-      'stateJson',
-      'recapEventIds',
-      'recapEntries',
-    ],
+    ['session', 'authoritySession', 'checkpointGeneration'],
+    'stored focus session',
+  );
+  const session = parseFocusSession(record.session);
+  const authoritySession =
+    record.authoritySession === null ? null : parseFocusSession(record.authoritySession);
+  const checkpointGeneration = expectNullablePositiveInteger(
+    record.checkpointGeneration,
+    'stored focus session checkpointGeneration',
+  );
+  if ((authoritySession === null) !== (checkpointGeneration === null)) {
+    throw new TypeError('stored focus session authority metadata is inconsistent');
+  }
+  if (
+    authoritySession !== null &&
+    (authoritySession.sessionId !== session.sessionId || authoritySession.slotId !== session.slotId)
+  ) {
+    throw new TypeError('stored focus session authority belongs to a different history row');
+  }
+  return { session, authoritySession, checkpointGeneration };
+}
+
+function parseFocusSession(value: unknown): FocusSession {
+  const record = expectRecord(value, 'focus session');
+  const keys = [
+    'sessionId',
+    'slotId',
+    'startedAtMs',
+    'endedAtMs',
+    'plannedFocusMs',
+    'focusedMs',
+    'plannedBreakMs',
+    'breakMs',
+    'issuedSimulationTicks',
+    'status',
+    'stateJson',
+    'recapEventIds',
+    'recapEntries',
+  ];
+  expectExactKeys(
+    record,
+    record.review === undefined ? keys : [...keys, 'review'],
     'focus session',
   );
   const session: FocusSession = {
@@ -625,6 +735,10 @@ function parseFocusSession(value: unknown): FocusSession {
       'focus session recapEventIds',
     ),
     recapEntries: expectFocusRecapEntries(record.recapEntries),
+    review:
+      record.review === undefined || record.review === null
+        ? record.review
+        : validateFocusSessionReview(record.review),
   };
   validateFocusSession(session);
   return session;
@@ -774,7 +888,26 @@ function validateFocusSession(session: FocusSession): void {
     throw new RangeError('focus session times, progress, status, or recap event IDs are invalid');
   }
   validateFocusRecapEntries(session);
+  validateReviewMatchesSession(session);
   validateFocusStateMatchesSession(session, focusState);
+}
+
+function validateReviewMatchesSession(session: FocusSession): void {
+  if (session.review === undefined || session.review === null) return;
+  const review = validateFocusSessionReview(session.review);
+  if (review.after.tick - review.before.tick !== session.issuedSimulationTicks) {
+    throw new TypeError('focus session review tick span must match issued simulation ticks');
+  }
+  if (session.recapEventIds.some((eventId) => eventId <= review.baselineEventId)) {
+    throw new TypeError('focus recap events must be newer than the factual review baseline');
+  }
+  if (
+    review.revisitTarget?.sourceEventId !== null &&
+    review.revisitTarget !== null &&
+    !session.recapEventIds.includes(review.revisitTarget.sourceEventId)
+  ) {
+    throw new TypeError('focus revisit source event must be retained in the factual recap');
+  }
 }
 
 function validateFocusStateJson(stateJson: string): FocusState {
@@ -886,10 +1019,23 @@ function validateFocusCheckpoint(
   if (session.slotId !== slotId) {
     throw new TypeError('focus checkpoint session must belong to its save slot');
   }
-  const snapshotEvents = snapshotEventsOverride ?? deserializeWorldSnapshot(snapshot).eventLog;
+  const snapshotWorld = deserializeWorldSnapshot(snapshot);
+  const snapshotEvents = snapshotEventsOverride ?? snapshotWorld.eventLog;
   const snapshotEventIds = snapshotEvents.map((event) => event.id);
   validateRecapReferences(session, snapshotEventIds);
   validateRecapCopiesAgainstSnapshot(session, snapshotEvents);
+  if (session.review !== undefined && session.review !== null) {
+    const expected = projectFocusCheckpoint(snapshotWorld, session.review.baselineEventId);
+    if (
+      JSON.stringify(session.review.after) !== JSON.stringify(expected.moment) ||
+      JSON.stringify(session.review.revisitTarget) !== JSON.stringify(expected.revisitTarget) ||
+      JSON.stringify(session.recapEntries) !== JSON.stringify(expected.recapEntries)
+    ) {
+      throw new TypeError(
+        'focus review must exactly match the authoritative saved-world checkpoint',
+      );
+    }
+  }
   if (sourceEventIds !== undefined) {
     validateRecapReferences(session, sourceEventIds);
   }
@@ -925,6 +1071,23 @@ function cloneFocusSession(session: FocusSession): FocusSession {
     ...session,
     recapEventIds: [...session.recapEventIds],
     recapEntries: session.recapEntries.map((entry) => ({ ...entry })),
+    review:
+      session.review === undefined || session.review === null
+        ? session.review
+        : {
+            ...session.review,
+            before: cloneFocusWorldMoment(session.review.before),
+            after: cloneFocusWorldMoment(session.review.after),
+            revisitTarget:
+              session.review.revisitTarget === null ? null : { ...session.review.revisitTarget },
+          },
+  };
+}
+
+function cloneFocusWorldMoment(moment: FocusSessionReview['before']): FocusSessionReview['before'] {
+  return {
+    ...moment,
+    leadingSettlement: moment.leadingSettlement === null ? null : { ...moment.leadingSettlement },
   };
 }
 

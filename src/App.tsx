@@ -1,7 +1,8 @@
-import { useMemo, useState } from 'react';
+import { useCallback, useMemo, useState } from 'react';
 
 import { getFocusAlerts, type FocusAlerts } from './adapters/focus-alerts';
 import { getRuntimePersistence, type RuntimePersistence } from './adapters/runtime-persistence';
+import type { FocusRevisitTarget } from './focus/session-review';
 import { STRUCTURE_STATE_CODES, type QueuedCommand } from './protocol';
 import { INITIAL_WORLD_CAMERA, panCamera, zoomCamera } from './rendering/camera';
 import { WorldMapCanvas } from './rendering/WorldMapCanvas';
@@ -293,6 +294,24 @@ export function App({ focusAlerts, focusClock, persistence, workerFactory }: App
       ],
     };
   }, [mapSelection, simulation.frame]);
+  const revisitFocusTarget = useCallback(
+    (target: FocusRevisitTarget) => {
+      const selection: SelectableId = {
+        id: target.id,
+        kind: target.kind === 'person' ? 'agent' : target.kind,
+      };
+      setMapSelection(selection);
+      queueMicrotask(() => {
+        const inspector = document.getElementById('map-inspector');
+        inspector?.focus({ preventScroll: true });
+        inspector?.scrollIntoView({
+          behavior: reducedEffects ? 'auto' : 'smooth',
+          block: 'center',
+        });
+      });
+    },
+    [reducedEffects],
+  );
   const queueIntervention = (command: QueuedCommand) => {
     setInterventionPending(true);
     setInterventionStatus(null);
@@ -475,7 +494,12 @@ export function App({ focusAlerts, focusClock, persistence, workerFactory }: App
               </div>
             </div>
 
-            <section className="map-inspector" aria-labelledby="map-inspector-title">
+            <section
+              className="map-inspector"
+              aria-labelledby="map-inspector-title"
+              id="map-inspector"
+              tabIndex={-1}
+            >
               <div>
                 <h3 id="map-inspector-title">Map selection</h3>
                 <p>Pointer selection and this keyboard navigator open the same factual object.</p>
@@ -650,19 +674,10 @@ export function App({ focusAlerts, focusClock, persistence, workerFactory }: App
               <code>{seedLabel()}</code>
             </div>
 
-            <button
-              className="advance-button"
-              disabled={simulation.status !== 'ready'}
-              onClick={() => {
-                simulation.advanceTicks(100);
-              }}
-              type="button"
-            >
-              Observe 100 fixed ticks
-            </button>
             <p className="milestone-note">
-              Focus time advances fixed logical ticks. Observing, moving the camera, and changing
-              overlays never changes an autonomous outcome.
+              Only accepted focus time advances the live world directly. Observing, moving the
+              camera, changing overlays, and revisiting factual objects never changes an autonomous
+              outcome.
             </p>
           </aside>
         </div>
@@ -735,6 +750,7 @@ export function App({ focusAlerts, focusClock, persistence, workerFactory }: App
         <FocusPersistencePanel
           alerts={completionAlerts}
           onReducedEffectsChange={setReducedEffects}
+          onRevisitTarget={revisitFocusTarget}
           runtime={runtimePersistence}
           simulation={simulation}
           {...(focusClock === undefined ? {} : { clock: focusClock })}

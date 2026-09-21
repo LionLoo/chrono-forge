@@ -9,9 +9,11 @@ import {
   type PersistenceGateway,
 } from '../../src/adapters/persistence';
 import type { RuntimePersistence } from '../../src/adapters/runtime-persistence';
+import { projectFocusCheckpoint } from '../../src/focus/session-review';
 import { PROJECT_META } from '../../src/project-meta';
 import type { UiToWorkerMessage, WorkerToUiMessage } from '../../src/protocol';
 import type { WorldOverlay } from '../../src/rendering/world-palette';
+import { deserializeWorldSnapshot } from '../../src/simulation/persistence';
 import type { SimulationWorkerPort } from '../../src/ui/useWorldSimulation';
 import { createSimulationRuntime } from '../../src/workers/simulation-runtime';
 
@@ -85,7 +87,7 @@ describe('deterministic world lab', () => {
     expect(within(society!).getByText('The founding world formed.')).toBeVisible();
   });
 
-  it('changes overlays, camera, and fixed logical ticks through keyboard-accessible controls', async () => {
+  it('changes overlays and camera without exposing a direct world-advance control', async () => {
     const user = userEvent.setup();
     render(<App persistence={createPreviewPersistence()} workerFactory={createRuntimeWorker} />);
     await screen.findByText('Worker projection ready · autonomous world active');
@@ -115,15 +117,12 @@ describe('deterministic world lab', () => {
     await user.click(screen.getByRole('button', { name: 'Reset' }));
     expect(screen.getByLabelText('Camera position')).toHaveTextContent('X 24 · Y 24 · 1.00×');
 
-    await user.click(screen.getByRole('button', { name: 'Observe 100 fixed ticks' }));
-    await waitFor(() => {
-      expect(screen.getByText('100')).toBeVisible();
-      expect(screen.getByText('Worker projection ready · autonomous world active')).toBeVisible();
-    });
     expect(
-      screen.getByRole('listitem', {
-        name: /Shelter 1: status planned; condition 100% \(sound\); progress 0%; tile \d+\./,
-      }),
+      screen.queryByRole('button', { name: /Observe .* fixed ticks/ }),
+    ).not.toBeInTheDocument();
+    expect(screen.getByText('Logical tick').closest('div')).toHaveTextContent('0');
+    expect(
+      screen.getByText(/Only accepted focus time advances the live world directly/),
     ).toBeVisible();
   });
 
@@ -208,6 +207,8 @@ describe('deterministic world lab', () => {
     expect(await screen.findByText('Session recorded with a factual recap.')).toBeVisible();
     const recap = screen.getByRole('heading', { name: 'Latest factual recap' }).parentElement;
     expect(recap).not.toBeNull();
+    expect(within(recap!).getByText('Construction underway')).toBeVisible();
+    expect(recap).toHaveTextContent('0 → 1 (+1)');
     expect(
       within(recap!).getByRole('listitem', { name: 'Tick 100: Shelter 1 was planned.' }),
     ).toBeVisible();
@@ -216,6 +217,72 @@ describe('deterministic world lab', () => {
     expect(completed).not.toBeNull();
     expect(within(completed!).getByText('1')).toBeVisible();
     expect(await persistence.gateway.listFocusSessions()).toMatchObject([{ recapEventIds: [3] }]);
+  });
+
+  it('persists exact consecutive 25, 50, and 60 minute controller-to-Worker reviews', async () => {
+    const user = userEvent.setup();
+    let epochMs = 10_000;
+    let expectedTick = 0;
+    const persistence = createPreviewPersistence();
+    render(
+      <App
+        focusClock={{ now: () => epochMs }}
+        persistence={persistence}
+        workerFactory={createRuntimeWorker}
+      />,
+    );
+    await screen.findByRole('button', { name: 'Start focus' });
+
+    for (const [index, minutes] of [25, 50, 60].entries()) {
+      fireEvent.change(screen.getByRole('spinbutton', { name: 'Custom focus minutes' }), {
+        target: { value: String(minutes) },
+      });
+      await user.click(screen.getByRole('button', { name: 'Start focus' }));
+      await waitFor(async () => {
+        const baselineSave = await persistence.gateway.loadSaveSlot('primary');
+        expect(baselineSave?.focusSession).toMatchObject({
+          status: 'active',
+          issuedSimulationTicks: 0,
+          review: {
+            before: { tick: expectedTick },
+            after: { tick: expectedTick },
+          },
+        });
+      });
+
+      const expectedIssuedTicks = minutes * 60 * 10;
+      act(() => {
+        epochMs += minutes * 60_000;
+      });
+      await user.click(screen.getByRole('button', { name: 'Complete focus' }));
+      expectedTick += expectedIssuedTicks;
+
+      await waitFor(async () => {
+        const completedSave = await persistence.gateway.loadSaveSlot('primary');
+        const session = completedSave?.focusSession;
+        expect(session).toMatchObject({
+          status: 'completed',
+          focusedMs: minutes * 60_000,
+          issuedSimulationTicks: expectedIssuedTicks,
+          review: {
+            before: { tick: expectedTick - expectedIssuedTicks },
+            after: { tick: expectedTick },
+          },
+        });
+        const world = deserializeWorldSnapshot(completedSave!.snapshot);
+        const expectedReview = projectFocusCheckpoint(world, session!.review!.baselineEventId);
+        expect(session!.review!.after).toEqual(expectedReview.moment);
+        expect(session!.recapEntries).toEqual(expectedReview.recapEntries);
+        expect(session!.review!.revisitTarget).toEqual(expectedReview.revisitTarget);
+      });
+
+      if (index < 2) {
+        await user.click(screen.getByRole('button', { name: 'New session' }));
+        await screen.findByRole('button', { name: 'Start focus' });
+      }
+    }
+
+    await expect(persistence.gateway.listFocusSessions()).resolves.toHaveLength(3);
   });
 
   it('manages multiple slots, validated exports, and calm local settings', async () => {

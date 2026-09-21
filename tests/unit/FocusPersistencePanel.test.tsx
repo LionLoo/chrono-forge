@@ -8,6 +8,10 @@ import {
   type PersistenceGateway,
 } from '../../src/adapters/persistence';
 import { completeFocus, createIdleFocusState, startFocus } from '../../src/focus';
+import {
+  FOCUS_SESSION_REVIEW_VERSION,
+  projectFocusCheckpoint,
+} from '../../src/focus/session-review';
 import { deserializeWorldSnapshot, serializeWorldSnapshot } from '../../src/simulation/persistence';
 import {
   appendWorldEvent,
@@ -41,6 +45,12 @@ function createSimulation(): {
       loadSnapshot,
       performOfflineCatchUp,
       queueCommand: vi.fn().mockResolvedValue(undefined),
+      requestFocusCheckpoint: vi.fn((baselineEventId: number | null) =>
+        Promise.resolve({
+          snapshot,
+          checkpoint: projectFocusCheckpoint(deserializeWorldSnapshot(snapshot), baselineEventId),
+        }),
+      ),
       requestSave: vi.fn<() => Promise<string>>().mockResolvedValue(snapshot),
       requestRelationshipEventPage: vi.fn(),
       requestRelationshipPage: vi.fn(),
@@ -83,6 +93,12 @@ function createStatefulSimulation(initialWorld?: WorldState): {
       }),
       performOfflineCatchUp: vi.fn().mockResolvedValue(undefined),
       queueCommand: vi.fn().mockResolvedValue(undefined),
+      requestFocusCheckpoint: vi.fn((baselineEventId: number | null) =>
+        Promise.resolve({
+          snapshot: serializeWorldSnapshot(world),
+          checkpoint: projectFocusCheckpoint(world, baselineEventId),
+        }),
+      ),
       requestSave: vi.fn(async () => {
         await Promise.resolve();
         return serializeWorldSnapshot(world);
@@ -265,7 +281,16 @@ describe('FocusPersistencePanel offline progression', () => {
       'primary',
       'Founding world',
       serializeWorldSnapshot(savedWorld),
-      focusSessionFromState('resumed-running', 'primary', runningState, []),
+      {
+        ...focusSessionFromState('resumed-running', 'primary', runningState, []),
+        review: {
+          version: FOCUS_SESSION_REVIEW_VERSION,
+          baselineEventId: projectFocusCheckpoint(savedWorld, null).latestEventId,
+          before: projectFocusCheckpoint(savedWorld, null).moment,
+          after: projectFocusCheckpoint(savedWorld, null).moment,
+          revisitTarget: projectFocusCheckpoint(savedWorld, null).revisitTarget,
+        },
+      },
       [],
     );
     await gateway.saveSettings({
@@ -289,6 +314,12 @@ describe('FocusPersistencePanel offline progression', () => {
         type: event.kind,
       })),
       requestSave: vi.fn().mockResolvedValue(serializeWorldSnapshot(advancedWorld)),
+      requestFocusCheckpoint: vi.fn((baselineEventId: number | null) =>
+        Promise.resolve({
+          snapshot: serializeWorldSnapshot(advancedWorld),
+          checkpoint: projectFocusCheckpoint(advancedWorld, baselineEventId),
+        }),
+      ),
     };
 
     render(
@@ -372,6 +403,11 @@ describe('FocusPersistencePanel offline progression', () => {
     expect(checkpoint?.focusSession).toMatchObject({
       issuedSimulationTicks: 100,
       status: 'active',
+      review: {
+        version: 1,
+        before: { tick: 0 },
+        after: { tick: 100 },
+      },
     });
     firstRender.unmount();
 
@@ -394,6 +430,12 @@ describe('FocusPersistencePanel offline progression', () => {
     nowMs += 1_000;
     await user.click(screen.getByRole('button', { name: 'Pause' }));
     await waitFor(() => expect(restored.currentTick()).toBe(110));
+    await waitFor(async () =>
+      expect((await gateway.loadSaveSlot('primary'))?.focusSession?.review).toMatchObject({
+        before: { tick: 0 },
+        after: { tick: 110 },
+      }),
+    );
   });
 
   it('restores the persisted active slot instead of always preferring primary', async () => {
@@ -528,7 +570,8 @@ describe('FocusPersistencePanel offline progression', () => {
     ).toBeVisible();
   });
 
-  it('renders the latest persisted factual recap after the Worker event cache changes', async () => {
+  it('renders a persisted before-and-after review, honest quiet interval, and revisit action', async () => {
+    const user = userEvent.setup();
     const gateway = createInMemoryPersistenceGateway(() => 1_000);
     await gateway.commitSaveSlot('primary', 'Founding world', snapshot);
     const completedState = completeFocus(
@@ -539,29 +582,52 @@ describe('FocusPersistencePanel offline progression', () => {
       ),
       61_000,
     );
-    await gateway.recordFocusSession(
+    const beforeWorld = deserializeWorldSnapshot(snapshot);
+    const afterWorld = stepWorld(beforeWorld, 60);
+    const baseline = projectFocusCheckpoint(beforeWorld, null);
+    const completedCheckpoint = projectFocusCheckpoint(afterWorld, baseline.latestEventId);
+    const review = {
+      version: FOCUS_SESSION_REVIEW_VERSION,
+      baselineEventId: baseline.latestEventId,
+      before: baseline.moment,
+      after: completedCheckpoint.moment,
+      revisitTarget: completedCheckpoint.revisitTarget,
+    } as const;
+    await gateway.commitFocusCheckpoint(
+      'primary',
+      'Founding world',
+      serializeWorldSnapshot(afterWorld),
       {
-        ...focusSessionFromState('persisted-recap', 'primary', completedState, [1]),
-        recapEntries: [{ id: 1, tick: 0, summary: 'The founding world formed.' }],
+        ...focusSessionFromState('persisted-recap', 'primary', completedState, []),
+        review,
       },
-      [1],
+      [],
     );
     await gateway.saveSettings({
       ...DEFAULT_APP_SETTINGS,
       offlineProgressionEnabled: false,
     });
 
+    const onRevisitTarget = vi.fn();
     render(
       <FocusPersistencePanel
         alerts={{ notifyCompletion: () => Promise.resolve() }}
         clock={{ now: () => 1_000 }}
+        onRevisitTarget={onRevisitTarget}
         runtime={{ gateway, mode: 'browser-preview' }}
         simulation={createStatefulSimulation().simulation}
       />,
     );
 
     const recap = await screen.findByRole('heading', { name: 'Latest factual recap' });
-    expect(recap.parentElement).toHaveTextContent('Tick 0: The founding world formed.');
+    expect(recap.parentElement).toHaveTextContent('World tick 0 → 60');
+    expect(recap.parentElement).toHaveTextContent('Tracked settlement facts were unchanged.');
+    expect(recap.parentElement).toHaveTextContent(
+      'No major event was recorded during this session.',
+    );
+    const revisit = within(recap.parentElement!).getByRole('button', { name: /^Revisit / });
+    await user.click(revisit);
+    expect(onRevisitTarget).toHaveBeenCalledWith(review.revisitTarget);
   });
 
   it('persists reduced effects and exposes the integration root class', async () => {

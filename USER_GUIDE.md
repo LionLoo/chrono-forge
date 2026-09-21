@@ -28,7 +28,7 @@ The **Focus forge** shows the active world slot and timer.
 
 Only accepted running focus time advances the configured focus-time simulation ticks. Paused time does not. Interruptions are non-punitive: they do not damage or reset the civilization.
 
-When a session completes, its recap contains only immutable events recorded after that session's starting event. A quiet interval may honestly contain few or no major events. Focus history and recaps are scoped to the active slot. If an older history row no longer has a matching retained world event, its time and tick accounting remain visible but Chrono Forge hides the unverified prose.
+When a session completes, its recap shows accepted duration, the exact before/after world ticks, a compact set of factual state comparisons, and at most twelve immutable events recorded after that session's starting event. A quiet interval explicitly says that no major event was recorded; it never borrows older history. When a still-valid person, structure, settlement, route, or ruin is available, **Revisit** opens that exact map subject for deliberate inspection without advancing the world. Focus history and recaps are scoped to the active slot and survive reload. If an older history row no longer has a matching retained world event, its time and tick accounting remain visible but Chrono Forge hides the unverified prose.
 
 ## Observe and explore the world
 
@@ -59,7 +59,7 @@ Select **Open world inspection** when you want detail beyond the calm focus surf
 - contextual knowledge, current research, modeled crisis conditions, and interventions;
 - discovered celestial bodies, programs, spacecraft, missions, colonies, cargo, delayed communication, aliens, and space relations.
 
-**Observe 100 fixed ticks** is an explicit manual development control outside the focus loop. It advances exactly 100 authoritative ticks; it is not passive observation.
+There is no manual world-advance control in the production interface. Only accepted focus time advances the live world directly; bounded offline progression remains a separate local setting and is clearly reported when applied.
 
 ## Optional interventions
 

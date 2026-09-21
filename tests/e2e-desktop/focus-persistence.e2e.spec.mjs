@@ -155,13 +155,7 @@ describe('native focus persistence', () => {
     });
     expect(await (await $('h2=Settlement and society')).isDisplayed()).toBe(true);
     expect(await (await $('select[aria-label="Inspect person"]')).isDisplayed()).toBe(true);
-    await $('button=Observe 100 fixed ticks').click();
-    const firstStructure = await $('.structure-inspector li');
-    await firstStructure.waitForDisplayed();
-    // The embedded driver can retain the already-rendered world while this test
-    // clears only the isolated SQLite archive. Require the accessible non-color
-    // condition label without assuming the structure was just founded.
-    expect(await firstStructure.getText()).toMatch(/condition \d+% \((sound|worn|critical)\)/);
+    expect(await (await $('button=Observe 100 fixed ticks')).isExisting()).toBe(false);
     await $('summary=Focus and accessibility settings').click();
     const reducedEffects = await $('//label[normalize-space() = "Reduce visual effects"]/input');
     if (!(await reducedEffects.isSelected())) await reducedEffects.click();
@@ -207,13 +201,13 @@ describe('native focus persistence', () => {
             core.invoke('list_focus_sessions'),
           );
           return lastSessions.some(
-            (session) => session.slotId === 'primary' && session.status === 'paused',
+            ({ session }) => session.slotId === 'primary' && session.status === 'paused',
           );
         },
         { timeoutMsg: 'manual save did not commit the paused session to SQLite' },
       );
     } catch (error) {
-      const sessionSummary = lastSessions.map(({ sessionId, slotId, status }) => ({
+      const sessionSummary = lastSessions.map(({ session: { sessionId, slotId, status } }) => ({
         sessionId,
         slotId,
         status,
@@ -227,7 +221,9 @@ describe('native focus persistence', () => {
     const allPausedSessions = await browser.tauri.execute(({ core }) =>
       core.invoke('list_focus_sessions'),
     );
-    const pausedSessions = allPausedSessions.filter((session) => session.slotId === 'primary');
+    const pausedSessions = allPausedSessions
+      .map(({ session }) => session)
+      .filter((session) => session.slotId === 'primary');
     expect(pausedSessions).toHaveLength(1);
     expect(pausedSessions[0]).toMatchObject({ status: 'paused', focusedMs: 10_000 });
     const pausedCandidates = await browser.tauri.execute(({ core }) =>
@@ -258,20 +254,54 @@ describe('native focus persistence', () => {
     const allCompletedSessions = await browser.tauri.execute(({ core }) =>
       core.invoke('list_focus_sessions'),
     );
-    const completedSessions = allCompletedSessions.filter(
-      (session) => session.slotId === 'primary',
-    );
+    const completedSessions = allCompletedSessions
+      .map(({ session }) => session)
+      .filter((session) => session.slotId === 'primary');
     expect(completedSessions).toHaveLength(1);
-    expect(completedSessions[0]).toMatchObject({ status: 'completed', focusedMs: 60_000 });
-    // This short test session crosses no event boundary; the recap must not
-    // borrow founding or pre-session history to manufacture activity.
-    expect(completedSessions[0]?.recapEventIds).toEqual([]);
-    expect(completedSessions[0]?.recapEntries).toEqual([]);
+    const completedSession = completedSessions[0];
+    if (completedSession === undefined) throw new Error('completed focus session is unavailable');
+    expect(completedSession).toMatchObject({ status: 'completed', focusedMs: 60_000 });
+    expect(completedSession.review).toMatchObject({
+      version: 1,
+    });
+    const completedRecord = allCompletedSessions.find(
+      ({ session }) => session.sessionId === completedSession.sessionId,
+    );
+    expect(completedRecord?.checkpointGeneration).toBeGreaterThan(0);
+    expect(completedRecord?.authoritySession).toEqual(completedSession);
+    expect(completedSession.review.after.tick - completedSession.review.before.tick).toBe(600);
     const completedCandidates = await browser.tauri.execute(({ core }) =>
       core.invoke('load_save_slot_candidates', { slotId: 'primary' }),
     );
+    const completedWorld = JSON.parse(completedCandidates[0]?.snapshot).payload;
+    const eventsById = new Map(completedWorld.eventLog.map((event) => [event.id, event]));
+    expect(completedSession.recapEntries).toEqual(
+      completedSession.recapEventIds.map((eventId) => {
+        const event = eventsById.get(eventId);
+        return { id: event.id, tick: event.tick, summary: event.summary };
+      }),
+    );
+    expect(completedSession.recapEventIds.length).toBeLessThanOrEqual(12);
+    expect(
+      completedSession.recapEventIds.every(
+        (eventId) => eventId > completedSession.review.baselineEventId,
+      ),
+    ).toBe(true);
+    if (completedSession.recapEntries.length === 0) {
+      expect(
+        await (await $('p=No major event was recorded during this session.')).isDisplayed(),
+      ).toBe(true);
+    } else {
+      for (const entry of completedSession.recapEntries) {
+        expect(await (await $(`li=${entry.summary}`)).isDisplayed()).toBe(true);
+      }
+    }
+    const revisit = await $('//button[starts-with(normalize-space(), "Revisit ")]');
+    await revisit.waitForDisplayed();
+    await revisit.click();
+    expect(await (await $('#map-inspector')).isFocused()).toBe(true);
     expect(completedCandidates[0]?.focusSession).toMatchObject({
-      sessionId: completedSessions[0]?.sessionId,
+      sessionId: completedSession.sessionId,
       status: 'completed',
       focusedMs: 60_000,
     });

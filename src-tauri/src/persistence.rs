@@ -19,12 +19,13 @@ use sha2::{Digest, Sha256};
 use tauri::State;
 
 const DATABASE_FILE: &str = "chrono-forge.sqlite3";
-const SCHEMA_VERSION: i64 = 4;
+const SCHEMA_VERSION: i64 = 6;
 const MAX_ID_BYTES: usize = 64;
 const MAX_NAME_BYTES: usize = 120;
 const MAX_SNAPSHOT_BYTES: usize = 50 * 1024 * 1024;
 const MAX_RECAP_EVENT_IDS: usize = 12;
 const MAX_RECAP_ENTRY_SUMMARY_BYTES: usize = 160;
+const MAX_FOCUS_REVISIT_LABEL_BYTES: usize = 80;
 const MAX_JSON_SAFE_INTEGER: u64 = 9_007_199_254_740_991;
 const MAX_FOCUS_STATE_BYTES: usize = 64 * 1024;
 const RETAINED_GENERATIONS: i64 = 3;
@@ -105,6 +106,16 @@ pub struct FocusSession {
     pub recap_event_ids: Vec<u64>,
     #[serde(default)]
     pub recap_entries: Vec<FocusRecapEntry>,
+    #[serde(default)]
+    pub review: Option<FocusSessionReview>,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct StoredFocusSession {
+    pub session: FocusSession,
+    pub authority_session: Option<FocusSession>,
+    pub checkpoint_generation: Option<i64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -113,6 +124,71 @@ pub struct FocusRecapEntry {
     pub id: u64,
     pub tick: u64,
     pub summary: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct FocusSessionReview {
+    pub version: u32,
+    pub baseline_event_id: u64,
+    pub before: FocusWorldMoment,
+    pub after: FocusWorldMoment,
+    pub revisit_target: Option<FocusRevisitTarget>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct FocusWorldMoment {
+    pub tick: u64,
+    pub detailed_population: u64,
+    pub surface_population: u64,
+    pub food: u64,
+    pub water: u64,
+    pub timber: u64,
+    pub stone: u64,
+    pub operational_structures: u64,
+    pub active_construction: u64,
+    pub households: u64,
+    pub scarcity: u64,
+    pub stability: u64,
+    pub active_settlements: u64,
+    pub active_civilizations: u64,
+    pub active_routes: u64,
+    pub active_conflicts: u64,
+    pub active_crises: u64,
+    pub ruins: u64,
+    pub leading_settlement: Option<FocusLeadingSettlement>,
+    pub offworld_population: u64,
+    pub active_missions: u64,
+    pub active_colonies: u64,
+    pub contacted_aliens: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct FocusLeadingSettlement {
+    pub id: u64,
+    pub name: String,
+    pub development_stage: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct FocusRevisitTarget {
+    pub kind: FocusRevisitKind,
+    pub id: u64,
+    pub label: String,
+    pub source_event_id: Option<u64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum FocusRevisitKind {
+    Person,
+    Structure,
+    Settlement,
+    Route,
+    Ruin,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -344,6 +420,32 @@ impl PersistenceDatabase {
             )?;
             transaction.execute(
                 "INSERT INTO schema_migrations (version, applied_marker) VALUES (4, 1)",
+                [],
+            )?;
+            transaction.commit()?;
+        }
+        if newest_version < 5 {
+            let transaction = self
+                .connection
+                .transaction_with_behavior(TransactionBehavior::Immediate)?;
+            transaction.execute_batch("ALTER TABLE focus_sessions ADD COLUMN review_json TEXT;")?;
+            transaction.execute(
+                "INSERT INTO schema_migrations (version, applied_marker) VALUES (5, 1)",
+                [],
+            )?;
+            transaction.commit()?;
+        }
+        if newest_version < 6 {
+            let transaction = self
+                .connection
+                .transaction_with_behavior(TransactionBehavior::Immediate)?;
+            transaction.execute_batch(
+                "ALTER TABLE focus_sessions ADD COLUMN checkpoint_generation INTEGER;
+                 ALTER TABLE focus_sessions ADD COLUMN review_authority_json TEXT;
+                 ALTER TABLE focus_sessions ADD COLUMN review_authority_checksum TEXT;",
+            )?;
+            transaction.execute(
+                "INSERT INTO schema_migrations (version, applied_marker) VALUES (6, 1)",
                 [],
             )?;
             transaction.commit()?;
@@ -584,7 +686,16 @@ impl PersistenceDatabase {
             ));
         }
         if let Some(session) = focus_session {
-            upsert_focus_session(&transaction, session)?;
+            upsert_focus_session(
+                &transaction,
+                session,
+                Some((
+                    next_generation,
+                    focus_session_json
+                        .as_deref()
+                        .ok_or_else(|| PersistenceError::new("focus checkpoint JSON is missing"))?,
+                )),
+            )?;
         }
         if fail_before_head_update {
             return Err(PersistenceError::new(
@@ -759,17 +870,17 @@ impl PersistenceDatabase {
         let transaction = self
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
-        upsert_focus_session(&transaction, session)?;
+        upsert_focus_session(&transaction, session, None)?;
         transaction.commit()?;
         Ok(())
     }
 
     fn validate_recap_event_references(&self, session: &FocusSession) -> Result<()> {
-        if session.recap_event_ids.is_empty() {
+        if session.recap_event_ids.is_empty() && session.review.is_none() {
             return Ok(());
         }
         let slot_id = session.slot_id.as_deref().ok_or_else(|| {
-            PersistenceError::new("focus recap event IDs require a source save slot")
+            PersistenceError::new("focus review or recap requires a source save slot")
         })?;
         let snapshot = self
             .connection
@@ -788,11 +899,12 @@ impl PersistenceDatabase {
         validate_recap_event_references_in_snapshot(session, &snapshot)
     }
 
-    fn list_focus_sessions(&self) -> Result<Vec<FocusSession>> {
+    fn list_focus_session_records(&self) -> Result<Vec<StoredFocusSession>> {
         let mut statement = self.connection.prepare(
             "SELECT session_id, slot_id, started_at_ms, ended_at_ms, planned_focus_ms, focused_ms,
                     planned_break_ms, break_ms, issued_simulation_ticks, status,
-                    state_json, recap_event_ids_json, recap_entries_json
+                    state_json, recap_event_ids_json, recap_entries_json, review_json,
+                    checkpoint_generation, review_authority_json, review_authority_checksum
              FROM focus_sessions ORDER BY started_at_ms DESC, session_id ASC",
         )?;
         let rows = statement.query_map([], |row| {
@@ -813,7 +925,18 @@ impl PersistenceDatabase {
                         Box::new(error),
                     )
                 })?;
-            Ok(FocusSession {
+            let review = row
+                .get::<_, Option<String>>(13)?
+                .map(|json| serde_json::from_str(&json))
+                .transpose()
+                .map_err(|error| {
+                    rusqlite::Error::FromSqlConversionFailure(
+                        13,
+                        rusqlite::types::Type::Text,
+                        Box::new(error),
+                    )
+                })?;
+            let session = FocusSession {
                 session_id: row.get(0)?,
                 slot_id: row.get(1)?,
                 started_at_ms: row.get(2)?,
@@ -827,9 +950,42 @@ impl PersistenceDatabase {
                 state_json: row.get(10)?,
                 recap_event_ids,
                 recap_entries,
+                review,
+            };
+            let checkpoint_generation = row.get::<_, Option<i64>>(14)?;
+            let authority_json = row.get::<_, Option<String>>(15)?;
+            let authority_checksum = row.get::<_, Option<String>>(16)?;
+            let authority_session = match (
+                checkpoint_generation,
+                authority_json.as_deref(),
+                authority_checksum.as_deref(),
+            ) {
+                (Some(generation), Some(json), Some(checksum))
+                    if generation > 0 && sha256_hex(json) == checksum =>
+                {
+                    serde_json::from_str::<FocusSession>(json)
+                        .ok()
+                        .filter(|authority| validate_focus_session(authority).is_ok())
+                        .filter(|authority| has_same_checkpoint_identity(&session, authority))
+                }
+                _ => None,
+            };
+            Ok(StoredFocusSession {
+                session,
+                checkpoint_generation: authority_session.as_ref().and(checkpoint_generation),
+                authority_session,
             })
         })?;
         Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
+    }
+
+    #[cfg(test)]
+    fn list_focus_sessions(&self) -> Result<Vec<FocusSession>> {
+        Ok(self
+            .list_focus_session_records()?
+            .into_iter()
+            .map(|record| record.session)
+            .collect())
     }
 
     fn load_settings(&self) -> Result<AppSettings> {
@@ -920,15 +1076,26 @@ impl PersistenceDatabase {
 fn upsert_focus_session(
     transaction: &rusqlite::Transaction<'_>,
     session: &FocusSession,
+    authority: Option<(i64, &str)>,
 ) -> Result<()> {
     let event_ids = serde_json::to_string(&session.recap_event_ids)?;
     let entries = serde_json::to_string(&session.recap_entries)?;
+    let review = session
+        .review
+        .as_ref()
+        .map(serde_json::to_string)
+        .transpose()?;
+    let checkpoint_generation = authority.map(|(generation, _)| generation);
+    let authority_json = authority.map(|(_, json)| json);
+    let authority_checksum = authority_json.map(sha256_hex);
     transaction.execute(
         "INSERT INTO focus_sessions
          (session_id, slot_id, started_at_ms, ended_at_ms, planned_focus_ms, focused_ms,
           planned_break_ms, break_ms, issued_simulation_ticks, status, state_json,
-           recap_event_ids_json, recap_entries_json)
-          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)
+           recap_event_ids_json, recap_entries_json, review_json, checkpoint_generation,
+           review_authority_json, review_authority_checksum)
+          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14,
+                  ?15, ?16, ?17)
          ON CONFLICT(session_id) DO UPDATE SET
              slot_id = excluded.slot_id,
              started_at_ms = excluded.started_at_ms,
@@ -941,7 +1108,20 @@ fn upsert_focus_session(
              status = excluded.status,
              state_json = excluded.state_json,
               recap_event_ids_json = excluded.recap_event_ids_json,
-              recap_entries_json = excluded.recap_entries_json",
+              recap_entries_json = excluded.recap_entries_json,
+              review_json = excluded.review_json,
+              checkpoint_generation = COALESCE(
+                  excluded.checkpoint_generation,
+                  focus_sessions.checkpoint_generation
+              ),
+              review_authority_json = COALESCE(
+                  excluded.review_authority_json,
+                  focus_sessions.review_authority_json
+              ),
+              review_authority_checksum = COALESCE(
+                  excluded.review_authority_checksum,
+                  focus_sessions.review_authority_checksum
+              )",
         params![
             session.session_id,
             session.slot_id,
@@ -956,9 +1136,27 @@ fn upsert_focus_session(
             session.state_json,
             event_ids,
             entries,
+            review,
+            checkpoint_generation,
+            authority_json,
+            authority_checksum,
         ],
     )?;
     Ok(())
+}
+
+fn has_same_checkpoint_identity(session: &FocusSession, checkpoint: &FocusSession) -> bool {
+    session.session_id == checkpoint.session_id
+        && session.slot_id == checkpoint.slot_id
+        && session.started_at_ms == checkpoint.started_at_ms
+        && session.ended_at_ms == checkpoint.ended_at_ms
+        && session.planned_focus_ms == checkpoint.planned_focus_ms
+        && session.focused_ms == checkpoint.focused_ms
+        && session.planned_break_ms == checkpoint.planned_break_ms
+        && session.break_ms == checkpoint.break_ms
+        && session.issued_simulation_ticks == checkpoint.issued_simulation_ticks
+        && session.status == checkpoint.status
+        && session.state_json == checkpoint.state_json
 }
 
 fn parse_focus_checkpoint(
@@ -984,6 +1182,13 @@ fn validate_recap_event_references_in_snapshot(
     session: &FocusSession,
     snapshot: &str,
 ) -> Result<()> {
+    if let Some(review) = &session.review
+        && world_tick(snapshot)? != review.after.tick
+    {
+        return Err(PersistenceError::new(
+            "focus review must describe the exact saved-world checkpoint",
+        ));
+    }
     if session.recap_event_ids.is_empty() {
         return Ok(());
     }
@@ -1101,7 +1306,90 @@ fn validate_focus_session(session: &FocusSession) -> Result<()> {
         ));
     }
     validate_recap_entries(session)?;
+    validate_focus_session_review(session)?;
     validate_focus_state_summary(session)?;
+    Ok(())
+}
+
+fn validate_focus_session_review(session: &FocusSession) -> Result<()> {
+    let Some(review) = &session.review else {
+        return Ok(());
+    };
+    if review.version != 1
+        || review.baseline_event_id > MAX_JSON_SAFE_INTEGER
+        || review.after.tick < review.before.tick
+        || review.after.tick - review.before.tick != session.issued_simulation_ticks as u64
+        || session
+            .recap_event_ids
+            .iter()
+            .any(|event_id| *event_id <= review.baseline_event_id)
+    {
+        return Err(PersistenceError::new(
+            "focus session review does not match its issued simulation ticks or event baseline",
+        ));
+    }
+    validate_focus_world_moment(&review.before)?;
+    validate_focus_world_moment(&review.after)?;
+    if let Some(target) = &review.revisit_target
+        && (target.id == 0
+            || target.id > MAX_JSON_SAFE_INTEGER
+            || target.label.trim().is_empty()
+            || target.label.len() > MAX_FOCUS_REVISIT_LABEL_BYTES
+            || target.source_event_id.is_some_and(|event_id| {
+                event_id == 0
+                    || event_id > MAX_JSON_SAFE_INTEGER
+                    || !session.recap_event_ids.contains(&event_id)
+            }))
+    {
+        return Err(PersistenceError::new(
+            "focus revisit target is invalid or lacks its factual source event",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_focus_world_moment(moment: &FocusWorldMoment) -> Result<()> {
+    let values = [
+        moment.tick,
+        moment.detailed_population,
+        moment.surface_population,
+        moment.food,
+        moment.water,
+        moment.timber,
+        moment.stone,
+        moment.operational_structures,
+        moment.active_construction,
+        moment.households,
+        moment.scarcity,
+        moment.stability,
+        moment.active_settlements,
+        moment.active_civilizations,
+        moment.active_routes,
+        moment.active_conflicts,
+        moment.active_crises,
+        moment.ruins,
+        moment.offworld_population,
+        moment.active_missions,
+        moment.active_colonies,
+        moment.contacted_aliens,
+    ];
+    if values.iter().any(|value| *value > MAX_JSON_SAFE_INTEGER) {
+        return Err(PersistenceError::new(
+            "focus world moment exceeds the JSON safe integer range",
+        ));
+    }
+    if let Some(settlement) = &moment.leading_settlement
+        && (settlement.id == 0
+            || settlement.id > MAX_JSON_SAFE_INTEGER
+            || settlement.name.trim().is_empty()
+            || settlement.name.len() > MAX_FOCUS_REVISIT_LABEL_BYTES
+            || !matches!(
+                settlement.development_stage.as_str(),
+                "founding" | "village" | "town" | "city" | "advanced-city"
+            ))
+    {
+        return Err(PersistenceError::new("focus leading settlement is invalid"));
+    }
     Ok(())
 }
 
@@ -1186,6 +1474,32 @@ fn json_nullable_i64(
 struct SnapshotEventFact {
     tick: Option<u64>,
     summary: Option<String>,
+}
+
+fn world_tick(snapshot: &str) -> Result<u64> {
+    let envelope: serde_json::Value = serde_json::from_str(snapshot)?;
+    let format_version = envelope
+        .get("formatVersion")
+        .and_then(serde_json::Value::as_u64)
+        .ok_or_else(|| PersistenceError::new("source save has no format version"))?;
+    let legacy_payload;
+    let payload = if format_version == 0 {
+        let world_json = envelope
+            .get("worldJson")
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| PersistenceError::new("legacy source save has no world payload"))?;
+        legacy_payload = serde_json::from_str::<serde_json::Value>(world_json)?;
+        &legacy_payload
+    } else {
+        envelope
+            .get("payload")
+            .ok_or_else(|| PersistenceError::new("source save has no world payload"))?
+    };
+    payload
+        .get("tick")
+        .and_then(serde_json::Value::as_u64)
+        .filter(|tick| *tick <= MAX_JSON_SAFE_INTEGER)
+        .ok_or_else(|| PersistenceError::new("source save has no valid world tick"))
 }
 
 fn world_events(snapshot: &str) -> Result<BTreeMap<u64, SnapshotEventFact>> {
@@ -1380,10 +1694,10 @@ pub fn record_focus_session(
 #[tauri::command]
 pub fn list_focus_sessions(
     state: State<'_, PersistenceState>,
-) -> std::result::Result<Vec<FocusSession>, String> {
+) -> std::result::Result<Vec<StoredFocusSession>, String> {
     state
         .lock()
-        .and_then(|database| database.list_focus_sessions())
+        .and_then(|database| database.list_focus_session_records())
         .map_err(|error| error.to_string())
 }
 
@@ -1414,8 +1728,40 @@ mod tests {
 
     fn snapshot(value: &str) -> String {
         format!(
-            r#"{{"format":"chrono-forge-world","formatVersion":1,"payload":{{"eventLog":[{{"id":7,"tick":0,"summary":"Recorded factual event 7."}},{{"id":9,"tick":0,"summary":"Recorded factual event 9."}},{{"id":11,"tick":0,"summary":"Recorded factual event 11."}}],"test":"{value}"}}}}"#
+            r#"{{"format":"chrono-forge-world","formatVersion":1,"payload":{{"tick":1,"eventLog":[{{"id":7,"tick":0,"summary":"Recorded factual event 7."}},{{"id":9,"tick":0,"summary":"Recorded factual event 9."}},{{"id":11,"tick":0,"summary":"Recorded factual event 11."}}],"test":"{value}"}}}}"#
         )
+    }
+
+    fn focus_world_moment(tick: u64) -> FocusWorldMoment {
+        FocusWorldMoment {
+            tick,
+            detailed_population: 6,
+            surface_population: 6,
+            food: 10,
+            water: 10,
+            timber: 10,
+            stone: 10,
+            operational_structures: 0,
+            active_construction: 0,
+            households: 3,
+            scarcity: 0,
+            stability: 100,
+            active_settlements: 1,
+            active_civilizations: 1,
+            active_routes: 0,
+            active_conflicts: 0,
+            active_crises: 0,
+            ruins: 0,
+            leading_settlement: Some(FocusLeadingSettlement {
+                id: 1,
+                name: "First Hearth".to_owned(),
+                development_stage: "founding".to_owned(),
+            }),
+            offworld_population: 0,
+            active_missions: 0,
+            active_colonies: 0,
+            contacted_aliens: 0,
+        }
     }
 
     fn completed_focus_state_json() -> String {
@@ -1444,6 +1790,7 @@ mod tests {
                 })
                 .collect(),
             recap_event_ids,
+            review: None,
         }
     }
 
@@ -1761,9 +2108,132 @@ mod tests {
                     summary: "Recorded factual event 11.".to_owned(),
                 },
             ],
+            review: None,
         };
         database.record_focus_session(&session).expect("record");
         assert_eq!(database.list_focus_sessions().expect("list"), vec![session]);
+    }
+
+    #[test]
+    fn focus_review_round_trips_and_rejects_tick_or_provenance_tampering() {
+        let mut database = PersistenceDatabase::in_memory().expect("database");
+        database
+            .commit_slot("alpha", "Alpha", &snapshot("focus-review"))
+            .expect("source save");
+        let mut session = completed_focus_session("alpha", vec![7]);
+        session.review = Some(FocusSessionReview {
+            version: 1,
+            baseline_event_id: 6,
+            before: focus_world_moment(0),
+            after: focus_world_moment(1),
+            revisit_target: Some(FocusRevisitTarget {
+                kind: FocusRevisitKind::Settlement,
+                id: 1,
+                label: "First Hearth".to_owned(),
+                source_event_id: Some(7),
+            }),
+        });
+        database
+            .commit_focus_checkpoint("alpha", "Alpha", &snapshot("focus-review"), &session)
+            .expect("review checkpoint");
+        assert_eq!(
+            database.list_focus_sessions().expect("list"),
+            vec![session.clone()]
+        );
+
+        let mut wrong_tick = session.clone();
+        wrong_tick.review.as_mut().expect("review").after.tick = 2;
+        assert!(
+            database
+                .commit_focus_checkpoint("alpha", "Alpha", &snapshot("focus-review"), &wrong_tick,)
+                .is_err()
+        );
+        let mut wrong_source = session;
+        wrong_source
+            .review
+            .as_mut()
+            .expect("review")
+            .revisit_target
+            .as_mut()
+            .expect("target")
+            .source_event_id = Some(9);
+        assert!(database.record_focus_session(&wrong_source).is_err());
+    }
+
+    #[test]
+    fn focus_review_authority_survives_later_saves_and_rejects_copy_tampering() {
+        let mut database = PersistenceDatabase::in_memory().expect("database");
+        let mut session = completed_focus_session("alpha", vec![7]);
+        session.review = Some(FocusSessionReview {
+            version: 1,
+            baseline_event_id: 6,
+            before: focus_world_moment(0),
+            after: focus_world_moment(1),
+            revisit_target: Some(FocusRevisitTarget {
+                kind: FocusRevisitKind::Settlement,
+                id: 1,
+                label: "First Hearth".to_owned(),
+                source_event_id: Some(7),
+            }),
+        });
+        database
+            .commit_focus_checkpoint("alpha", "Alpha", &snapshot("focus-review"), &session)
+            .expect("review checkpoint");
+        for suffix in ["later-1", "later-2", "later-3", "later-4"] {
+            database
+                .commit_slot("alpha", "Alpha", &snapshot(suffix))
+                .expect("later save");
+        }
+        let original_generation_exists: bool = database
+            .connection
+            .query_row(
+                "SELECT EXISTS(
+                    SELECT 1 FROM save_generations WHERE slot_id = 'alpha' AND generation = 1
+                )",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .expect("generation lookup")
+            != 0;
+        assert!(!original_generation_exists);
+
+        let records = database
+            .list_focus_session_records()
+            .expect("verified history");
+        assert_eq!(records[0].checkpoint_generation, Some(1));
+        assert_eq!(records[0].authority_session, Some(session.clone()));
+
+        let mut fabricated_review = session.review.clone().expect("review");
+        fabricated_review.after.food += 1;
+        database
+            .connection
+            .execute(
+                "UPDATE focus_sessions SET review_json = ?1 WHERE session_id = ?2",
+                params![
+                    serde_json::to_string(&fabricated_review).expect("review JSON"),
+                    session.session_id
+                ],
+            )
+            .expect("tamper display copy");
+        let tampered_copy = database
+            .list_focus_session_records()
+            .expect("history after copy tamper");
+        assert_ne!(tampered_copy[0].session.review, session.review);
+        assert_eq!(tampered_copy[0].authority_session, Some(session.clone()));
+
+        database
+            .connection
+            .execute(
+                "UPDATE focus_sessions SET review_authority_json = '{}'
+                 WHERE session_id = ?1",
+                [session.session_id],
+            )
+            .expect("tamper authority");
+        let invalid_authority = database
+            .list_focus_session_records()
+            .expect("history after authority tamper");
+        assert_eq!(invalid_authority[0].checkpoint_generation, None);
+        assert_eq!(invalid_authority[0].authority_session, None);
     }
 
     #[test]
@@ -1790,6 +2260,7 @@ mod tests {
                 tick: 0,
                 summary: "Recorded factual event 7.".to_owned(),
             }],
+            review: None,
         };
         let mut mismatched = base.clone();
         mismatched.focused_ms = 99;
@@ -1834,6 +2305,7 @@ mod tests {
                     summary: "Recorded factual event 7.".to_owned(),
                 },
             ],
+            review: None,
         };
         assert!(database.record_focus_session(&invalid).is_err());
     }
@@ -1905,7 +2377,7 @@ mod tests {
     }
 
     #[test]
-    fn v3_to_v4_migration_preserves_legacy_recap_ids_without_inventing_entries() {
+    fn v3_to_v6_migration_preserves_legacy_recap_ids_without_inventing_entries() {
         let connection = Connection::open_in_memory().expect("connection");
         connection
             .execute_batch(
@@ -1960,16 +2432,20 @@ mod tests {
             .expect("legacy focus history");
 
         let mut database = PersistenceDatabase { connection };
-        database.migrate().expect("v4 migration");
+        database.migrate().expect("v6 migration");
         assert!(!database.load_settings().expect("settings").reduced_effects);
         assert_eq!(
             database.list_focus_sessions().expect("history")[0].recap_entries,
             Vec::<FocusRecapEntry>::new()
         );
+        assert_eq!(
+            database.list_focus_sessions().expect("history")[0].review,
+            None
+        );
     }
 
     #[test]
-    fn v1_to_v4_migration_marks_existing_generations_and_defaults_new_fields() {
+    fn v1_to_v6_migration_marks_existing_generations_and_defaults_new_fields() {
         let connection = Connection::open_in_memory().expect("connection");
         connection
             .execute_batch(
@@ -2034,6 +2510,6 @@ mod tests {
             .expect("query")
             .collect::<std::result::Result<_, _>>()
             .expect("versions");
-        assert_eq!(versions, vec![1, 2, 3, 4]);
+        assert_eq!(versions, vec![1, 2, 3, 4, 5, 6]);
     }
 }

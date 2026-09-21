@@ -8,8 +8,9 @@ import type {
   KnowledgeStatus,
 } from '../simulation/development';
 import { ACCELERATED_YEAR_TICKS, NORMAL_YEAR_TICKS } from '../simulation/society';
+import type { FocusCheckpointProjection } from '../focus/session-review';
 
-export const WORKER_PROTOCOL_VERSION = 9;
+export const WORKER_PROTOCOL_VERSION = 10;
 export const MAX_ADVANCE_TICKS_PER_REQUEST = 1_000_000;
 
 export type WorkerProtocolVersion = typeof WORKER_PROTOCOL_VERSION;
@@ -518,6 +519,12 @@ export interface RequestSaveRequest extends RequestBase {
   readonly type: 'requestSave';
 }
 
+/** Request one snapshot and its bounded focus facts from the same authoritative state. */
+export interface RequestFocusCheckpointRequest extends RequestBase {
+  readonly type: 'requestFocusCheckpoint';
+  readonly baselineEventId: number | null;
+}
+
 export interface RequestTimelinePageRequest extends RequestBase {
   readonly type: 'requestTimelinePage';
   readonly offset: number;
@@ -552,6 +559,7 @@ export type UiToWorkerMessage =
   | SetRunModeRequest
   | AdvanceTicksRequest
   | RequestSaveRequest
+  | RequestFocusCheckpointRequest
   | RequestTimelinePageRequest
   | RequestRelationshipPageRequest
   | RequestRelationshipEventPageRequest
@@ -778,6 +786,21 @@ export function validateUiToWorkerMessage(input: unknown): WorkerRequestValidati
         kind: 'valid',
         message: { type: 'requestSave', protocolVersion: WORKER_PROTOCOL_VERSION, requestId },
       };
+    case 'requestFocusCheckpoint':
+      return input.baselineEventId === null || isNonNegativeSafeInteger(input.baselineEventId)
+        ? {
+            kind: 'valid',
+            message: {
+              type: 'requestFocusCheckpoint',
+              protocolVersion: WORKER_PROTOCOL_VERSION,
+              requestId,
+              baselineEventId: input.baselineEventId,
+            },
+          }
+        : invalid(
+            requestId,
+            'requestFocusCheckpoint.baselineEventId must be null or a non-negative safe integer.',
+          );
     case 'requestTimelinePage':
       return isNonNegativeSafeInteger(input.offset)
         ? {
@@ -890,6 +913,12 @@ export interface SaveSnapshotResponse extends ResponseBase {
   readonly snapshot: string;
 }
 
+export interface FocusCheckpointResponse extends ResponseBase {
+  readonly type: 'focusCheckpoint';
+  readonly snapshot: string;
+  readonly checkpoint: FocusCheckpointProjection;
+}
+
 export interface TimelinePageResponse extends ResponseBase {
   readonly type: 'timelinePage';
   readonly offset: number;
@@ -959,6 +988,7 @@ export type WorkerToUiMessage =
   | FrameDeltaResponse
   | EventBatchResponse
   | SaveSnapshotResponse
+  | FocusCheckpointResponse
   | TimelinePageResponse
   | RelationshipPageResponse
   | RelationshipEventPageResponse
