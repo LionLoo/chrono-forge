@@ -9,6 +9,7 @@ import {
   stepWorld,
   type WorldState,
 } from '../../src/simulation/world';
+import { runReviewedFocusSession } from '../fixtures/m10-focus-session-evidence';
 
 const CHECKPOINT_YEARS = [25, 75, 150, 240] as const;
 const SCENARIOS = [
@@ -150,6 +151,22 @@ describe.sequential('M9 accelerated planetary and space scenarios', () => {
         expect(
           world.space.cargoTransfers.some((transfer) => transfer.origin.kind === 'alien'),
         ).toBe(true);
+        const firstLateSession = runReviewedFocusSession(world, 36_000);
+        const secondLateSession = runReviewedFocusSession(firstLateSession.world, 36_000);
+        expect(firstLateSession.review.after.tick - firstLateSession.review.before.tick).toBe(
+          36_000,
+        );
+        expect(secondLateSession.review.after.tick - secondLateSession.review.before.tick).toBe(
+          36_000,
+        );
+        expect(secondLateSession.review.before).toStrictEqual(firstLateSession.review.after);
+        expect(secondLateSession.world.space.programs.length).toBeGreaterThan(0);
+        expect(secondLateSession.world.space.colonies.length).toBeGreaterThan(0);
+        expect(
+          secondLateSession.world.space.aliens.some((alien) => alien.discoveredTick !== null),
+        ).toBe(true);
+        expect(serializeWorldSnapshot(firstLateSession.world)).toBe(firstLateSession.snapshot);
+        expect(serializeWorldSnapshot(secondLateSession.world)).toBe(secondLateSession.snapshot);
       } else {
         expect(
           world.space.relations.some(

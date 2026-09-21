@@ -14,6 +14,7 @@ import {
   type PerformOfflineCatchUpRequest,
   type RequestRelationshipEventPageRequest,
   type RequestRelationshipPageRequest,
+  type RequestFocusCheckpointRequest,
   type RequestSaveRequest,
   type RequestTimelinePageRequest,
   type RunMode,
@@ -26,6 +27,7 @@ import {
   type WorkerToUiMessage,
   type WorldFrameProjection,
 } from '../protocol';
+import { projectFocusCheckpoint } from '../focus/session-review';
 import {
   createWorldFrameDelta,
   estimateFrameDeltaPayloadBytes,
@@ -1213,6 +1215,24 @@ export function createSimulationRuntime(post: RuntimePost): SimulationRuntime {
     });
   }
 
+  function requestFocusCheckpoint(request: RequestFocusCheckpointRequest): void {
+    if (world === undefined) {
+      fault(
+        request.requestId,
+        'not-initialized',
+        'Initialize a world before requesting a focus checkpoint.',
+      );
+      return;
+    }
+    emit({
+      type: 'focusCheckpoint',
+      protocolVersion: WORKER_PROTOCOL_VERSION,
+      requestId: request.requestId,
+      snapshot: serializeWorldSnapshot(world),
+      checkpoint: projectFocusCheckpoint(world, request.baselineEventId),
+    });
+  }
+
   function requestTimelinePage(request: RequestTimelinePageRequest): void {
     if (world === undefined) {
       fault(request.requestId, 'not-initialized', 'Initialize a world before requesting history.');
@@ -1360,6 +1380,9 @@ export function createSimulationRuntime(post: RuntimePost): SimulationRuntime {
             return;
           case 'requestSave':
             requestSave(message);
+            return;
+          case 'requestFocusCheckpoint':
+            requestFocusCheckpoint(message);
             return;
           case 'requestTimelinePage':
             requestTimelinePage(message);

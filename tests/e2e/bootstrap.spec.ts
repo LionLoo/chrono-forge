@@ -81,6 +81,7 @@ test.afterAll(async () => {
 });
 
 test('production frontend renders a Worker-owned autonomous settlement', async ({ page }) => {
+  await page.clock.install({ time: new Date('2026-09-15T12:00:00Z') });
   await page.goto(origin);
 
   await expect(page).toHaveTitle('Chrono Forge');
@@ -108,10 +109,16 @@ test('production frontend renders a Worker-owned autonomous settlement', async (
   await page.getByRole('button', { name: 'Zoom world in' }).click();
   await expect(page.getByLabel('Camera position')).toContainText('1.20×');
 
-  await page.getByRole('button', { name: 'Observe 100 fixed ticks' }).click();
-  await expect(
-    page.locator('.world-metrics div').filter({ hasText: 'Logical tick' }),
-  ).toContainText('100');
+  await page.getByRole('button', { name: 'Start focus' }).click();
+  await page.clock.fastForward(10_000);
+  await page.getByRole('button', { name: 'Pause' }).click();
+  await page.getByRole('button', { name: 'Complete focus' }).click();
+  await expect(page.getByText('Session recorded with a factual recap.')).toBeVisible();
+  const logicalTick = page.locator('.world-metrics div').filter({ hasText: 'Logical tick' });
+  await expect
+    .poll(async () => Number(await logicalTick.locator('dd').textContent()))
+    .toBeGreaterThanOrEqual(100);
+  const firstFocusedTick = Number(await logicalTick.locator('dd').textContent());
   await expect(page.getByText('Active construction: 1 structure')).toBeVisible();
   await expect(page.getByRole('progressbar', { name: /Construction progress/ })).toBeVisible();
   await expect(page.getByText('Shelter 1 was planned.', { exact: true }).first()).toBeVisible();
@@ -124,14 +131,16 @@ test('production frontend renders a Worker-owned autonomous settlement', async (
   await page.getByText('Create another slot').click();
   await page.getByRole('button', { name: 'Save as new slot' }).click();
   await expect(page.getByText('New save slot created.')).toBeVisible();
-  await page.getByRole('button', { name: 'Observe 100 fixed ticks' }).click();
-  await expect(
-    page.locator('.world-metrics div').filter({ hasText: 'Logical tick' }),
-  ).toContainText('200');
+  await page.getByRole('button', { name: 'Start focus' }).click();
+  await page.clock.fastForward(10_000);
+  await page.getByRole('button', { name: 'Pause' }).click();
+  await page.getByRole('button', { name: 'Complete focus' }).click();
+  await expect(page.getByText('Session recorded with a factual recap.')).toBeVisible();
+  await expect
+    .poll(async () => Number(await logicalTick.locator('dd').textContent()))
+    .toBeGreaterThan(firstFocusedTick);
   await page.getByRole('combobox', { name: 'Load local slot' }).selectOption('primary');
-  await expect(
-    page.locator('.world-metrics div').filter({ hasText: 'Logical tick' }),
-  ).toContainText('100');
+  await expect(logicalTick).toContainText(firstFocusedTick.toString());
   await expect(structure).toHaveText(savedStructure);
   await expect(page.getByText('Shelter 1 was planned.', { exact: true }).first()).toBeVisible();
 });
@@ -147,13 +156,13 @@ test('society controls remain readable with reduced motion and 200% text', async
   await page.getByRole('button', { name: 'Open world inspection' }).click();
   await expect(page.getByRole('heading', { name: 'Settlement and society' })).toBeVisible();
   await expect(page.getByRole('combobox', { name: 'Inspect person' })).toBeVisible();
-  await expect(page.getByRole('button', { name: 'Observe 100 fixed ticks' })).toBeVisible();
-  await page.getByRole('button', { name: 'Observe 100 fixed ticks' }).click();
-  await expect(page.getByText(/condition 100% \(sound\)/)).toBeVisible();
+  await expect(page.getByRole('button', { name: /Observe .* fixed ticks/ })).toHaveCount(0);
+  await expect(
+    page.getByText(/Only accepted focus time advances the live world directly/),
+  ).toBeVisible();
+  const zoom = page.getByRole('button', { name: 'Zoom world in' });
   expect(['0.01ms', '1e-05s']).toContain(
-    await page
-      .getByRole('button', { name: 'Observe 100 fixed ticks' })
-      .evaluate((element) => getComputedStyle(element).transitionDuration),
+    await zoom.evaluate((element) => getComputedStyle(element).transitionDuration),
   );
 });
 

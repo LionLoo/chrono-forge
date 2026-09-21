@@ -10,6 +10,13 @@ import type {
 import type { FocusAlerts } from '../adapters/focus-alerts';
 import { type RuntimePersistence } from '../adapters/runtime-persistence';
 import { rehydrateFocusState } from '../focus';
+import {
+  FOCUS_SESSION_REVIEW_VERSION,
+  MAX_FOCUS_RECAP_EVENTS,
+  validateFocusSessionReview,
+  type FocusRevisitTarget,
+  type FocusSessionReview,
+} from '../focus/session-review';
 import type { WorkerEvent } from '../protocol';
 import { deserializeWorldSnapshot } from '../simulation/persistence';
 import { systemFocusClock, useFocusController, type FocusClock } from './useFocusController';
@@ -18,13 +25,13 @@ import type { WorldSimulationView } from './useWorldSimulation';
 const PRIMARY_SLOT_ID = 'primary';
 const PRIMARY_SLOT_NAME = 'Founding world';
 const AUTOSAVE_INTERVAL_MS = 30_000;
-const MAX_FACTUAL_RECAP_EVENTS = 12;
 const MAX_OFFLINE_CATCH_UP_RATE = 1_000;
 
 interface FocusPersistencePanelProps {
   readonly alerts: FocusAlerts;
   readonly clock?: FocusClock;
   readonly onReducedEffectsChange?: (reduced: boolean) => void;
+  readonly onRevisitTarget?: (target: FocusRevisitTarget) => void;
   readonly runtime: RuntimePersistence;
   readonly simulation: WorldSimulationView;
 }
@@ -60,13 +67,6 @@ function selectRestorableSession(save: LoadedSave): FocusSession | null {
     return null;
   }
   return session;
-}
-
-function restoresRunningFocus(session: FocusSession | null): boolean {
-  return (
-    session !== null &&
-    rehydrateFocusState(JSON.parse(session.stateJson) as unknown).phase === 'focus-running'
-  );
 }
 
 async function loadWorkspace(
@@ -106,11 +106,7 @@ async function loadWorkspace(
       settings = await runtime.gateway.saveSettings({ ...settings, activeSlotId: loaded.slotId });
     }
     const initialSession = selectRestorableSession(loaded);
-    if (
-      settings.offlineProgressionEnabled &&
-      loaded.savedAtMs > 0 &&
-      !restoresRunningFocus(initialSession)
-    ) {
+    if (settings.offlineProgressionEnabled && loaded.savedAtMs > 0 && initialSession === null) {
       const elapsedMilliseconds = boundedOfflineElapsedMilliseconds(
         loaded.savedAtMs,
         clock.now(),
@@ -179,6 +175,11 @@ function formatDuration(milliseconds: number): string {
   return `${minutes.toString().padStart(2, '0')}:${seconds.toString().padStart(2, '0')}`;
 }
 
+function formatDelta(before: number, after: number): string {
+  const delta = after - before;
+  return delta > 0 ? `+${delta}` : delta.toString();
+}
+
 function recapEntry(event: WorkerEvent): FocusRecapEntry {
   return { id: event.id, tick: event.tick, summary: event.summary };
 }
@@ -195,6 +196,7 @@ export function FocusPersistencePanel({
   alerts,
   clock = systemFocusClock,
   onReducedEffectsChange,
+  onRevisitTarget,
   runtime,
   simulation,
 }: FocusPersistencePanelProps) {
@@ -314,6 +316,7 @@ export function FocusPersistencePanel({
       runtime={runtime}
       simulation={simulation}
       {...(onReducedEffectsChange === undefined ? {} : { onReducedEffectsChange })}
+      {...(onRevisitTarget === undefined ? {} : { onRevisitTarget })}
     />
   );
 }
@@ -323,6 +326,7 @@ interface FocusWorkspaceProps {
   readonly clock: FocusClock;
   readonly initial: WorkspaceData;
   readonly onReducedEffectsChange?: (reduced: boolean) => void;
+  readonly onRevisitTarget?: (target: FocusRevisitTarget) => void;
   readonly onReplaceWorkspace: (workspace: WorkspaceData) => void;
   readonly runtime: RuntimePersistence;
   readonly simulation: WorldSimulationView;
@@ -333,6 +337,7 @@ function FocusWorkspace({
   clock,
   initial,
   onReducedEffectsChange,
+  onRevisitTarget,
   onReplaceWorkspace,
   runtime,
   simulation,
@@ -370,6 +375,7 @@ function FocusWorkspace({
   const recapEntriesRef = useRef<readonly FocusRecapEntry[]>(
     initial.initialSession?.recapEntries ?? [],
   );
+  const reviewRef = useRef<FocusSessionReview | null>(initial.initialSession?.review ?? null);
   const autosaveTimerRef = useRef<number | null>(null);
   const alertedSessionIdsRef = useRef(
     new Set(
@@ -408,6 +414,68 @@ function FocusWorkspace({
     (session: FocusSession, reason: string): Promise<void> =>
       enqueue(async () => {
         try {
+          const existingReview = reviewRef.current;
+          const isNewSession = recapSessionIdRef.current !== session.sessionId;
+          if (isNewSession) {
+            recapSessionIdRef.current = session.sessionId;
+            reviewRef.current = null;
+          }
+          if (existingReview !== null || isNewSession || session.issuedSimulationTicks === 0) {
+            const baselineEventId = isNewSession ? null : (existingReview?.baselineEventId ?? null);
+            const { checkpoint, snapshot } =
+              await simulation.requestFocusCheckpoint(baselineEventId);
+            const review = validateFocusSessionReview(
+              existingReview === null || isNewSession
+                ? {
+                    version: FOCUS_SESSION_REVIEW_VERSION,
+                    baselineEventId: checkpoint.latestEventId,
+                    before: checkpoint.moment,
+                    after: checkpoint.moment,
+                    revisitTarget: checkpoint.revisitTarget,
+                  }
+                : {
+                    ...existingReview,
+                    after: checkpoint.moment,
+                    revisitTarget: checkpoint.revisitTarget,
+                  },
+            );
+            const recapEntries = checkpoint.recapEntries;
+            const recapEventIds = recapEntries.map((entry) => entry.id);
+            const persistedSession: FocusSession = {
+              ...session,
+              recapEventIds,
+              recapEntries,
+              review,
+            };
+            reviewRef.current = review;
+            recapBaselineEventIdRef.current = review.baselineEventId;
+            recapEventIdsRef.current = recapEventIds;
+            recapEntriesRef.current = recapEntries;
+            latestSessionRef.current = persistedSession;
+            const slot = activeSaveRef.current;
+            const committed = await runtime.gateway.commitFocusCheckpoint(
+              slot.slotId,
+              slot.name,
+              snapshot,
+              persistedSession,
+              recapEventIds,
+            );
+            await updateArchiveState(committed);
+            setNotice(reason);
+            setOperationError(null);
+            if (
+              persistedSession.status !== 'cancelled' &&
+              focusHasEnded(persistedSession) &&
+              !alertedSessionIdsRef.current.has(persistedSession.sessionId)
+            ) {
+              alertedSessionIdsRef.current.add(persistedSession.sessionId);
+              await alerts.notifyCompletion(settings).catch(() => undefined);
+            }
+            return;
+          }
+
+          // Conservative compatibility path for an in-progress pre-M10.1 session: preserve its
+          // existing recap contract without manufacturing a historical before-state.
           const visibleEventsById = new Map(simulation.events.map((event) => [event.id, event]));
           const visibleEventIds = [...visibleEventsById.keys()];
           const latestEventId = visibleEventIds.at(-1) ?? 0;
@@ -424,7 +492,7 @@ function FocusWorkspace({
           recapBaselineEventIdRef.current = latestEventId;
           recapEventIdsRef.current = [...new Set([...recapEventIdsRef.current, ...newEventIds])]
             .sort((left, right) => left - right)
-            .slice(-MAX_FACTUAL_RECAP_EVENTS);
+            .slice(-MAX_FOCUS_RECAP_EVENTS);
           const storedEntriesById = new Map(
             recapEntriesRef.current.map((entry) => [entry.id, entry]),
           );
@@ -660,6 +728,85 @@ function FocusWorkspace({
   const totalFocusedMs = completedSessions.reduce((total, session) => total + session.focusedMs, 0);
   const latestCompleted = completedSessions[0] ?? null;
   const recapEntries = latestCompleted?.recapEntries ?? [];
+  const latestReview = latestCompleted?.review ?? null;
+  const activeSettlement = simulation.frame?.civilizations.settlements
+    .filter((settlement) => settlement.status === 'active')
+    .slice()
+    .sort((left, right) => left.id - right.id)[0];
+  const reviewFacts =
+    latestReview === null
+      ? []
+      : (
+          [
+            [
+              'Detailed people',
+              latestReview.before.detailedPopulation,
+              latestReview.after.detailedPopulation,
+            ],
+            [
+              'Surface population',
+              latestReview.before.surfacePopulation,
+              latestReview.after.surfacePopulation,
+            ],
+            ['Food stores', latestReview.before.food, latestReview.after.food],
+            ['Water stores', latestReview.before.water, latestReview.after.water],
+            ['Timber stores', latestReview.before.timber, latestReview.after.timber],
+            ['Stone stores', latestReview.before.stone, latestReview.after.stone],
+            [
+              'Operational structures',
+              latestReview.before.operationalStructures,
+              latestReview.after.operationalStructures,
+            ],
+            [
+              'Construction underway',
+              latestReview.before.activeConstruction,
+              latestReview.after.activeConstruction,
+            ],
+            ['Households', latestReview.before.households, latestReview.after.households],
+            ['Scarcity', latestReview.before.scarcity, latestReview.after.scarcity],
+            ['Stability', latestReview.before.stability, latestReview.after.stability],
+            [
+              'Settlements',
+              latestReview.before.activeSettlements,
+              latestReview.after.activeSettlements,
+            ],
+            [
+              'Civilizations',
+              latestReview.before.activeCivilizations,
+              latestReview.after.activeCivilizations,
+            ],
+            ['Trade routes', latestReview.before.activeRoutes, latestReview.after.activeRoutes],
+            [
+              'Active conflicts',
+              latestReview.before.activeConflicts,
+              latestReview.after.activeConflicts,
+            ],
+            ['Active crises', latestReview.before.activeCrises, latestReview.after.activeCrises],
+            ['Ruins', latestReview.before.ruins, latestReview.after.ruins],
+            [
+              'Offworld population',
+              latestReview.before.offworldPopulation,
+              latestReview.after.offworldPopulation,
+            ],
+            [
+              'Active missions',
+              latestReview.before.activeMissions,
+              latestReview.after.activeMissions,
+            ],
+            [
+              'Active colonies',
+              latestReview.before.activeColonies,
+              latestReview.after.activeColonies,
+            ],
+            [
+              'Contacted aliens',
+              latestReview.before.contactedAliens,
+              latestReview.after.contactedAliens,
+            ],
+          ] as const
+        )
+          .filter(([, before, after]) => before !== after)
+          .slice(0, 6);
 
   return (
     <section className="focus-card" aria-labelledby="focus-title">
@@ -690,6 +837,13 @@ function FocusWorkspace({
 
           {focus.state.phase === 'idle' ? (
             <div className="focus-setup">
+              <p className="focus-world-context">
+                Focus with <strong>{activeSave.name}</strong> at tick{' '}
+                {simulation.frame?.tick ?? '—'}
+                {activeSettlement === undefined
+                  ? '.'
+                  : ` · ${activeSettlement.name}, ${activeSettlement.developmentStage.replaceAll('-', ' ')} stage.`}
+              </p>
               <div className="preset-row" aria-label="Focus presets">
                 {[25, 50, 90].map((minutes) => (
                   <button
@@ -997,8 +1151,40 @@ function FocusWorkspace({
             <div className="recap-panel">
               <h4>Latest factual recap</h4>
               <p>{formatDuration(latestCompleted.focusedMs)} of accepted focus time.</p>
+              {latestReview === null ? (
+                <p>No retained authoritative before-and-after checkpoint is available.</p>
+              ) : (
+                <>
+                  <p>
+                    World tick {latestReview.before.tick} → {latestReview.after.tick} ·{' '}
+                    {latestReview.after.tick - latestReview.before.tick} accepted-focus ticks
+                  </p>
+                  {reviewFacts.length === 0 ? (
+                    <p>Tracked settlement facts were unchanged.</p>
+                  ) : (
+                    <dl className="recap-comparison" aria-label="Session before and after facts">
+                      {reviewFacts.map(([label, before, after]) => (
+                        <div key={label}>
+                          <dt>{label}</dt>
+                          <dd>
+                            {before} → {after} <span>({formatDelta(before, after)})</span>
+                          </dd>
+                        </div>
+                      ))}
+                    </dl>
+                  )}
+                  {latestReview.before.leadingSettlement?.developmentStage ===
+                  latestReview.after.leadingSettlement?.developmentStage ? null : (
+                    <p>
+                      Leading settlement stage:{' '}
+                      {latestReview.before.leadingSettlement?.developmentStage ?? 'none'} →{' '}
+                      {latestReview.after.leadingSettlement?.developmentStage ?? 'none'}
+                    </p>
+                  )}
+                </>
+              )}
               {recapEntries.length === 0 ? (
-                <p>No factual event details were stored for this session.</p>
+                <p>No major event was recorded during this session.</p>
               ) : (
                 <ul>
                   {recapEntries.map((entry) => (
@@ -1007,6 +1193,13 @@ function FocusWorkspace({
                     </li>
                   ))}
                 </ul>
+              )}
+              {latestReview?.revisitTarget === null ||
+              latestReview?.revisitTarget === undefined ||
+              onRevisitTarget === undefined ? null : (
+                <button onClick={() => onRevisitTarget(latestReview.revisitTarget!)} type="button">
+                  Revisit {latestReview.revisitTarget.label}
+                </button>
               )}
             </div>
           )}

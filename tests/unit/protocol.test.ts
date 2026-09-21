@@ -573,6 +573,35 @@ describe('versioned worker protocol', () => {
     ).toMatchObject({ kind: 'invalid' });
   });
 
+  it('validates the bounded focus-checkpoint baseline without accepting future event IDs', () => {
+    expect(
+      validateUiToWorkerMessage({
+        type: 'requestFocusCheckpoint',
+        protocolVersion: WORKER_PROTOCOL_VERSION,
+        requestId: 'focus-checkpoint-start',
+        baselineEventId: null,
+      }),
+    ).toMatchObject({ kind: 'valid' });
+    expect(
+      validateUiToWorkerMessage({
+        type: 'requestFocusCheckpoint',
+        protocolVersion: WORKER_PROTOCOL_VERSION,
+        requestId: 'focus-checkpoint-progress',
+        baselineEventId: 2,
+      }),
+    ).toMatchObject({ kind: 'valid' });
+    for (const baselineEventId of [-1, 1.5, Number.MAX_SAFE_INTEGER + 1, '2']) {
+      expect(
+        validateUiToWorkerMessage({
+          type: 'requestFocusCheckpoint',
+          protocolVersion: WORKER_PROTOCOL_VERSION,
+          requestId: 'invalid-focus-checkpoint',
+          baselineEventId,
+        }),
+      ).toMatchObject({ kind: 'invalid' });
+    }
+  });
+
   it('accepts only the closed typed M5 intervention command surface', () => {
     const valid = validateUiToWorkerMessage({
       type: 'queueCommand',

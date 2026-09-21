@@ -12,6 +12,7 @@ import {
   type WorldFrameProjection,
 } from '../protocol';
 import { applyWorldFrameDelta } from '../protocol/frame-delta';
+import type { FocusCheckpointProjection } from '../focus/session-review';
 import type { WorldConfig, WorldSeed } from '../simulation/world';
 import {
   MAX_RECENT_WORKER_EVENTS,
@@ -53,6 +54,16 @@ interface PendingSaveRequest {
   readonly resolve: (snapshot: string) => void;
 }
 
+export interface FocusCheckpointResult {
+  readonly snapshot: string;
+  readonly checkpoint: FocusCheckpointProjection;
+}
+
+interface PendingFocusCheckpointRequest {
+  readonly reject: (reason: Error) => void;
+  readonly resolve: (result: FocusCheckpointResult) => void;
+}
+
 export interface WorldSimulationView {
   readonly advanceTicks: (ticks: number) => void;
   readonly error: string | null;
@@ -62,6 +73,9 @@ export interface WorldSimulationView {
   readonly performOfflineCatchUp: (elapsedMilliseconds: number, rate: number) => Promise<void>;
   readonly queueCommand: (command: QueuedCommand) => Promise<void>;
   readonly requestSave: () => Promise<string>;
+  readonly requestFocusCheckpoint: (
+    baselineEventId: number | null,
+  ) => Promise<FocusCheckpointResult>;
   readonly requestTimelinePage: (offset: number) => void;
   readonly requestRelationshipPage: (personId: number, offset: number) => void;
   readonly requestRelationshipEventPage: (
@@ -122,6 +136,7 @@ export function useWorldSimulation(
   const workerRef = useRef<SimulationWorkerPort | null>(null);
   const requestSequenceRef = useRef(0);
   const pendingSavesRef = useRef(new Map<string, PendingSaveRequest>());
+  const pendingFocusCheckpointsRef = useRef(new Map<string, PendingFocusCheckpointRequest>());
   const pendingLoadsRef = useRef(new Map<string, PendingVoidRequest>());
   const pendingOfflineRef = useRef(new Map<string, PendingVoidRequest>());
   const pendingCommandsRef = useRef(new Map<string, PendingVoidRequest>());
@@ -146,6 +161,7 @@ export function useWorldSimulation(
 
     workerRef.current = worker;
     const pendingSaves = pendingSavesRef.current;
+    const pendingFocusCheckpoints = pendingFocusCheckpointsRef.current;
     const pendingLoads = pendingLoadsRef.current;
     const pendingOffline = pendingOfflineRef.current;
     const pendingCommands = pendingCommandsRef.current;
@@ -154,6 +170,11 @@ export function useWorldSimulation(
       if (pendingSave !== undefined) {
         pendingSaves.delete(requestId);
         pendingSave.reject(reason);
+      }
+      const pendingFocusCheckpoint = pendingFocusCheckpoints.get(requestId);
+      if (pendingFocusCheckpoint !== undefined) {
+        pendingFocusCheckpoints.delete(requestId);
+        pendingFocusCheckpoint.reject(reason);
       }
       const pendingLoad = pendingLoads.get(requestId);
       if (pendingLoad !== undefined) {
@@ -173,10 +194,12 @@ export function useWorldSimulation(
     };
     const rejectAll = (reason: Error) => {
       for (const pending of pendingSaves.values()) pending.reject(reason);
+      for (const pending of pendingFocusCheckpoints.values()) pending.reject(reason);
       for (const pending of pendingLoads.values()) pending.reject(reason);
       for (const pending of pendingOffline.values()) pending.reject(reason);
       for (const pending of pendingCommands.values()) pending.reject(reason);
       pendingSaves.clear();
+      pendingFocusCheckpoints.clear();
       pendingLoads.clear();
       pendingOffline.clear();
       pendingCommands.clear();
@@ -284,6 +307,14 @@ export function useWorldSimulation(
           }
           return;
         }
+        case 'focusCheckpoint': {
+          const pending = pendingFocusCheckpoints.get(message.requestId);
+          if (pending !== undefined) {
+            pendingFocusCheckpoints.delete(message.requestId);
+            pending.resolve({ snapshot: message.snapshot, checkpoint: message.checkpoint });
+          }
+          return;
+        }
         case 'metrics': {
           const pendingLoad = pendingLoads.get(message.requestId);
           if (pendingLoad !== undefined) {
@@ -369,6 +400,28 @@ export function useWorldSimulation(
     });
     return promise;
   }, [nextRequestId]);
+
+  const requestFocusCheckpoint = useCallback(
+    (baselineEventId: number | null): Promise<FocusCheckpointResult> => {
+      if (baselineEventId !== null)
+        assertNonNegativeSafeInteger(baselineEventId, 'Focus event baseline');
+      const worker = workerRef.current;
+      if (worker === null)
+        return Promise.reject(new Error('The simulation worker is unavailable.'));
+      const requestId = nextRequestId('focus-checkpoint');
+      const promise = new Promise<FocusCheckpointResult>((resolve, reject) => {
+        pendingFocusCheckpointsRef.current.set(requestId, { resolve, reject });
+      });
+      worker.postMessage({
+        type: 'requestFocusCheckpoint',
+        protocolVersion: WORKER_PROTOCOL_VERSION,
+        requestId,
+        baselineEventId,
+      });
+      return promise;
+    },
+    [nextRequestId],
+  );
 
   const requestTimelinePage = useCallback(
     (offset: number) => {
@@ -499,6 +552,7 @@ export function useWorldSimulation(
       performOfflineCatchUp,
       queueCommand,
       requestSave,
+      requestFocusCheckpoint,
       relationshipEventPage,
       relationshipPage,
       requestRelationshipEventPage,
@@ -516,6 +570,7 @@ export function useWorldSimulation(
       performOfflineCatchUp,
       queueCommand,
       requestSave,
+      requestFocusCheckpoint,
       relationshipEventPage,
       relationshipPage,
       requestRelationshipEventPage,

@@ -8,10 +8,12 @@ import {
   type LoadedSave,
   type TauriInvoke,
 } from '../../src/adapters/persistence';
-import { checkpointFocus, createIdleFocusState, startFocus } from '../../src/focus';
+import { checkpointFocus, completeFocus, createIdleFocusState, startFocus } from '../../src/focus';
+import { projectFocusCheckpoint } from '../../src/focus/session-review';
 import { hashCanonicalJson } from '../../src/simulation/canonical';
 import { deserializeWorldSnapshot, serializeWorldSnapshot } from '../../src/simulation/persistence';
 import { createInitialWorld, stepWorld } from '../../src/simulation/world';
+import { focusSessionFromState } from '../../src/ui/useFocusController';
 
 const ticksByName: Readonly<Record<string, number>> = {
   one: 1,
@@ -70,6 +72,14 @@ const completedSession: FocusSession = {
   recapEventIds: [1],
   recapEntries: [{ id: 1, tick: 0, summary: 'The founding world formed.' }],
 };
+
+function nativeFocusRecord(
+  session: FocusSession,
+  authoritySession: FocusSession | null = null,
+  checkpointGeneration: number | null = null,
+) {
+  return { session, authoritySession, checkpointGeneration };
+}
 
 describe('persistence adapter', () => {
   it('upgrades matching pre-v13 focus recap copies with their authoritative world summaries', async () => {
@@ -135,12 +145,12 @@ describe('persistence adapter', () => {
       await Promise.resolve();
       if (command === 'list_focus_sessions') {
         return [
-          {
+          nativeFocusRecord({
             ...completedSession,
             recapEntries: [
               { id: 1, tick: 0, summary: 'A fabricated narrative passed validation.' },
             ],
-          },
+          }),
         ] as never;
       }
       if (command === 'load_save_slot_candidates') {
@@ -168,6 +178,108 @@ describe('persistence adapter', () => {
     ]);
   });
 
+  it('ignores fabricated quiet-history review facts unless the exact checkpoint proves them', async () => {
+    const beforeWorld = createInitialWorld([1, 2, 3, 4], {
+      width: 2,
+      height: 2,
+      chunkSize: 2,
+    });
+    const afterWorld = stepWorld(beforeWorld, 1);
+    const baseline = projectFocusCheckpoint(beforeWorld, null);
+    const checkpoint = projectFocusCheckpoint(afterWorld, baseline.latestEventId);
+    expect(checkpoint.recapEntries).toEqual([]);
+    const completedState = completeFocus(
+      startFocus(
+        createIdleFocusState(),
+        { focusDurationMs: 100, breakDurationMs: 0, simulationTicksPerFocusSecond: 10 },
+        100,
+      ),
+      200,
+    );
+    const authoritativeSession: FocusSession = {
+      ...focusSessionFromState('quiet-review', 'alpha', completedState, []),
+      recapEntries: [],
+      review: {
+        version: 1,
+        baselineEventId: baseline.latestEventId,
+        before: baseline.moment,
+        after: checkpoint.moment,
+        revisitTarget: checkpoint.revisitTarget,
+      },
+    };
+    const fabricatedHistory: FocusSession = {
+      ...authoritativeSession,
+      review: {
+        ...authoritativeSession.review!,
+        after: {
+          ...authoritativeSession.review!.after,
+          food: authoritativeSession.review!.after.food + 1,
+        },
+        revisitTarget: {
+          kind: 'settlement',
+          id: 999,
+          label: 'Invented settlement',
+          sourceEventId: null,
+        },
+      },
+    };
+    const sourceSnapshot = serializeWorldSnapshot(afterWorld);
+    const sourceSave: LoadedSave = {
+      slotId: 'alpha',
+      name: 'Alpha',
+      headGeneration: 2,
+      recoveredGeneration: 2,
+      recoveredFromCorruption: false,
+      savedAtMs: 2_000,
+      focusSession: authoritativeSession,
+      snapshot: sourceSnapshot,
+      checksum: checksumOf(sourceSnapshot),
+    };
+    const gateway = createTauriPersistenceGateway(async (command) => {
+      await Promise.resolve();
+      if (command === 'list_focus_sessions') {
+        return [nativeFocusRecord(fabricatedHistory, authoritativeSession, 2)] as never;
+      }
+      throw new Error(`unexpected ${command}`);
+    });
+
+    await expect(gateway.listFocusSessions(sourceSave)).resolves.toEqual([authoritativeSession]);
+    await expect(gateway.listFocusSessions({ ...sourceSave, focusSession: null })).resolves.toEqual(
+      [authoritativeSession],
+    );
+
+    const unverifiedGateway = createTauriPersistenceGateway(async () => {
+      await Promise.resolve();
+      return [nativeFocusRecord(fabricatedHistory)] as never;
+    });
+    await expect(
+      unverifiedGateway.listFocusSessions({ ...sourceSave, focusSession: null }),
+    ).resolves.toEqual([{ ...fabricatedHistory, review: null }]);
+
+    const previewGateway = createInMemoryPersistenceGateway(() => 3_000);
+    await previewGateway.commitFocusCheckpoint(
+      'alpha',
+      'Alpha',
+      sourceSnapshot,
+      authoritativeSession,
+      [],
+    );
+    await previewGateway.commitSaveSlot('alpha', 'Alpha', snapshot('two'));
+    await previewGateway.commitSaveSlot('alpha', 'Alpha', snapshot('three'));
+    const laterAlpha = await previewGateway.commitSaveSlot('alpha', 'Alpha', snapshot('four'));
+    await expect(previewGateway.listFocusSessions(laterAlpha)).resolves.toEqual([
+      authoritativeSession,
+    ]);
+
+    const beta = await previewGateway.commitSaveSlot('beta', 'Beta', snapshot('other'));
+    await expect(previewGateway.listFocusSessions(beta)).resolves.toEqual([
+      { ...authoritativeSession, review: null },
+    ]);
+    await expect(
+      previewGateway.listFocusSessions((await previewGateway.loadSaveSlot('alpha'))!),
+    ).resolves.toEqual([authoritativeSession]);
+  });
+
   it('verifies recap prose against one supplied active save without loading historical slots', async () => {
     const calls: string[] = [];
     const alphaSessions = Array.from({ length: 64 }, (_, index): FocusSession => ({
@@ -182,7 +294,11 @@ describe('persistence adapter', () => {
     const invoke: TauriInvoke = async (command) => {
       await Promise.resolve();
       calls.push(command);
-      if (command === 'list_focus_sessions') return [...alphaSessions, betaSession] as never;
+      if (command === 'list_focus_sessions') {
+        return [...alphaSessions, betaSession].map((session) =>
+          nativeFocusRecord(session),
+        ) as never;
+      }
       throw new Error(`unexpected ${command}`);
     };
     const sourceSnapshot = snapshot('one');
@@ -292,7 +408,7 @@ describe('persistence adapter', () => {
         case 'import_save_slot':
           return loaded as never;
         case 'list_focus_sessions':
-          return [completedSession] as never;
+          return [nativeFocusRecord(completedSession)] as never;
         case 'load_settings':
           return DEFAULT_APP_SETTINGS as never;
         default:
@@ -397,6 +513,87 @@ describe('persistence adapter', () => {
     const reloaded = deserializeWorldSnapshot(recovered!.snapshot);
     expect(reloaded.civilization.society.interpersonal.active.length).toBeGreaterThan(0);
     expect(serializeWorldSnapshot(reloaded)).toBe(recoveredSnapshot);
+  });
+
+  it('falls back when a checksum-valid head fabricates persisted review facts', async () => {
+    const beforeWorld = createInitialWorld([1, 2, 3, 4], {
+      width: 2,
+      height: 2,
+      chunkSize: 2,
+    });
+    const afterWorld = stepWorld(beforeWorld, 1);
+    const baseline = projectFocusCheckpoint(beforeWorld, null);
+    const checkpoint = projectFocusCheckpoint(afterWorld, baseline.latestEventId);
+    const completedState = completeFocus(
+      startFocus(
+        createIdleFocusState(),
+        { focusDurationMs: 100, breakDurationMs: 0, simulationTicksPerFocusSecond: 10 },
+        100,
+      ),
+      200,
+    );
+    const session: FocusSession = {
+      ...focusSessionFromState(
+        'review-session',
+        'alpha',
+        completedState,
+        checkpoint.recapEntries.map((entry) => entry.id),
+      ),
+      recapEntries: checkpoint.recapEntries,
+      review: {
+        version: 1,
+        baselineEventId: baseline.latestEventId,
+        before: baseline.moment,
+        after: checkpoint.moment,
+        revisitTarget: checkpoint.revisitTarget,
+      },
+    };
+    const validSnapshot = serializeWorldSnapshot(afterWorld);
+    const tamperedSession: FocusSession = {
+      ...session,
+      review: {
+        ...session.review!,
+        after: { ...session.review!.after, food: session.review!.after.food + 1 },
+        revisitTarget:
+          session.review!.revisitTarget === null
+            ? null
+            : { ...session.review!.revisitTarget, id: session.review!.revisitTarget.id + 1 },
+      },
+    };
+    const gateway = createTauriPersistenceGateway(async (command) => {
+      await Promise.resolve();
+      if (command !== 'load_save_slot_candidates') throw new Error('unexpected command');
+      return [
+        {
+          slotId: 'alpha',
+          name: 'Alpha',
+          headGeneration: 2,
+          recoveredGeneration: 2,
+          recoveredFromCorruption: false,
+          savedAtMs: 2_000,
+          focusSession: tamperedSession,
+          snapshot: validSnapshot,
+          checksum: checksumOf(validSnapshot),
+        },
+        {
+          slotId: 'alpha',
+          name: 'Alpha',
+          headGeneration: 2,
+          recoveredGeneration: 1,
+          recoveredFromCorruption: true,
+          savedAtMs: 1_000,
+          focusSession: session,
+          snapshot: validSnapshot,
+          checksum: checksumOf(validSnapshot),
+        },
+      ] as never;
+    });
+
+    await expect(gateway.loadSaveSlot('alpha')).resolves.toMatchObject({
+      recoveredGeneration: 1,
+      recoveredFromCorruption: true,
+      focusSession: session,
+    });
   });
 
   it('round-trips independent slots, immutable increasing generations, and export/import', async () => {

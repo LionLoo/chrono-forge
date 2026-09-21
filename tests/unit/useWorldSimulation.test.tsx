@@ -5,7 +5,7 @@ import {
   createWorldFrameDelta,
   estimateFrameDeltaPayloadBytes,
 } from '../../src/protocol/frame-delta';
-import { serializeWorldSnapshot } from '../../src/simulation/persistence';
+import { deserializeWorldSnapshot, serializeWorldSnapshot } from '../../src/simulation/persistence';
 import { createInitialWorld, stepWorld } from '../../src/simulation/world';
 import { useWorldSimulation, type SimulationWorkerPort } from '../../src/ui/useWorldSimulation';
 import { createSimulationRuntime, projectWorldFrame } from '../../src/workers/simulation-runtime';
@@ -347,6 +347,27 @@ describe('world simulation UI gateway', () => {
         amount: 6,
       },
     ]);
+  });
+
+  it('returns a focus checkpoint and snapshot from the same authoritative Worker state', async () => {
+    const { result } = renderHook(() => useWorldSimulation(createRuntimeWorker));
+    await waitFor(() => expect(result.current.status).toBe('ready'));
+
+    const baseline = await act(async () => result.current.requestFocusCheckpoint(null));
+    expect(baseline.checkpoint).toMatchObject({
+      latestEventId: 2,
+      moment: { tick: 0 },
+      recapEntries: [],
+    });
+    act(() => result.current.advanceTicks(100));
+    await waitFor(() => expect(result.current.frame?.tick).toBe(100));
+    const completed = await act(async () =>
+      result.current.requestFocusCheckpoint(baseline.checkpoint.latestEventId),
+    );
+
+    expect(deserializeWorldSnapshot(completed.snapshot).tick).toBe(100);
+    expect(completed.checkpoint.moment.tick).toBe(100);
+    expect(completed.checkpoint.recapEntries.map((entry) => entry.id)).toEqual([3]);
   });
 
   it('rejects invalid snapshots from the worker boundary', async () => {
