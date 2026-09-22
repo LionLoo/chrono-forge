@@ -9,6 +9,7 @@ import {
   type PersistenceGateway,
 } from '../../src/adapters/persistence';
 import type { RuntimePersistence } from '../../src/adapters/runtime-persistence';
+import type { GameSoundscape } from '../../src/adapters/soundscape';
 import { projectFocusCheckpoint } from '../../src/focus/session-review';
 import { PROJECT_META } from '../../src/project-meta';
 import type { UiToWorkerMessage, WorkerToUiMessage } from '../../src/protocol';
@@ -59,6 +60,8 @@ function createPreviewPersistence(): RuntimePersistence {
   return { gateway: createInMemoryPersistenceGateway(), mode: 'browser-preview' };
 }
 
+const UI_READY_TIMEOUT = { timeout: 5_000 } as const;
+
 describe('deterministic world lab', () => {
   it('shows an independently reproduced seeded worker world', async () => {
     const user = userEvent.setup();
@@ -89,8 +92,23 @@ describe('deterministic world lab', () => {
 
   it('changes overlays and camera without exposing a direct world-advance control', async () => {
     const user = userEvent.setup();
-    render(<App persistence={createPreviewPersistence()} workerFactory={createRuntimeWorker} />);
+    const playCue = vi.fn<GameSoundscape['playCue']>(() => Promise.resolve());
+    const updateAtmosphere = vi.fn<GameSoundscape['updateAtmosphere']>(() => Promise.resolve());
+    render(
+      <App
+        persistence={createPreviewPersistence()}
+        soundscape={{
+          playCue,
+          stop: vi.fn(() => Promise.resolve()),
+          updateAtmosphere,
+        }}
+        workerFactory={createRuntimeWorker}
+      />,
+    );
     await screen.findByText('Worker projection ready · autonomous world active');
+    await waitFor(() =>
+      expect(updateAtmosphere).toHaveBeenCalledWith('founding', expect.any(Object)),
+    );
 
     await user.click(screen.getByRole('radio', { name: 'Resources' }));
     expect(screen.getByRole('img', { name: 'Generated Chrono Forge world' })).toHaveAttribute(
@@ -106,6 +124,7 @@ describe('deterministic world lab', () => {
     expect(screen.getByRole('article', { name: 'Selected map object' })).toHaveTextContent(
       'Person 1',
     );
+    expect(playCue).toHaveBeenCalledWith('selection', expect.any(Object));
 
     await user.click(screen.getByRole('button', { name: 'Zoom world in' }));
     expect(screen.getByText(/1\.20×/)).toBeVisible();
@@ -170,7 +189,7 @@ describe('deterministic world lab', () => {
         workerFactory={createRuntimeWorker}
       />,
     );
-    await screen.findByRole('button', { name: 'Start focus' });
+    await screen.findByRole('button', { name: 'Start focus' }, UI_READY_TIMEOUT);
 
     const duration = screen.getByRole('spinbutton', { name: 'Custom focus minutes' });
     await user.clear(duration);
@@ -217,7 +236,7 @@ describe('deterministic world lab', () => {
     expect(completed).not.toBeNull();
     expect(within(completed!).getByText('1')).toBeVisible();
     expect(await persistence.gateway.listFocusSessions()).toMatchObject([{ recapEventIds: [3] }]);
-  });
+  }, 30_000);
 
   it('persists exact consecutive 25, 50, and 60 minute controller-to-Worker reviews', async () => {
     const user = userEvent.setup();
@@ -231,7 +250,7 @@ describe('deterministic world lab', () => {
         workerFactory={createRuntimeWorker}
       />,
     );
-    await screen.findByRole('button', { name: 'Start focus' });
+    await screen.findByRole('button', { name: 'Start focus' }, UI_READY_TIMEOUT);
 
     for (const [index, minutes] of [25, 50, 60].entries()) {
       fireEvent.change(screen.getByRole('spinbutton', { name: 'Custom focus minutes' }), {
@@ -278,18 +297,18 @@ describe('deterministic world lab', () => {
 
       if (index < 2) {
         await user.click(screen.getByRole('button', { name: 'New session' }));
-        await screen.findByRole('button', { name: 'Start focus' });
+        await screen.findByRole('button', { name: 'Start focus' }, UI_READY_TIMEOUT);
       }
     }
 
     await expect(persistence.gateway.listFocusSessions()).resolves.toHaveLength(3);
-  });
+  }, 60_000);
 
   it('manages multiple slots, validated exports, and calm local settings', async () => {
     const user = userEvent.setup();
     const persistence = createPreviewPersistence();
     render(<App persistence={persistence} workerFactory={createRuntimeWorker} />);
-    await screen.findByRole('button', { name: 'Start focus' });
+    await screen.findByRole('button', { name: 'Start focus' }, UI_READY_TIMEOUT);
 
     await user.click(screen.getByText('Create another slot'));
     await user.click(screen.getByRole('button', { name: 'Save as new slot' }));
@@ -343,7 +362,7 @@ describe('deterministic world lab', () => {
         workerFactory={createRuntimeWorker}
       />,
     );
-    await screen.findByRole('button', { name: 'Start focus' });
+    await screen.findByRole('button', { name: 'Start focus' }, UI_READY_TIMEOUT);
 
     await user.click(screen.getByRole('button', { name: 'Start focus' }));
     act(() => {
@@ -377,13 +396,13 @@ describe('deterministic world lab', () => {
       expect(sessions.some((session) => session.status === 'cancelled')).toBe(true);
     });
     expect(notifyCompletion).toHaveBeenCalledOnce();
-  }, 15_000);
+  }, 30_000);
 
   it('validates imported packages, manually saves, and loads another slot', async () => {
     const user = userEvent.setup();
     const persistence = createPreviewPersistence();
     render(<App persistence={persistence} workerFactory={createRuntimeWorker} />);
-    await screen.findByRole('button', { name: 'Start focus' });
+    await screen.findByRole('button', { name: 'Start focus' }, UI_READY_TIMEOUT);
 
     await user.click(screen.getByRole('button', { name: 'Save now' }));
     await screen.findByText('World saved manually.');

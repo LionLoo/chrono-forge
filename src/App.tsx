@@ -1,7 +1,13 @@
-import { useCallback, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 
 import { getFocusAlerts, type FocusAlerts } from './adapters/focus-alerts';
+import { DEFAULT_APP_SETTINGS, type AppSettings } from './adapters/persistence';
 import { getRuntimePersistence, type RuntimePersistence } from './adapters/runtime-persistence';
+import {
+  deriveAtmosphereScene,
+  getGameSoundscape,
+  type GameSoundscape,
+} from './adapters/soundscape';
 import type { FocusRevisitTarget } from './focus/session-review';
 import { STRUCTURE_STATE_CODES, type QueuedCommand } from './protocol';
 import { INITIAL_WORLD_CAMERA, panCamera, zoomCamera } from './rendering/camera';
@@ -10,6 +16,7 @@ import type { SelectableId } from './rendering/render-model';
 import { overlayDefinition, WORLD_OVERLAYS, type WorldOverlay } from './rendering/world-palette';
 import { PROJECT_META } from './project-meta';
 import { FocusPersistencePanel } from './ui/FocusPersistencePanel';
+import { useFactualEventSound } from './ui/useFactualEventSound';
 import { CivilizationsPanel } from './ui/CivilizationsPanel';
 import { DevelopmentPanel } from './ui/DevelopmentPanel';
 import { SocietyPanel } from './ui/SocietyPanel';
@@ -72,6 +79,7 @@ interface AppProps {
   readonly focusAlerts?: FocusAlerts;
   readonly focusClock?: FocusClock;
   readonly persistence?: RuntimePersistence;
+  readonly soundscape?: GameSoundscape;
   readonly workerFactory?: SimulationWorkerFactory;
 }
 
@@ -89,17 +97,45 @@ function conditionTier(condition: number): 'sound' | 'worn' | 'critical' {
   return 'critical';
 }
 
-export function App({ focusAlerts, focusClock, persistence, workerFactory }: AppProps) {
+export function App({ focusAlerts, focusClock, persistence, soundscape, workerFactory }: AppProps) {
   const simulation = useWorldSimulation(workerFactory);
   const completionAlerts = focusAlerts ?? getFocusAlerts();
+  const gameSoundscape = soundscape ?? getGameSoundscape();
   const runtimePersistence = persistence ?? getRuntimePersistence();
   const [camera, setCamera] = useState(INITIAL_WORLD_CAMERA);
   const [overlay, setOverlay] = useState<WorldOverlay>('terrain');
   const [inspectionOpen, setInspectionOpen] = useState(false);
   const [mapSelection, setMapSelection] = useState<SelectableId | null>(null);
   const [reducedEffects, setReducedEffects] = useState(false);
+  const [audioSettings, setAudioSettings] = useState<AppSettings>(DEFAULT_APP_SETTINGS);
   const [interventionPending, setInterventionPending] = useState(false);
   const [interventionStatus, setInterventionStatus] = useState<string | null>(null);
+  const atmosphereScene = useMemo(
+    () => (simulation.frame === null ? null : deriveAtmosphereScene(simulation.frame)),
+    [simulation.frame],
+  );
+
+  useEffect(() => {
+    if (atmosphereScene === null) return;
+    void gameSoundscape.updateAtmosphere(atmosphereScene, audioSettings);
+  }, [atmosphereScene, audioSettings, gameSoundscape]);
+
+  useFactualEventSound(simulation.latestRecordedEvents, audioSettings, gameSoundscape);
+
+  useEffect(
+    () => () => {
+      void gameSoundscape.stop();
+    },
+    [gameSoundscape],
+  );
+
+  const selectMapObject = useCallback(
+    (selection: SelectableId | null) => {
+      setMapSelection(selection);
+      if (selection !== null) void gameSoundscape.playCue('selection', audioSettings);
+    },
+    [audioSettings, gameSoundscape],
+  );
   const worldSummary = useMemo(() => {
     const frame = simulation.frame;
     if (frame === null) return null;
@@ -300,7 +336,7 @@ export function App({ focusAlerts, focusClock, persistence, workerFactory }: App
         id: target.id,
         kind: target.kind === 'person' ? 'agent' : target.kind,
       };
-      setMapSelection(selection);
+      selectMapObject(selection);
       queueMicrotask(() => {
         const inspector = document.getElementById('map-inspector');
         inspector?.focus({ preventScroll: true });
@@ -310,7 +346,7 @@ export function App({ focusAlerts, focusClock, persistence, workerFactory }: App
         });
       });
     },
-    [reducedEffects],
+    [reducedEffects, selectMapObject],
   );
   const queueIntervention = (command: QueuedCommand) => {
     setInterventionPending(true);
@@ -398,7 +434,7 @@ export function App({ focusAlerts, focusClock, persistence, workerFactory }: App
                 <WorldMapCanvas
                   camera={camera}
                   onCameraChange={setCamera}
-                  onSelectionChange={setMapSelection}
+                  onSelectionChange={selectMapObject}
                   overlay={overlay}
                   projection={simulation.frame}
                   reducedEffects={reducedEffects}
@@ -508,7 +544,7 @@ export function App({ focusAlerts, focusClock, persistence, workerFactory }: App
                 Inspect map object
                 <select
                   onChange={(event) => {
-                    setMapSelection(parseSelectionKey(event.currentTarget.value));
+                    selectMapObject(parseSelectionKey(event.currentTarget.value));
                   }}
                   value={mapSelection === null ? '' : selectionKey(mapSelection)}
                 >
@@ -751,8 +787,10 @@ export function App({ focusAlerts, focusClock, persistence, workerFactory }: App
           alerts={completionAlerts}
           onReducedEffectsChange={setReducedEffects}
           onRevisitTarget={revisitFocusTarget}
+          onSettingsChange={setAudioSettings}
           runtime={runtimePersistence}
           simulation={simulation}
+          soundscape={gameSoundscape}
           {...(focusClock === undefined ? {} : { clock: focusClock })}
         />
       </main>

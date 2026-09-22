@@ -117,10 +117,12 @@ Determinism does not mean different app versions must have the same final hash. 
 - Primary focus, archive, map, overlay, settings, and inspection controls are keyboard operable and show focus state.
 - Person, family, relationship, and timeline detail use bounded pages so long histories remain navigable.
 - Text labels, numeric values, condition words, patterns, and static markers supplement color and animation.
-- **Reduce visual effects** suppresses nonessential motion while retaining danger and selection information.
-- **Calm focus mode** keeps optional detail out of the primary focus surface.
+- **Reduce visual effects** suppresses nonessential motion, ambience, and event sounds while retaining quieter direct focus-action cues plus visible danger and selection information.
+- **Calm focus mode** keeps optional detail out of the primary focus surface, silences ambience and nonessential event/selection sounds, and softens direct focus-action cues.
 - The interface is tested at 100%, 150%, and 200% text scaling. Use Windows text scaling or application/browser zoom as appropriate; the current settings panel does not provide a separate text-size slider.
-- Completion sound and notifications are optional. Important information also appears in text and is never conveyed by audio alone.
+- **Master volume** caps all optional audio. **Ambient soundscape** is off by default and has its own volume; it follows only current founding, growth, crisis, advanced-city, or space facts. **Sound effects** and their volume cover distinct restrained focus, selection, progress, danger, discovery, and major-event cues. **Mute all audio** overrides every audio setting.
+- **Preview audio** requests the discovery cue so you can check the current output level. Browser autoplay rules may require this or another deliberate focus/map action before optional ambience begins.
+- Audio settings, completion notifications, and every cue are optional and persist locally in the installed desktop app. Every important state, warning, completion, and recap also appears visually or in text and is never conveyed by audio alone.
 - The map canvas exposes an accessible summary; use **Inspect map object** and the world-inspection controls for exact object facts.
 
 ## Local data and privacy
@@ -155,7 +157,7 @@ Pause if the control still responds, then use **Save now**. If the UI is unrespo
 
 ### Sound or notifications do not appear
 
-Check **Completion sound**, **Completion notifications**, and **Volume percent**, then check Windows notification and volume settings. Audio/notification failure should not block completion or hide the text recap.
+Open **Focus and accessibility settings**. Clear **Mute all audio**, enable **Sound effects** or **Ambient soundscape** as desired, confirm that master and the relevant effects/ambience volume are above zero, and select **Preview audio**. Calm or reduced-effects mode intentionally suppresses ambience and nonessential event cues. Then check Windows application volume, output device, and notification settings. Browser preview may wait for a deliberate action before starting audio. Audio or notification failure should remain silent, must not block focus/simulation behavior, and never hides the visible status or factual text recap.
 
 ### Map motion is uncomfortable or performance is poor
 
@@ -171,7 +173,6 @@ Close other Chrono Forge instances and retry. Do not copy, replace, or edit the 
 - Only Windows 10/11 x64 is a supported native target for v1.
 - Current installers are unsigned and use manual trusted distribution; there is no embedded private-repository token or anonymous auto-updater.
 - **Save as new slot** currently duplicates a world; fresh-world and reset semantics remain M10.9 work.
-- The existing sound is a completion tone, not the final M10.2 atmosphere and soundscape.
 - The M10.5 release-quality game-graphics/UI overhaul, dedicated frontend/backend/whole-product stabilization gates, clean release-candidate verification, signing/release packaging, tag, and private GitHub v1.0.0 release are not complete.
 - macOS and Linux may be architecturally possible but are not supported or release-verified.
 

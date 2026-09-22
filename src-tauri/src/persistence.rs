@@ -19,7 +19,7 @@ use sha2::{Digest, Sha256};
 use tauri::State;
 
 const DATABASE_FILE: &str = "chrono-forge.sqlite3";
-const SCHEMA_VERSION: i64 = 6;
+const SCHEMA_VERSION: i64 = 7;
 const MAX_ID_BYTES: usize = 64;
 const MAX_NAME_BYTES: usize = 120;
 const MAX_SNAPSHOT_BYTES: usize = 50 * 1024 * 1024;
@@ -207,6 +207,10 @@ pub struct AppSettings {
     pub default_focus_minutes: u32,
     pub default_break_minutes: u32,
     pub volume_percent: u32,
+    pub audio_muted: bool,
+    pub ambience_enabled: bool,
+    pub ambience_volume_percent: u32,
+    pub effects_volume_percent: u32,
     pub offline_progression_enabled: bool,
     pub max_offline_hours: u32,
     pub calm_mode: bool,
@@ -225,6 +229,10 @@ impl Default for AppSettings {
             default_focus_minutes: 25,
             default_break_minutes: 5,
             volume_percent: 70,
+            audio_muted: false,
+            ambience_enabled: false,
+            ambience_volume_percent: 20,
+            effects_volume_percent: 45,
             offline_progression_enabled: true,
             max_offline_hours: 24,
             calm_mode: false,
@@ -446,6 +454,24 @@ impl PersistenceDatabase {
             )?;
             transaction.execute(
                 "INSERT INTO schema_migrations (version, applied_marker) VALUES (6, 1)",
+                [],
+            )?;
+            transaction.commit()?;
+        }
+        if newest_version < 7 {
+            let transaction = self
+                .connection
+                .transaction_with_behavior(TransactionBehavior::Immediate)?;
+            transaction.execute_batch(
+                "ALTER TABLE app_settings ADD COLUMN audio_muted INTEGER NOT NULL DEFAULT 0
+                     CHECK (audio_muted IN (0, 1));
+                 ALTER TABLE app_settings ADD COLUMN ambience_enabled INTEGER NOT NULL DEFAULT 0
+                     CHECK (ambience_enabled IN (0, 1));
+                 ALTER TABLE app_settings ADD COLUMN ambience_volume_percent INTEGER NOT NULL DEFAULT 20;
+                 ALTER TABLE app_settings ADD COLUMN effects_volume_percent INTEGER NOT NULL DEFAULT 45;",
+            )?;
+            transaction.execute(
+                "INSERT INTO schema_migrations (version, applied_marker) VALUES (7, 1)",
                 [],
             )?;
             transaction.commit()?;
@@ -993,9 +1019,10 @@ impl PersistenceDatabase {
             .connection
             .query_row(
                 "SELECT focus_to_sim_ratio, default_focus_minutes, default_break_minutes,
-                        volume_percent, offline_progression_enabled, max_offline_hours, calm_mode,
-                        notifications_enabled, sound_enabled, breaks_enabled, active_slot_id,
-                        reduced_effects
+                        volume_percent, audio_muted, ambience_enabled, ambience_volume_percent,
+                        effects_volume_percent, offline_progression_enabled, max_offline_hours,
+                        calm_mode, notifications_enabled, sound_enabled, breaks_enabled,
+                        active_slot_id, reduced_effects
                  FROM app_settings WHERE singleton = 1",
                 [],
                 |row| {
@@ -1004,14 +1031,18 @@ impl PersistenceDatabase {
                         default_focus_minutes: row.get(1)?,
                         default_break_minutes: row.get(2)?,
                         volume_percent: row.get(3)?,
-                        offline_progression_enabled: row.get::<_, i64>(4)? != 0,
-                        max_offline_hours: row.get(5)?,
-                        calm_mode: row.get::<_, i64>(6)? != 0,
-                        notifications_enabled: row.get::<_, i64>(7)? != 0,
-                        sound_enabled: row.get::<_, i64>(8)? != 0,
-                        breaks_enabled: row.get::<_, i64>(9)? != 0,
-                        active_slot_id: row.get(10)?,
-                        reduced_effects: row.get::<_, i64>(11)? != 0,
+                        audio_muted: row.get::<_, i64>(4)? != 0,
+                        ambience_enabled: row.get::<_, i64>(5)? != 0,
+                        ambience_volume_percent: row.get(6)?,
+                        effects_volume_percent: row.get(7)?,
+                        offline_progression_enabled: row.get::<_, i64>(8)? != 0,
+                        max_offline_hours: row.get(9)?,
+                        calm_mode: row.get::<_, i64>(10)? != 0,
+                        notifications_enabled: row.get::<_, i64>(11)? != 0,
+                        sound_enabled: row.get::<_, i64>(12)? != 0,
+                        breaks_enabled: row.get::<_, i64>(13)? != 0,
+                        active_slot_id: row.get(14)?,
+                        reduced_effects: row.get::<_, i64>(15)? != 0,
                     })
                 },
             )
@@ -1038,14 +1069,19 @@ impl PersistenceDatabase {
         self.connection.execute(
             "INSERT INTO app_settings
              (singleton, focus_to_sim_ratio, default_focus_minutes, default_break_minutes,
-               volume_percent, offline_progression_enabled, max_offline_hours, calm_mode,
+               volume_percent, audio_muted, ambience_enabled, ambience_volume_percent,
+               effects_volume_percent, offline_progression_enabled, max_offline_hours, calm_mode,
                notifications_enabled, sound_enabled, breaks_enabled, active_slot_id, reduced_effects)
-              VALUES (1, ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
+              VALUES (1, ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)
              ON CONFLICT(singleton) DO UPDATE SET
                  focus_to_sim_ratio = excluded.focus_to_sim_ratio,
                  default_focus_minutes = excluded.default_focus_minutes,
                  default_break_minutes = excluded.default_break_minutes,
                  volume_percent = excluded.volume_percent,
+                 audio_muted = excluded.audio_muted,
+                 ambience_enabled = excluded.ambience_enabled,
+                 ambience_volume_percent = excluded.ambience_volume_percent,
+                 effects_volume_percent = excluded.effects_volume_percent,
                  offline_progression_enabled = excluded.offline_progression_enabled,
                  max_offline_hours = excluded.max_offline_hours,
                  calm_mode = excluded.calm_mode,
@@ -1059,6 +1095,10 @@ impl PersistenceDatabase {
                 settings.default_focus_minutes,
                 settings.default_break_minutes,
                 settings.volume_percent,
+                bool_to_db(settings.audio_muted),
+                bool_to_db(settings.ambience_enabled),
+                settings.ambience_volume_percent,
+                settings.effects_volume_percent,
                 bool_to_db(settings.offline_progression_enabled),
                 settings.max_offline_hours,
                 bool_to_db(settings.calm_mode),
@@ -1254,6 +1294,8 @@ fn validate_settings(settings: &AppSettings) -> Result<()> {
         || !(1..=1_440).contains(&settings.default_focus_minutes)
         || settings.default_break_minutes > 240
         || settings.volume_percent > 100
+        || settings.ambience_volume_percent > 100
+        || settings.effects_volume_percent > 100
         || settings.max_offline_hours > 168
     {
         return Err(PersistenceError::new(
@@ -2325,6 +2367,10 @@ mod tests {
             default_focus_minutes: 50,
             default_break_minutes: 10,
             volume_percent: 40,
+            audio_muted: true,
+            ambience_enabled: true,
+            ambience_volume_percent: 35,
+            effects_volume_percent: 65,
             offline_progression_enabled: false,
             max_offline_hours: 12,
             calm_mode: true,
@@ -2369,15 +2415,102 @@ mod tests {
     #[test]
     fn typed_settings_reject_out_of_range_values() {
         let mut database = PersistenceDatabase::in_memory().expect("database");
-        let invalid = AppSettings {
-            volume_percent: 101,
-            ..AppSettings::default()
-        };
-        assert!(database.save_settings(&invalid).is_err());
+        for invalid in [
+            AppSettings {
+                volume_percent: 101,
+                ..AppSettings::default()
+            },
+            AppSettings {
+                ambience_volume_percent: 101,
+                ..AppSettings::default()
+            },
+            AppSettings {
+                effects_volume_percent: 101,
+                ..AppSettings::default()
+            },
+        ] {
+            assert!(database.save_settings(&invalid).is_err());
+        }
     }
 
     #[test]
-    fn v3_to_v6_migration_preserves_legacy_recap_ids_without_inventing_entries() {
+    fn v6_to_v7_migration_defaults_audio_settings_and_enforces_boolean_columns() {
+        let connection = Connection::open_in_memory().expect("connection");
+        connection
+            .execute_batch(
+                "
+                CREATE TABLE schema_migrations (
+                    version INTEGER PRIMARY KEY,
+                    applied_marker INTEGER NOT NULL
+                );
+                INSERT INTO schema_migrations (version, applied_marker)
+                    VALUES (1, 1), (2, 1), (3, 1), (4, 1), (5, 1), (6, 1);
+                CREATE TABLE app_settings (
+                    singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+                    focus_to_sim_ratio INTEGER NOT NULL,
+                    default_focus_minutes INTEGER NOT NULL,
+                    default_break_minutes INTEGER NOT NULL,
+                    volume_percent INTEGER NOT NULL,
+                    offline_progression_enabled INTEGER NOT NULL
+                        CHECK (offline_progression_enabled IN (0, 1)),
+                    max_offline_hours INTEGER NOT NULL,
+                    calm_mode INTEGER NOT NULL CHECK (calm_mode IN (0, 1)),
+                    notifications_enabled INTEGER NOT NULL CHECK (notifications_enabled IN (0, 1)),
+                    sound_enabled INTEGER NOT NULL CHECK (sound_enabled IN (0, 1)),
+                    breaks_enabled INTEGER NOT NULL CHECK (breaks_enabled IN (0, 1)),
+                    active_slot_id TEXT,
+                    reduced_effects INTEGER NOT NULL DEFAULT 0
+                        CHECK (reduced_effects IN (0, 1))
+                );
+                INSERT INTO app_settings (
+                    singleton, focus_to_sim_ratio, default_focus_minutes, default_break_minutes,
+                    volume_percent, offline_progression_enabled, max_offline_hours, calm_mode,
+                    notifications_enabled, sound_enabled, breaks_enabled, active_slot_id,
+                    reduced_effects
+                ) VALUES (1, 25, 50, 10, 60, 0, 12, 1, 0, 0, 1, NULL, 1);
+                ",
+            )
+            .expect("v6 schema");
+
+        let mut database = PersistenceDatabase { connection };
+        database.migrate().expect("v7 migration");
+        assert_eq!(
+            database.load_settings().expect("settings"),
+            AppSettings {
+                focus_to_sim_ratio: 25,
+                default_focus_minutes: 50,
+                default_break_minutes: 10,
+                volume_percent: 60,
+                audio_muted: false,
+                ambience_enabled: false,
+                ambience_volume_percent: 20,
+                effects_volume_percent: 45,
+                offline_progression_enabled: false,
+                max_offline_hours: 12,
+                calm_mode: true,
+                reduced_effects: true,
+                notifications_enabled: false,
+                sound_enabled: false,
+                breaks_enabled: true,
+                active_slot_id: None,
+            }
+        );
+        assert!(
+            database
+                .connection
+                .execute("UPDATE app_settings SET audio_muted = 2", [])
+                .is_err()
+        );
+        assert!(
+            database
+                .connection
+                .execute("UPDATE app_settings SET ambience_enabled = 2", [])
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn v3_to_v7_migration_preserves_legacy_recap_ids_without_inventing_entries() {
         let connection = Connection::open_in_memory().expect("connection");
         connection
             .execute_batch(
@@ -2432,7 +2565,7 @@ mod tests {
             .expect("legacy focus history");
 
         let mut database = PersistenceDatabase { connection };
-        database.migrate().expect("v6 migration");
+        database.migrate().expect("v7 migration");
         assert!(!database.load_settings().expect("settings").reduced_effects);
         assert_eq!(
             database.list_focus_sessions().expect("history")[0].recap_entries,
@@ -2445,7 +2578,7 @@ mod tests {
     }
 
     #[test]
-    fn v1_to_v6_migration_marks_existing_generations_and_defaults_new_fields() {
+    fn v1_to_v7_migration_marks_existing_generations_and_defaults_new_fields() {
         let connection = Connection::open_in_memory().expect("connection");
         connection
             .execute_batch(
@@ -2510,6 +2643,6 @@ mod tests {
             .expect("query")
             .collect::<std::result::Result<_, _>>()
             .expect("versions");
-        assert_eq!(versions, vec![1, 2, 3, 4, 5, 6]);
+        assert_eq!(versions, vec![1, 2, 3, 4, 5, 6, 7]);
     }
 }

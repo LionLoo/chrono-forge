@@ -69,6 +69,10 @@ export interface AppSettings {
   readonly defaultFocusMinutes: number;
   readonly defaultBreakMinutes: number;
   readonly volumePercent: number;
+  readonly audioMuted: boolean;
+  readonly ambienceEnabled: boolean;
+  readonly ambienceVolumePercent: number;
+  readonly effectsVolumePercent: number;
   readonly offlineProgressionEnabled: boolean;
   readonly maxOfflineHours: number;
   readonly calmMode: boolean;
@@ -84,6 +88,10 @@ export const DEFAULT_APP_SETTINGS: AppSettings = {
   defaultFocusMinutes: 25,
   defaultBreakMinutes: 5,
   volumePercent: 70,
+  audioMuted: false,
+  ambienceEnabled: false,
+  ambienceVolumePercent: 20,
+  effectsVolumePercent: 45,
   offlineProgressionEnabled: true,
   maxOfflineHours: 24,
   calmMode: false,
@@ -755,6 +763,16 @@ function parseAppSettings(value: unknown): AppSettings {
       'defaultBreakMinutes',
     ),
     volumePercent: expectNonNegativeInteger(record.volumePercent, 'volumePercent'),
+    audioMuted: expectBoolean(record.audioMuted, 'audioMuted'),
+    ambienceEnabled: expectBoolean(record.ambienceEnabled, 'ambienceEnabled'),
+    ambienceVolumePercent: expectNonNegativeInteger(
+      record.ambienceVolumePercent,
+      'ambienceVolumePercent',
+    ),
+    effectsVolumePercent: expectNonNegativeInteger(
+      record.effectsVolumePercent,
+      'effectsVolumePercent',
+    ),
     offlineProgressionEnabled: expectBoolean(
       record.offlineProgressionEnabled,
       'offlineProgressionEnabled',
@@ -1055,6 +1073,12 @@ function validateAppSettings(settings: AppSettings): void {
     !Number.isSafeInteger(settings.volumePercent) ||
     settings.volumePercent < 0 ||
     settings.volumePercent > 100 ||
+    !Number.isSafeInteger(settings.ambienceVolumePercent) ||
+    settings.ambienceVolumePercent < 0 ||
+    settings.ambienceVolumePercent > 100 ||
+    !Number.isSafeInteger(settings.effectsVolumePercent) ||
+    settings.effectsVolumePercent < 0 ||
+    settings.effectsVolumePercent > 100 ||
     !Number.isSafeInteger(settings.maxOfflineHours) ||
     settings.maxOfflineHours < 0 ||
     settings.maxOfflineHours > 168

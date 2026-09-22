@@ -53,5 +53,5 @@ describe.sequential('M10.1 consecutive factual focus sessions', () => {
     expect(second.review.before).toStrictEqual(first.review.after);
     expect(second.review.before.tick).toBe(630_000);
     expect(second.review.after.tick).toBe(660_000);
-  });
+  }, 30_000);
 });

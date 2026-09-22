@@ -7,6 +7,7 @@ import {
   type NativeNotificationApi,
 } from '../../src/adapters/focus-alerts';
 import { DEFAULT_APP_SETTINGS } from '../../src/adapters/persistence';
+import type { GameSoundscape } from '../../src/adapters/soundscape';
 
 function createNativeNotifications(overrides: Partial<NativeNotificationApi> = {}): {
   readonly api: NativeNotificationApi;
@@ -31,33 +32,18 @@ function createNativeNotifications(overrides: Partial<NativeNotificationApi> = {
   };
 }
 
-function createAudioContext() {
-  const oscillator = {
-    frequency: { setValueAtTime: vi.fn() },
-    connect: vi.fn(),
-    start: vi.fn(),
-    stop: vi.fn(),
-    addEventListener: vi.fn(),
-  };
-  const gain = {
-    gain: {
-      setValueAtTime: vi.fn(),
-      linearRampToValueAtTime: vi.fn(),
-    },
-    connect: vi.fn(),
-  };
-  const context = {
-    currentTime: 4,
-    createOscillator: vi.fn(() => oscillator),
-    createGain: vi.fn(() => gain),
-    destination: {},
-    close: vi.fn(() => Promise.resolve()),
-  };
-
+function createSoundscapeHarness(playCue: GameSoundscape['playCue'] = () => Promise.resolve()): {
+  readonly playCue: Mock<GameSoundscape['playCue']>;
+  readonly soundscape: GameSoundscape;
+} {
+  const playCueMock = vi.fn(playCue);
   return {
-    context: context as unknown as AudioContext,
-    oscillator,
-    gain,
+    playCue: playCueMock,
+    soundscape: {
+      playCue: playCueMock,
+      stop: vi.fn(() => Promise.resolve()),
+      updateAtmosphere: vi.fn(() => Promise.resolve()),
+    },
   };
 }
 
@@ -133,13 +119,12 @@ describe('focus alerts', () => {
     expect(nativeNotifications.isPermissionGranted).not.toHaveBeenCalled();
   });
 
-  it('plays a volume-scaled completion tone only when sound is enabled above zero', async () => {
-    const audio = createAudioContext();
-    const createContext = vi.fn(() => audio.context);
+  it('routes completion through the shared procedural soundscape only when sound is enabled', async () => {
+    const soundscape = createSoundscapeHarness();
     const dependencies: FocusAlertsDependencies = {
       detectTauri: () => false,
       browserNotifications: undefined,
-      createAudioContext: createContext,
+      soundscape: soundscape.soundscape,
     };
     const alerts = createFocusAlerts(dependencies);
 
@@ -162,26 +147,27 @@ describe('focus alerts', () => {
       volumePercent: 0,
     });
 
-    expect(createContext).toHaveBeenCalledOnce();
-    expect(audio.gain.gain.linearRampToValueAtTime).toHaveBeenCalledWith(0.5, 4.01);
-    expect(audio.oscillator.start).toHaveBeenCalledWith(4);
-    expect(audio.oscillator.stop).toHaveBeenCalledWith(4.16);
+    expect(soundscape.playCue).toHaveBeenCalledOnce();
+    expect(soundscape.playCue).toHaveBeenCalledWith(
+      'focus-complete',
+      expect.objectContaining({ soundEnabled: true, volumePercent: 50 }),
+    );
   });
 
   it('contains native and sound dependency failures', async () => {
     const nativeNotifications = createNativeNotifications({
       isPermissionGranted: vi.fn(() => Promise.reject(new Error('native unavailable'))),
     });
-    const createContext = vi.fn(() => {
-      throw new Error('audio unavailable');
-    });
+    const soundscape = createSoundscapeHarness(() =>
+      Promise.reject(new Error('audio unavailable')),
+    );
     const alerts = createFocusAlerts({
       detectTauri: () => true,
       nativeNotifications: nativeNotifications.api,
-      createAudioContext: createContext,
+      soundscape: soundscape.soundscape,
     });
 
     await expect(alerts.notifyCompletion(DEFAULT_APP_SETTINGS)).resolves.toBeUndefined();
-    expect(createContext).toHaveBeenCalledOnce();
+    expect(soundscape.playCue).toHaveBeenCalledOnce();
   });
 });

@@ -1,0 +1,39 @@
+# M10.2 sound, atmosphere, and game-feel evidence
+
+Status: implementation and complete local validation passed on `release/v1-sound-atmosphere-game-feel` from merged M10.1 main `7768d782100e38043115e1a8fe84c090326873e2`; commit, PR, exact-head hosted CI, merge, and merge-head CI remain open.
+
+## Observable acceptance contract
+
+1. Chrono Forge uses a coherent project-original local sound palette for focus start, pause/resume, completion, factual map selection, construction/progress, danger, discovery, and restrained major-event feedback. The cues are distinct at ordinary listening volume, short, non-startling, and never productivity-app beeps.
+2. Adaptive ambience represents only the current Worker projection. Founding, settlement growth, crisis, advanced-city, and space states are audibly differentiated without creating simulation facts, changing timing, or influencing outcomes. Historical events are not replayed merely because a save loads.
+3. Audio is quiet and optional. Persisted local settings expose master volume, ambience volume/on-off, effects volume, and a clear all-audio mute. Calm mode and reduced-effects mode suppress nonessential ambience and event cues while preserving usable visual/text feedback.
+4. Focus start, pause/resume, completion, selection, construction/progress, danger, discovery, and factual recap/event feedback always retain redundant visible or textual state. No required information, warning, control state, or recap claim is communicated by sound alone.
+5. Browser autoplay restrictions, missing Web Audio support, suspended contexts, notification denial, node creation failure, playback failure, and cleanup failure are contained at the adapter edge. The focus loop, Worker, persistence, rendering, and controls remain usable without an alert or unhandled rejection.
+6. Audio settings survive browser-gateway round trips, SQLite restart, supported schema migration, active-slot changes, and installed-desktop relaunch. Invalid, missing, unknown, non-integer, or out-of-range values fail through the existing typed validation boundary rather than becoming unbounded gains.
+7. The sound implementation and every distributed audio asset have explicit authorship/license evidence. Prefer deterministic code-native synthesis; any later binary asset requires inventory and attribution before entering a build.
+8. Browser and installed-desktop review exercise founding, growth, crisis, advanced-city, space, quiet focus, mute, calm mode, reduced effects, restart persistence, and unavailable-audio behavior. Independent product review must conclude that the result materially improves presence and feedback without becoming noisy, distracting, or less calm.
+
+## Required automated evidence
+
+- Pure scene derivation maps bounded Worker projections to founding, growth, crisis, advanced-city, and space atmosphere without reading camera state or mutating authority.
+- Closed factual event classification maps recorded event kinds to construction/progress, danger, discovery, or major-event cues with explicit priority and no load-time replay.
+- Audio-adapter tests assert the project-original cue envelopes, gain bounds, master/ambience/effects composition, mute, calm/reduced suppression, context resume, ambience replacement/cleanup, and best-effort failure containment.
+- React tests assert focus action cue routing, selection feedback, truthful visual redundancy, live setting changes, saved settings, and no playback when muted or suppressed.
+- TypeScript and Rust persistence tests assert defaults, validation, schema migration, round trip, relaunch, and rejection of invalid values.
+- Browser E2E asserts keyboard-operable controls, labels/readouts, save/reload persistence, visual fallback, and representative factual scene/cue routing through the real Worker path.
+- Native E2E asserts SQLite migration and persisted settings after a desktop relaunch without requiring audio as the only success signal.
+- The complete local `npm run ci` gate, independent review, exact-head aggregate `Required`, and merge-head aggregate `Required` remain mandatory.
+
+## Evidence log
+
+- 2026-09-21: M10.1 PR #15 merged at `7768d782100e38043115e1a8fe84c090326873e2`; merge-head workflow `35562482616` passed aggregate `Required`.
+- 2026-09-21: Read-only inventory found one generic 880 Hz completion oscillator, one master-like volume value, and completion-only sound enablement. No final ambience, event palette, binary audio assets, or M10.2 settings migration exists yet.
+- 2026-09-21: Replaced the generic oscillator with a project-original procedural palette and five Worker-factual ambience scenes. Added explicit latest-recorded-event routing so initialization and loaded history cannot replay cues.
+- 2026-09-21: Added persisted master, ambience, effects, and mute controls with SQLite schema v7, v6 migration coverage, quiet defaults, calm/reduced suppression, preview/fallback copy, and silent failure containment.
+- 2026-09-21: Focused TypeScript validation passed 67/67 tests across soundscape, alerts, React settings/routing, persistence, and the real Worker gateway. Focused Rust persistence validation passed 22/22 tests.
+- 2026-09-22: Browser production review verified readable audio controls and redundant status/preview copy, mute disabling effects and preview, unmute/ambience behavior, and the calm focus surface. Automated browser evidence covers representative factual scene/cue routing; the real desktop suite persisted master 34%, ambience 18%, effects 27%, and ambience enabled through a SQLite-backed relaunch.
+- 2026-09-22: Independent Terra/high review found that changing audio settings could replay the last factual event batch and that the README still named M10.1 as active. A one-shot event-sound hook with a live settings reference, regression coverage, and the corrected README closed both findings. Rereview found no remaining release-relevant correctness, determinism, persistence, performance, accessibility, coverage, or documentation defect.
+- 2026-09-22: The Windows host intermittently scheduled the single-worker long catalogue onto slow hybrid cores. The unchanged locked performance benchmark passed when the gate was pinned to logical CPU 9; the final continuous exact-tree gate used that same affinity. No assertion, operation budget, performance threshold, deterministic hash, or product requirement was weakened. Only explicit wall-clock allowances for already-heavy deterministic fixtures were widened.
+- 2026-09-22: The final continuous `npm run ci` exact-tree gate passed: formatting, zero-warning web/Rust lint, and type checking; 64 covered files/449 tests in 279.69 seconds; 88.08% statements, 80.83% branches, 93.71% functions, and 89.82% lines; the complete long catalogue at 14 files/31 tests in 1,258.28 seconds with 1,237.50 seconds of test work; Rust 23/23; browser E2E 6/6 in 31.2 seconds; and native SQLite/desktop E2E 3/3 in 27.5 seconds.
+- 2026-09-22: The same gate generated the 1,051-component SBOM (770 npm, 281 Cargo), rebuilt the unsigned x64 NSIS installer at 3,112,991 bytes with SHA-256 `E1F1977ED38F91A6A1DA665AE84B1DDB73EBA1FA90561CC327CADD3BCCFA8037`, and verified that no WDIO bridge, capability, or global Tauri test API entered the production artifact.
+- 2026-09-22: Final focused Terra/high review accepted the exact tree for commit with no finding. The three affected test files passed 17/17 in 23.43 seconds; review confirmed that timeout edits only widened wall-clock allowances, every deterministic/factual assertion and locked threshold remained intact, and every recorded final-gate claim matched the evidence.
