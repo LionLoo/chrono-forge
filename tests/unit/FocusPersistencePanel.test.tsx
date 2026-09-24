@@ -1,4 +1,4 @@
-import { act, render, screen, waitFor, within } from '@testing-library/react';
+import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { vi } from 'vitest';
 
@@ -41,6 +41,7 @@ function createSimulation(): {
       advanceTicks: vi.fn(),
       error: null,
       events: [],
+      latestRecordedEvents: [],
       frame: null,
       loadSnapshot,
       performOfflineCatchUp,
@@ -86,6 +87,7 @@ function createStatefulSimulation(initialWorld?: WorldState): {
       advanceTicks,
       error: null,
       events: [],
+      latestRecordedEvents: [],
       frame: null,
       loadSnapshot: vi.fn(async (savedSnapshot: string) => {
         world = deserializeWorldSnapshot(savedSnapshot);
@@ -647,6 +649,57 @@ describe('FocusPersistencePanel offline progression', () => {
     expect(document.documentElement).toHaveClass('reduced-effects');
     await user.click(screen.getByRole('button', { name: 'Save settings' }));
     await expect(gateway.loadSettings()).resolves.toMatchObject({ reducedEffects: true });
+  });
+
+  it('routes focus cues and persists explicit quiet audio controls with visible redundancy', async () => {
+    const user = userEvent.setup();
+    const gateway = createInMemoryPersistenceGateway(() => 1_000);
+    const playCue = vi.fn(() => Promise.resolve());
+    const soundscape = {
+      playCue,
+      stop: vi.fn(() => Promise.resolve()),
+      updateAtmosphere: vi.fn(() => Promise.resolve()),
+    };
+    const onSettingsChange = vi.fn();
+    render(
+      <FocusPersistencePanel
+        alerts={{ notifyCompletion: () => Promise.resolve() }}
+        clock={{ now: () => 1_000 }}
+        onSettingsChange={onSettingsChange}
+        runtime={{ gateway, mode: 'browser-preview' }}
+        simulation={createStatefulSimulation().simulation}
+        soundscape={soundscape}
+      />,
+    );
+
+    await user.click(await screen.findByText('Focus and accessibility settings'));
+    expect(screen.getByText(/^Audio:/)).toHaveTextContent(
+      'Audio: master 70% · ambience off · effects 45%.',
+    );
+    await user.click(screen.getByRole('button', { name: 'Preview audio' }));
+    expect(playCue).toHaveBeenCalledWith('discovery', expect.any(Object));
+
+    await user.click(screen.getByRole('checkbox', { name: 'Ambient soundscape' }));
+    fireEvent.change(screen.getByRole('slider', { name: 'Ambience volume percent' }), {
+      target: { value: '18' },
+    });
+    fireEvent.change(screen.getByRole('slider', { name: 'Effects volume percent' }), {
+      target: { value: '32' },
+    });
+    await user.click(screen.getByRole('button', { name: 'Save settings' }));
+    await expect(gateway.loadSettings()).resolves.toMatchObject({
+      ambienceEnabled: true,
+      ambienceVolumePercent: 18,
+      effectsVolumePercent: 32,
+    });
+    expect(onSettingsChange).toHaveBeenCalledWith(
+      expect.objectContaining({ ambienceEnabled: true, ambienceVolumePercent: 18 }),
+    );
+
+    await user.click(screen.getByRole('button', { name: 'Start focus' }));
+    await user.click(screen.getByRole('button', { name: 'Pause' }));
+    expect(playCue).toHaveBeenCalledWith('focus-start', expect.any(Object));
+    expect(playCue).toHaveBeenCalledWith('focus-pause', expect.any(Object));
   });
 
   it('surfaces native string failures without discarding their actionable message', async () => {

@@ -461,6 +461,22 @@ describe('persistence adapter', () => {
     await expect(malformedExportGateway.exportSaveSlot('alpha')).rejects.toThrow('non-string');
   });
 
+  it('rejects malformed and out-of-range audio settings from native responses', async () => {
+    const malformedGateway = createTauriPersistenceGateway(async () => {
+      await Promise.resolve();
+      return { ...DEFAULT_APP_SETTINGS, audioMuted: 0 } as never;
+    });
+    await expect(malformedGateway.loadSettings()).rejects.toThrow('audioMuted must be a boolean');
+
+    const outOfRangeGateway = createTauriPersistenceGateway(async () => {
+      await Promise.resolve();
+      return { ...DEFAULT_APP_SETTINGS, ambienceVolumePercent: 101 } as never;
+    });
+    await expect(outOfRangeGateway.loadSettings()).rejects.toThrow(
+      'settings contain a value outside its supported range',
+    );
+  });
+
   it('falls back from a checksum-valid but semantically invalid native head', async () => {
     const malformedSnapshot = '{"hello":"world"}';
     const recoveredWorld = stepWorld(
@@ -832,10 +848,24 @@ describe('persistence adapter', () => {
     (sessions[0]?.recapEventIds as number[]).push(99);
     expect(await gateway.listFocusSessions(sourceSave ?? undefined)).toEqual([completedSession]);
 
-    const updated = { ...DEFAULT_APP_SETTINGS, focusToSimRatio: 42, calmMode: true };
+    const updated = {
+      ...DEFAULT_APP_SETTINGS,
+      focusToSimRatio: 42,
+      calmMode: true,
+      audioMuted: true,
+      ambienceEnabled: true,
+      ambienceVolumePercent: 65,
+      effectsVolumePercent: 35,
+    };
     expect(await gateway.saveSettings(updated)).toEqual(updated);
     expect(await gateway.loadSettings()).toEqual(updated);
     await expect(gateway.saveSettings({ ...updated, volumePercent: 101 })).rejects.toThrow(
+      'outside its supported range',
+    );
+    await expect(gateway.saveSettings({ ...updated, ambienceVolumePercent: 101 })).rejects.toThrow(
+      'outside its supported range',
+    );
+    await expect(gateway.saveSettings({ ...updated, effectsVolumePercent: 101 })).rejects.toThrow(
       'outside its supported range',
     );
   });

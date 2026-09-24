@@ -17,3 +17,5 @@ This file is the human-reviewed inventory. Release builds also generate exact de
 No copyrighted game assets may be copied into this repository. Every font, image, texture, sound, and generated asset must have its source, license, generation method, and permitted distribution recorded here or in `assets/ATTRIBUTION.md` before it enters a release build.
 
 Project-original artwork and its generated packaging variants are inventoried in `assets/ATTRIBUTION.md` and machine-checked against `assets/attribution.json`.
+
+Chrono Forge's M10.2 sound palette and adaptive ambience are project-original code-native Web Audio synthesis implemented in `src/adapters/soundscape.ts`. They distribute no sampled, generated, or third-party binary audio asset and therefore require no additional audio license or attribution.

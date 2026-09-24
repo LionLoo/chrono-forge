@@ -186,6 +186,7 @@ describe('world simulation UI gateway', () => {
     );
 
     await act(async () => result.current.loadSnapshot(snapshot));
+    expect(result.current.latestRecordedEvents).toStrictEqual([]);
     expect(result.current.timeline.total).toBeGreaterThan(8);
     expect(result.current.timeline.offset).toBeGreaterThan(0);
     act(() => result.current.requestTimelinePage(0));
@@ -279,6 +280,9 @@ describe('world simulation UI gateway', () => {
       await result.current.performOfflineCatchUp(1_000, 5);
     });
     expect(result.current.frame?.tick).toBe(5);
+    expect(result.current.latestRecordedEvents).toMatchObject([
+      { id: 3, tick: 5, type: 'offline-catch-up' },
+    ]);
     expect(result.current.events).toStrictEqual([
       {
         id: 1,
@@ -321,6 +325,7 @@ describe('world simulation UI gateway', () => {
     await act(async () => {
       await result.current.loadSnapshot(initialSnapshot);
     });
+    expect(result.current.latestRecordedEvents).toStrictEqual([]);
     expect(result.current.events).toStrictEqual([
       {
         id: 1,

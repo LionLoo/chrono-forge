@@ -6,14 +6,12 @@ import {
 } from '@tauri-apps/plugin-notification';
 
 import type { AppSettings } from './persistence';
+import { getGameSoundscape, type GameSoundscape } from './soundscape';
 
 const COMPLETION_NOTIFICATION = {
   title: 'Focus complete',
   body: 'Your focus session is complete.',
 } as const;
-const TONE_FREQUENCY_HZ = 880;
-const TONE_DURATION_SECONDS = 0.16;
-const TONE_ATTACK_SECONDS = 0.01;
 
 /** Non-authoritative completion effects that React can replace in tests or previews. */
 export interface FocusAlerts {
@@ -36,7 +34,7 @@ export interface FocusAlertsDependencies {
   readonly detectTauri?: () => boolean;
   readonly nativeNotifications?: NativeNotificationApi;
   readonly browserNotifications?: BrowserNotificationConstructor | undefined;
-  readonly createAudioContext?: () => AudioContext;
+  readonly soundscape?: GameSoundscape;
 }
 
 const nativeNotifications: NativeNotificationApi = {
@@ -53,7 +51,7 @@ export function createFocusAlerts(dependencies: FocusAlertsDependencies = {}): F
   const detectTauri = dependencies.detectTauri ?? isTauri;
   const native = dependencies.nativeNotifications ?? nativeNotifications;
   const browser = dependencies.browserNotifications ?? globalThis.Notification;
-  const createAudioContext = dependencies.createAudioContext ?? (() => new AudioContext());
+  const soundscape = dependencies.soundscape ?? getGameSoundscape();
 
   return {
     async notifyCompletion(settings) {
@@ -68,7 +66,7 @@ export function createFocusAlerts(dependencies: FocusAlertsDependencies = {}): F
       }
 
       if (settings.soundEnabled && settings.volumePercent > 0) {
-        await runBestEffort(() => playCompletionTone(createAudioContext, settings.volumePercent));
+        await runBestEffort(() => soundscape.playCue('focus-complete', settings));
       }
     },
   };
@@ -95,37 +93,6 @@ async function notifyBrowser(
   }
   if (permission === 'granted') {
     new notifications(COMPLETION_NOTIFICATION.title, { body: COMPLETION_NOTIFICATION.body });
-  }
-}
-
-function playCompletionTone(createAudioContext: () => AudioContext, volumePercent: number): void {
-  const volume = Math.min(Math.max(volumePercent, 0), 100) / 100;
-  if (!Number.isFinite(volume) || volume <= 0) return;
-
-  const context = createAudioContext();
-  const oscillator = context.createOscillator();
-  const gain = context.createGain();
-  const startAt = context.currentTime;
-  const endAt = startAt + TONE_DURATION_SECONDS;
-
-  oscillator.frequency.setValueAtTime(TONE_FREQUENCY_HZ, startAt);
-  gain.gain.setValueAtTime(0, startAt);
-  gain.gain.linearRampToValueAtTime(volume, startAt + TONE_ATTACK_SECONDS);
-  gain.gain.linearRampToValueAtTime(0, endAt);
-  oscillator.connect(gain);
-  gain.connect(context.destination);
-  oscillator.addEventListener('ended', () => {
-    void closeAudioContext(context);
-  });
-  oscillator.start(startAt);
-  oscillator.stop(endAt);
-}
-
-async function closeAudioContext(context: AudioContext): Promise<void> {
-  try {
-    await context.close();
-  } catch {
-    // Audio cleanup is also best-effort.
   }
 }
 

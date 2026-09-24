@@ -68,6 +68,8 @@ export interface WorldSimulationView {
   readonly advanceTicks: (ticks: number) => void;
   readonly error: string | null;
   readonly events: readonly WorkerEvent[];
+  /** The latest events newly recorded after an authoritative advance, excluding load history. */
+  readonly latestRecordedEvents: readonly WorkerEvent[];
   readonly frame: WorldFrameProjection | null;
   readonly loadSnapshot: (snapshot: string) => Promise<void>;
   readonly performOfflineCatchUp: (elapsedMilliseconds: number, rate: number) => Promise<void>;
@@ -115,6 +117,7 @@ export function useWorldSimulation(
 ): WorldSimulationView {
   const [frame, setFrame] = useState<WorldFrameProjection | null>(null);
   const [events, setEvents] = useState<readonly WorkerEvent[]>([]);
+  const [latestRecordedEvents, setLatestRecordedEvents] = useState<readonly WorkerEvent[]>([]);
   const [timeline, setTimeline] = useState<WorldSimulationView['timeline']>({
     entries: [],
     offset: 0,
@@ -165,6 +168,7 @@ export function useWorldSimulation(
     const pendingLoads = pendingLoadsRef.current;
     const pendingOffline = pendingOfflineRef.current;
     const pendingCommands = pendingCommandsRef.current;
+    const historicalEventRequestIds = new Set<string>();
     const rejectRequest = (requestId: string, reason: Error) => {
       const pendingSave = pendingSaves.get(requestId);
       if (pendingSave !== undefined) {
@@ -237,6 +241,8 @@ export function useWorldSimulation(
       switch (message.type) {
         case 'ready': {
           applyFrame(message.frame, true);
+          historicalEventRequestIds.add(message.requestId);
+          setLatestRecordedEvents([]);
           const pendingLoad = pendingLoads.get(message.requestId);
           if (pendingLoad !== undefined) {
             pendingLoads.delete(message.requestId);
@@ -259,7 +265,8 @@ export function useWorldSimulation(
           }
           return;
         }
-        case 'eventBatch':
+        case 'eventBatch': {
+          const isHistoricalBatch = historicalEventRequestIds.delete(message.requestId);
           setEvents((current) => {
             const byId = new Map(current.map((worldEvent) => [worldEvent.id, worldEvent]));
             for (const worldEvent of message.events) byId.set(worldEvent.id, worldEvent);
@@ -267,7 +274,9 @@ export function useWorldSimulation(
               .sort((left, right) => left.tick - right.tick || left.id - right.id)
               .slice(-MAX_RECENT_WORKER_EVENTS);
           });
+          if (!isHistoricalBatch) setLatestRecordedEvents(Object.freeze([...message.events]));
           return;
+        }
         case 'timelinePage':
           setTimeline({
             entries: message.timeline,
@@ -548,6 +557,7 @@ export function useWorldSimulation(
       error,
       events,
       frame,
+      latestRecordedEvents,
       loadSnapshot,
       performOfflineCatchUp,
       queueCommand,
@@ -566,6 +576,7 @@ export function useWorldSimulation(
       error,
       events,
       frame,
+      latestRecordedEvents,
       loadSnapshot,
       performOfflineCatchUp,
       queueCommand,

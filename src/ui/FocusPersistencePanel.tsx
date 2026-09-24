@@ -9,6 +9,7 @@ import type {
 } from '../adapters/persistence';
 import type { FocusAlerts } from '../adapters/focus-alerts';
 import { type RuntimePersistence } from '../adapters/runtime-persistence';
+import { getGameSoundscape, type GameSoundscape } from '../adapters/soundscape';
 import { rehydrateFocusState } from '../focus';
 import {
   FOCUS_SESSION_REVIEW_VERSION,
@@ -32,8 +33,10 @@ interface FocusPersistencePanelProps {
   readonly clock?: FocusClock;
   readonly onReducedEffectsChange?: (reduced: boolean) => void;
   readonly onRevisitTarget?: (target: FocusRevisitTarget) => void;
+  readonly onSettingsChange?: (settings: AppSettings) => void;
   readonly runtime: RuntimePersistence;
   readonly simulation: WorldSimulationView;
+  readonly soundscape?: GameSoundscape;
 }
 
 interface WorkspaceData {
@@ -197,8 +200,10 @@ export function FocusPersistencePanel({
   clock = systemFocusClock,
   onReducedEffectsChange,
   onRevisitTarget,
+  onSettingsChange,
   runtime,
   simulation,
+  soundscape = getGameSoundscape(),
 }: FocusPersistencePanelProps) {
   const bootstrapPromiseRef = useRef<Promise<WorkspaceData> | null>(null);
   const [workspace, setWorkspace] = useState<WorkspaceData | null>(null);
@@ -315,8 +320,10 @@ export function FocusPersistencePanel({
       onReplaceWorkspace={replaceWorkspace}
       runtime={runtime}
       simulation={simulation}
+      soundscape={soundscape}
       {...(onReducedEffectsChange === undefined ? {} : { onReducedEffectsChange })}
       {...(onRevisitTarget === undefined ? {} : { onRevisitTarget })}
+      {...(onSettingsChange === undefined ? {} : { onSettingsChange })}
     />
   );
 }
@@ -327,9 +334,11 @@ interface FocusWorkspaceProps {
   readonly initial: WorkspaceData;
   readonly onReducedEffectsChange?: (reduced: boolean) => void;
   readonly onRevisitTarget?: (target: FocusRevisitTarget) => void;
+  readonly onSettingsChange?: (settings: AppSettings) => void;
   readonly onReplaceWorkspace: (workspace: WorkspaceData) => void;
   readonly runtime: RuntimePersistence;
   readonly simulation: WorldSimulationView;
+  readonly soundscape: GameSoundscape;
 }
 
 function FocusWorkspace({
@@ -338,9 +347,11 @@ function FocusWorkspace({
   initial,
   onReducedEffectsChange,
   onRevisitTarget,
+  onSettingsChange,
   onReplaceWorkspace,
   runtime,
   simulation,
+  soundscape,
 }: FocusWorkspaceProps) {
   const [activeSave, setActiveSave] = useState(initial.activeSave);
   const [slots, setSlots] = useState(initial.slots);
@@ -593,6 +604,10 @@ function FocusWorkspace({
   }, [onReducedEffectsChange, settings.calmMode, settings.reducedEffects]);
 
   useEffect(() => {
+    onSettingsChange?.(settings);
+  }, [onSettingsChange, settings]);
+
+  useEffect(() => {
     const checkpointBeforeSuspension = () => {
       if (document.visibilityState !== 'hidden') return;
       queueMicrotask(() => {
@@ -717,7 +732,10 @@ function FocusWorkspace({
     settings.focusToSimRatio <= 10_000 &&
     Number.isSafeInteger(settings.maxOfflineHours) &&
     settings.maxOfflineHours >= 0 &&
-    settings.maxOfflineHours <= 168;
+    settings.maxOfflineHours <= 168 &&
+    [settings.volumePercent, settings.ambienceVolumePercent, settings.effectsVolumePercent].every(
+      (value) => Number.isSafeInteger(value) && value >= 0 && value <= 100,
+    );
   const timerValue =
     focus.state.phase === 'break-running' || focus.state.phase === 'break-paused'
       ? focus.breakRemainingMs
@@ -887,13 +905,14 @@ function FocusWorkspace({
                   !configuredBreakIsValid ||
                   !settingsAreValid
                 }
-                onClick={() =>
+                onClick={() => {
+                  void soundscape.playCue('focus-start', settings);
                   focus.start({
                     focusDurationMs: focusMinutes * 60_000,
                     breakDurationMs: settings.breaksEnabled ? breakMinutes * 60_000 : 0,
                     simulationTicksPerFocusSecond: settings.focusToSimRatio,
-                  })
-                }
+                  });
+                }}
                 type="button"
               >
                 Start focus
@@ -902,12 +921,25 @@ function FocusWorkspace({
           ) : (
             <div className="session-actions">
               {(focus.state.phase === 'focus-running' || focus.state.phase === 'break-running') && (
-                <button onClick={() => focus.pause()} type="button">
+                <button
+                  onClick={() => {
+                    void soundscape.playCue('focus-pause', settings);
+                    focus.pause();
+                  }}
+                  type="button"
+                >
                   Pause
                 </button>
               )}
               {(focus.state.phase === 'focus-paused' || focus.state.phase === 'break-paused') && (
-                <button className="primary-action" onClick={() => focus.resume()} type="button">
+                <button
+                  className="primary-action"
+                  onClick={() => {
+                    void soundscape.playCue('focus-resume', settings);
+                    focus.resume();
+                  }}
+                  type="button"
+                >
                   Resume
                 </button>
               )}
@@ -1074,9 +1106,15 @@ function FocusWorkspace({
               value={Number.isFinite(settings.maxOfflineHours) ? settings.maxOfflineHours : ''}
             />
           </label>
+          <p className="audio-settings-status" role="status">
+            Audio: {settings.audioMuted ? 'muted' : `master ${settings.volumePercent}%`} · ambience{' '}
+            {settings.ambienceEnabled ? `${settings.ambienceVolumePercent}%` : 'off'} · effects{' '}
+            {settings.soundEnabled ? `${settings.effectsVolumePercent}%` : 'off'}.
+          </p>
           <label>
-            Volume percent
+            Master volume
             <input
+              aria-label="Master volume percent"
               max={100}
               min={0}
               onChange={(event) =>
@@ -1086,15 +1124,55 @@ function FocusWorkspace({
               value={settings.volumePercent}
             />
             <output>{settings.volumePercent}%</output>
-            <span>Changes the completion tone only.</span>
+            <span>Caps all optional local audio.</span>
+          </label>
+          <label>
+            Ambience volume
+            <input
+              aria-label="Ambience volume percent"
+              disabled={settings.audioMuted || !settings.ambienceEnabled}
+              max={100}
+              min={0}
+              onChange={(event) =>
+                setSettings({
+                  ...settings,
+                  ambienceVolumePercent: event.currentTarget.valueAsNumber,
+                })
+              }
+              type="range"
+              value={settings.ambienceVolumePercent}
+            />
+            <output>{settings.ambienceVolumePercent}%</output>
+            <span>Quiet Worker-factual atmosphere; off by default.</span>
+          </label>
+          <label>
+            Effects volume
+            <input
+              aria-label="Effects volume percent"
+              disabled={settings.audioMuted || !settings.soundEnabled}
+              max={100}
+              min={0}
+              onChange={(event) =>
+                setSettings({
+                  ...settings,
+                  effectsVolumePercent: event.currentTarget.valueAsNumber,
+                })
+              }
+              type="range"
+              value={settings.effectsVolumePercent}
+            />
+            <output>{settings.effectsVolumePercent}%</output>
+            <span>Restrained focus, selection, progress, danger, and discovery cues.</span>
           </label>
           {(
             [
+              ['audioMuted', 'Mute all audio'],
+              ['ambienceEnabled', 'Ambient soundscape'],
+              ['soundEnabled', 'Sound effects'],
               ['calmMode', 'Calm focus mode'],
               ['reducedEffects', 'Reduce visual effects'],
               ['breaksEnabled', 'Optional breaks'],
               ['notificationsEnabled', 'Completion notifications'],
-              ['soundEnabled', 'Completion sound'],
               ['offlineProgressionEnabled', 'Bounded offline progression'],
             ] as const
           ).map(([key, label]) => (
@@ -1109,6 +1187,22 @@ function FocusWorkspace({
               {label}
             </label>
           ))}
+          <button
+            disabled={
+              !settingsAreValid ||
+              settings.audioMuted ||
+              !settings.soundEnabled ||
+              settings.volumePercent === 0 ||
+              settings.effectsVolumePercent === 0
+            }
+            onClick={() => {
+              void soundscape.playCue('discovery', settings);
+              setNotice('Audio preview requested; all important feedback remains visible in text.');
+            }}
+            type="button"
+          >
+            Preview audio
+          </button>
           <button
             disabled={!settingsAreValid}
             onClick={() =>

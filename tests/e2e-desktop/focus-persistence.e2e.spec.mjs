@@ -163,6 +163,36 @@ describe('native focus persistence', () => {
     expect(
       await browser.execute(() => document.documentElement.classList.contains('reduced-effects')),
     ).toBe(true);
+    const ambientSoundscape = await $('//label[normalize-space() = "Ambient soundscape"]/input');
+    if (!(await ambientSoundscape.isSelected())) await ambientSoundscape.click();
+    const soundEffects = await $('//label[normalize-space() = "Sound effects"]/input');
+    if (!(await soundEffects.isSelected())) await soundEffects.click();
+    const muteAllAudio = await $('//label[normalize-space() = "Mute all audio"]/input');
+    if (await muteAllAudio.isSelected()) await muteAllAudio.click();
+    await browser.execute(() => {
+      const values = {
+        'Master volume percent': '34',
+        'Ambience volume percent': '18',
+        'Effects volume percent': '27',
+      };
+      for (const [label, value] of Object.entries(values)) {
+        const input = document.querySelector(`input[aria-label="${label}"]`);
+        const setter =
+          input === null
+            ? undefined
+            : Object.getOwnPropertyDescriptor(Object.getPrototypeOf(input), 'value')?.set;
+        if (input === null || input.tagName !== 'INPUT' || setter === undefined) {
+          throw new Error(`missing audio slider: ${label}`);
+        }
+        setter.call(input, value);
+        input.dispatchEvent(new Event('input', { bubbles: true }));
+        input.dispatchEvent(new Event('change', { bubbles: true }));
+      }
+    });
+    expect(await (await $('.audio-settings-status')).getText()).toContain(
+      'Audio: master 34% · ambience 18% · effects 27%.',
+    );
+    expect(await (await $('button=Preview audio')).isEnabled()).toBe(true);
     const saveSettings = await $('button=Save settings');
     expect(await saveSettings.isEnabled()).toBe(true);
     await saveSettings.click();
@@ -177,7 +207,15 @@ describe('native focus persistence', () => {
     const persistedSettings = await browser.tauri.execute(({ core }) =>
       core.invoke('load_settings'),
     );
-    expect(persistedSettings).toMatchObject({ reducedEffects: true });
+    expect(persistedSettings).toMatchObject({
+      reducedEffects: true,
+      audioMuted: false,
+      ambienceEnabled: true,
+      soundEnabled: true,
+      volumePercent: 34,
+      ambienceVolumePercent: 18,
+      effectsVolumePercent: 27,
+    });
 
     const startAtMs = 1_700_000_000_000;
     await setControlledClock(startAtMs);
@@ -237,6 +275,16 @@ describe('native focus persistence', () => {
 
     await browser.reloadSession();
     await $('button=Resume').waitForDisplayed();
+    await $('summary=Focus and accessibility settings').click();
+    expect(await (await $('.audio-settings-status')).getText()).toContain(
+      'Audio: master 34% · ambience 18% · effects 27%.',
+    );
+    expect(
+      await (await $('//label[normalize-space() = "Ambient soundscape"]/input')).isSelected(),
+    ).toBe(true);
+    expect(await (await $('input[aria-label="Master volume percent"]')).getValue()).toBe('34');
+    expect(await (await $('input[aria-label="Ambience volume percent"]')).getValue()).toBe('18');
+    expect(await (await $('input[aria-label="Effects volume percent"]')).getValue()).toBe('27');
     await openWorldInspection();
     expect(await (await $('h2=Settlement and society')).isDisplayed()).toBe(true);
     expect(await (await $('select[aria-label="Inspect person"]')).isDisplayed()).toBe(true);

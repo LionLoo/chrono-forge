@@ -204,7 +204,23 @@ test('primary world controls remain keyboard operable and unclipped from 100% th
   await page.keyboard.press('Space');
   await expect(page.locator('.world-map-canvas')).toHaveAttribute('data-effects', 'reduced');
   await expect(page.getByText('Applies only while accepted focus time is running.')).toBeVisible();
-  await expect(page.getByText('Changes the completion tone only.')).toBeVisible();
+  await expect(page.getByText('Caps all optional local audio.')).toBeVisible();
+  await expect(page.getByText('Quiet Worker-factual atmosphere; off by default.')).toBeVisible();
+  await expect(page.getByText(/Audio: master 70% · ambience off · effects 45%/)).toBeVisible();
+
+  const ambientSoundscape = page.getByRole('checkbox', { name: 'Ambient soundscape' });
+  await ambientSoundscape.focus();
+  await page.keyboard.press('Space');
+  await expect(page.getByRole('slider', { name: 'Ambience volume percent' })).toBeEnabled();
+
+  const muteAllAudio = page.getByRole('checkbox', { name: 'Mute all audio' });
+  await muteAllAudio.focus();
+  await page.keyboard.press('Space');
+  await expect(page.getByRole('button', { name: 'Preview audio' })).toBeDisabled();
+  await expect(page.getByText(/Audio: muted · ambience 20% · effects 45%/)).toBeVisible();
+  await muteAllAudio.focus();
+  await page.keyboard.press('Space');
+  await expect(page.getByRole('button', { name: 'Preview audio' })).toBeEnabled();
 
   const calmMode = page.getByRole('checkbox', { name: 'Calm focus mode' });
   await calmMode.focus();

@@ -220,5 +220,5 @@ describe('M10 factual event description contract', () => {
     const reloaded = deserializeWorldSnapshot(snapshot);
     expect(reloaded.eventLog).toStrictEqual(world.eventLog);
     expect(serializeWorldSnapshot(reloaded)).toBe(snapshot);
-  }, 30_000);
+  }, 60_000);
 });

@@ -719,6 +719,17 @@ textarea:focus-visible,
   text-transform: uppercase;
 }
 
+.audio-settings-status {
+  margin: 0;
+  padding: 9px 11px;
+  border-left: 3px solid #d6a351;
+  background: rgba(214, 163, 81, 0.08);
+  color: #e4d7b7;
+  font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+  font-size: 0.75rem;
+  line-height: 1.5;
+}
+
 .timer-readout {
   display: block;
   margin: 12px 0 4px;
@@ -760,6 +771,13 @@ textarea:focus-visible,
   color: #cbd8c9;
   font-size: 0.78rem;
   font-weight: 650;
+  line-height: 1.45;
+}
+
+.focus-card label > span {
+  color: #aebdab;
+  font-weight: 500;
+  line-height: 1.5;
 }
 
 .focus-card input:not([type='checkbox']):not([type='range']),
