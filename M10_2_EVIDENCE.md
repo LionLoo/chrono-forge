@@ -1,6 +1,6 @@
 # M10.2 sound, atmosphere, and game-feel evidence
 
-Status: implementation and complete local validation passed on `release/v1-sound-atmosphere-game-feel` from merged M10.1 main `7768d782100e38043115e1a8fe84c090326873e2`; commit, PR, exact-head hosted CI, merge, and merge-head CI remain open.
+Status: implementation and complete local validation passed on `release/v1-sound-atmosphere-game-feel` from merged M10.1 main `7768d782100e38043115e1a8fe84c090326873e2`. PR #16 implementation head `47a8c72b0d9457a6bb1fdaa74a6d5e6f36686bf8` passed hosted workflow `35780770808`; this durable docs-only final head, merge, and merge-head CI remain open.
 
 ## Observable acceptance contract
 
@@ -37,3 +37,4 @@ Status: implementation and complete local validation passed on `release/v1-sound
 - 2026-09-22: The final continuous `npm run ci` exact-tree gate passed: formatting, zero-warning web/Rust lint, and type checking; 64 covered files/449 tests in 279.69 seconds; 88.08% statements, 80.83% branches, 93.71% functions, and 89.82% lines; the complete long catalogue at 14 files/31 tests in 1,258.28 seconds with 1,237.50 seconds of test work; Rust 23/23; browser E2E 6/6 in 31.2 seconds; and native SQLite/desktop E2E 3/3 in 27.5 seconds.
 - 2026-09-22: The same gate generated the 1,051-component SBOM (770 npm, 281 Cargo), rebuilt the unsigned x64 NSIS installer at 3,112,991 bytes with SHA-256 `E1F1977ED38F91A6A1DA665AE84B1DDB73EBA1FA90561CC327CADD3BCCFA8037`, and verified that no WDIO bridge, capability, or global Tauri test API entered the production artifact.
 - 2026-09-22: Final focused Terra/high review accepted the exact tree for commit with no finding. The three affected test files passed 17/17 in 23.43 seconds; review confirmed that timeout edits only widened wall-clock allowances, every deterministic/factual assertion and locked threshold remained intact, and every recorded final-gate claim matched the evidence.
+- 2026-09-22: PR #16 opened from exact implementation head `47a8c72b0d9457a6bb1fdaa74a6d5e6f36686bf8` against M10.1 main `7768d782100e38043115e1a8fe84c090326873e2`. Hosted workflow `35780770808` completed successfully with web quality/tests/E2E, Windows native tests/installer, and aggregate `Required` all green. A docs-only final-head rerun remains mandatory before merge.
