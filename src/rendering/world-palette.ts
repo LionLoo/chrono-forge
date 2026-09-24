@@ -67,16 +67,25 @@ export function colorForTile(
   hazard: number,
   derivedValue = 0,
 ): number {
-  if (overlay === 'terrain') return TERRAIN_COLORS[biome] ?? 0x5a5650;
+  const terrainColor = TERRAIN_COLORS[biome] ?? 0x5a5650;
+  if (overlay === 'terrain') return terrainColor;
+
+  if (overlay === 'hazards' || overlay === 'danger') {
+    const intensity =
+      overlay === 'danger'
+        ? Math.round((Math.max(0, Math.min(1_000, derivedValue)) * 255) / 1_000)
+        : hazard;
+    // Retain geographic orientation under danger instead of replacing every biome
+    // with one debug-like red scalar field.
+    return mixColor(terrainColor, OVERLAY_HIGH[overlay], Math.round(intensity * 0.62));
+  }
 
   const value =
     overlay === 'resources'
       ? Math.round((Math.min(RESOURCE_DISPLAY_CEILING, resource) * 255) / RESOURCE_DISPLAY_CEILING)
       : overlay === 'habitability'
         ? habitability
-        : overlay === 'hazards' || overlay === 'danger'
-          ? hazard
-          : Math.round((Math.max(0, Math.min(1_000, derivedValue)) * 255) / 1_000);
+        : Math.round((Math.max(0, Math.min(1_000, derivedValue)) * 255) / 1_000);
 
   return mixColor(OVERLAY_LOW, OVERLAY_HIGH[overlay], value);
 }

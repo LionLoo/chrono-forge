@@ -188,6 +188,20 @@ test('primary world controls remain keyboard operable and unclipped from 100% th
   await page.keyboard.press('ArrowDown');
   await page.keyboard.press('Enter');
   await expect(page.getByRole('article', { name: 'Selected map object' })).toBeVisible();
+  await page.getByRole('button', { name: 'Frame selection' }).click();
+  await expect(page.getByLabel('Camera position')).toContainText('3.00×');
+  const map = page.locator('.world-map-canvas');
+  const mapBounds = await map.boundingBox();
+  expect(mapBounds).not.toBeNull();
+  await page.mouse.click(mapBounds!.x + mapBounds!.width / 2, mapBounds!.y + mapBounds!.height / 2);
+  await expect(page.getByRole('article', { name: 'Selected map object' })).toContainText(
+    'Person 1',
+  );
+  const scrollBeforeMapZoom = await page.evaluate(() => window.scrollY);
+  await page.mouse.move(mapBounds!.x + mapBounds!.width / 2, mapBounds!.y + mapBounds!.height / 2);
+  await page.mouse.wheel(0, -120);
+  await expect(page.getByLabel('Camera position')).toContainText('3.45×');
+  expect(await page.evaluate(() => window.scrollY)).toBe(scrollBeforeMapZoom);
 
   const inspection = page.getByRole('button', { name: 'Open world inspection' });
   await inspection.focus();

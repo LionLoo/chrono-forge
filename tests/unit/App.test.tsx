@@ -133,8 +133,15 @@ describe('deterministic world lab', () => {
     await user.click(screen.getByRole('button', { name: 'Pan world down' }));
     await user.click(screen.getByRole('button', { name: 'Pan world right' }));
     await user.click(screen.getByRole('button', { name: 'Zoom world out' }));
-    await user.click(screen.getByRole('button', { name: 'Reset' }));
+    await user.click(screen.getByRole('button', { name: 'Overview' }));
     expect(screen.getByLabelText('Camera position')).toHaveTextContent('X 24 · Y 24 · 1.00×');
+
+    await user.selectOptions(
+      screen.getByRole('combobox', { name: 'Inspect map object' }),
+      'agent:1',
+    );
+    await user.click(screen.getByRole('button', { name: 'Frame selection' }));
+    expect(screen.getByLabelText('Camera position')).toHaveTextContent('3.00×');
 
     expect(
       screen.queryByRole('button', { name: /Observe .* fixed ticks/ }),

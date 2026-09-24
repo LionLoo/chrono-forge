@@ -830,8 +830,8 @@ function FocusWorkspace({
     <section className="focus-card" aria-labelledby="focus-title">
       <header className="card-heading focus-heading">
         <div>
-          <p>Milestone 2 · local-first focus</p>
-          <h2 id="focus-title">Focus forge</h2>
+          <p>Session hearth · local-first</p>
+          <h2 id="focus-title">Protect your time</h2>
         </div>
         <span>
           {runtime.mode === 'native' ? 'SQLite archive' : 'Browser preview · not durable'}

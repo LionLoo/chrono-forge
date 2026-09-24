@@ -2,7 +2,7 @@
 
 `PRODUCT_SPEC.md` is the product contract and `PLAN.md` contains the decision-complete acceptance criteria, branches, and validation for each item. Milestones run in this order:
 
-Current checkpoint: M0-M10 are merged, independently reviewed, and hosted-verified on `main`. M10.1 focus-session engagement and return value is implemented on its delivery branch and is undergoing final validation and review. M10.1-M12 (including every later M10.x release gate) and the private v1.0.0 release remain fully blocking.
+Current checkpoint: M0-M10.2 are merged, independently reviewed, and hosted-verified on `main` at `11aa0594ac05be1b854a84fe6fff0744fe7770cb`. M10.5 world, UI, and graphics overhaul is active on `release/v1-ui-graphics-overhaul`. M10.5-M12 (including every later M10.x release gate) and the private v1.0.0 release remain fully blocking.
 
 | Order | Milestone                                                    | Outcome                                                                                                            |
 | ----- | ------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------ |

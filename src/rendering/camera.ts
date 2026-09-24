@@ -9,6 +9,7 @@ export const INITIAL_WORLD_CAMERA: WorldCamera = Object.freeze({ x: 24, y: 24, z
 const MIN_ZOOM = 0.5;
 const MAX_ZOOM = 5;
 const MAX_OFFSET = 20_000;
+const DEFAULT_TILE_SIZE = 6;
 
 function finiteClamp(value: number, minimum: number, maximum: number): number {
   if (!Number.isFinite(value)) return 0;
@@ -56,6 +57,42 @@ export function zoomCameraAt(
   return {
     x: finiteClamp(safeAnchorX - worldX * zoom, -MAX_OFFSET, MAX_OFFSET),
     y: finiteClamp(safeAnchorY - worldY * zoom, -MAX_OFFSET, MAX_OFFSET),
+    zoom,
+  };
+}
+
+/** Centers one factual map tile in the visible presentation without affecting world authority. */
+export function frameCameraOnTile(
+  tileIndex: number,
+  worldWidth: number,
+  viewportWidth: number,
+  viewportHeight: number,
+  requestedZoom = 3,
+  tileSize = DEFAULT_TILE_SIZE,
+): WorldCamera {
+  if (
+    !Number.isSafeInteger(tileIndex) ||
+    tileIndex < 0 ||
+    !Number.isSafeInteger(worldWidth) ||
+    worldWidth < 1 ||
+    !Number.isFinite(viewportWidth) ||
+    !Number.isFinite(viewportHeight) ||
+    viewportWidth < 1 ||
+    viewportHeight < 1 ||
+    !Number.isFinite(tileSize) ||
+    tileSize <= 0
+  ) {
+    return INITIAL_WORLD_CAMERA;
+  }
+
+  const zoom = Number.isFinite(requestedZoom)
+    ? finiteClamp(requestedZoom, MIN_ZOOM, MAX_ZOOM)
+    : INITIAL_WORLD_CAMERA.zoom;
+  const tileX = tileIndex % worldWidth;
+  const tileY = Math.floor(tileIndex / worldWidth);
+  return {
+    x: finiteClamp(viewportWidth / 2 - (tileX + 0.5) * tileSize * zoom, -MAX_OFFSET, MAX_OFFSET),
+    y: finiteClamp(viewportHeight / 2 - (tileY + 0.5) * tileSize * zoom, -MAX_OFFSET, MAX_OFFSET),
     zoom,
   };
 }

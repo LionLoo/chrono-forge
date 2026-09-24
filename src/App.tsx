@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 
 import { getFocusAlerts, type FocusAlerts } from './adapters/focus-alerts';
 import { DEFAULT_APP_SETTINGS, type AppSettings } from './adapters/persistence';
@@ -9,8 +9,8 @@ import {
   type GameSoundscape,
 } from './adapters/soundscape';
 import type { FocusRevisitTarget } from './focus/session-review';
-import { STRUCTURE_STATE_CODES, type QueuedCommand } from './protocol';
-import { INITIAL_WORLD_CAMERA, panCamera, zoomCamera } from './rendering/camera';
+import { STRUCTURE_STATE_CODES, type QueuedCommand, type WorldFrameProjection } from './protocol';
+import { frameCameraOnTile, INITIAL_WORLD_CAMERA, panCamera, zoomCamera } from './rendering/camera';
 import { WorldMapCanvas } from './rendering/WorldMapCanvas';
 import type { SelectableId } from './rendering/render-model';
 import { overlayDefinition, WORLD_OVERLAYS, type WorldOverlay } from './rendering/world-palette';
@@ -97,11 +97,49 @@ function conditionTier(condition: number): 'sound' | 'worn' | 'critical' {
   return 'critical';
 }
 
+function tileForSelection(
+  frame: WorldFrameProjection,
+  selection: SelectableId | null,
+): number | null {
+  if (selection === null) return null;
+  if (selection.kind === 'agent') {
+    const index = frame.agentIds.indexOf(selection.id);
+    return index < 0 ? null : (frame.agentTiles[index] ?? null);
+  }
+  if (selection.kind === 'structure') {
+    const index = frame.structureIds.indexOf(selection.id);
+    return index < 0 ? null : (frame.structureTiles[index] ?? null);
+  }
+  if (selection.kind === 'settlement') {
+    return (
+      frame.civilizations.settlements.find((settlement) => settlement.id === selection.id)
+        ?.centerTileIndex ?? null
+    );
+  }
+  if (selection.kind === 'route') {
+    const route = frame.civilizations.routes.find((candidate) => candidate.id === selection.id);
+    return route === undefined
+      ? null
+      : (frame.civilizations.settlements.find(
+          (settlement) => settlement.id === route.firstSettlementId,
+        )?.centerTileIndex ?? null);
+  }
+  if (selection.kind === 'ruin') {
+    const ruin = frame.civilizations.ruins.find((candidate) => candidate.id === selection.id);
+    return ruin === undefined
+      ? null
+      : (frame.civilizations.settlements.find((settlement) => settlement.id === ruin.settlementId)
+          ?.centerTileIndex ?? null);
+  }
+  return null;
+}
+
 export function App({ focusAlerts, focusClock, persistence, soundscape, workerFactory }: AppProps) {
   const simulation = useWorldSimulation(workerFactory);
   const completionAlerts = focusAlerts ?? getFocusAlerts();
   const gameSoundscape = soundscape ?? getGameSoundscape();
   const runtimePersistence = persistence ?? getRuntimePersistence();
+  const mapFrameRef = useRef<HTMLDivElement>(null);
   const [camera, setCamera] = useState(INITIAL_WORLD_CAMERA);
   const [overlay, setOverlay] = useState<WorldOverlay>('terrain');
   const [inspectionOpen, setInspectionOpen] = useState(false);
@@ -330,6 +368,27 @@ export function App({ focusAlerts, focusClock, persistence, soundscape, workerFa
       ],
     };
   }, [mapSelection, simulation.frame]);
+  const selectedMapTile = useMemo(
+    () => (simulation.frame === null ? null : tileForSelection(simulation.frame, mapSelection)),
+    [mapSelection, simulation.frame],
+  );
+  const frameMapObject = useCallback(
+    (selection: SelectableId | null) => {
+      const frame = simulation.frame;
+      const tileIndex = frame === null ? null : tileForSelection(frame, selection);
+      const mapFrame = mapFrameRef.current;
+      if (frame === null || tileIndex === null || mapFrame === null) return;
+      setCamera(
+        frameCameraOnTile(
+          tileIndex,
+          frame.width,
+          mapFrame.clientWidth || 960,
+          mapFrame.clientHeight || 540,
+        ),
+      );
+    },
+    [simulation.frame],
+  );
   const revisitFocusTarget = useCallback(
     (target: FocusRevisitTarget) => {
       const selection: SelectableId = {
@@ -337,6 +396,7 @@ export function App({ focusAlerts, focusClock, persistence, soundscape, workerFa
         kind: target.kind === 'person' ? 'agent' : target.kind,
       };
       selectMapObject(selection);
+      frameMapObject(selection);
       queueMicrotask(() => {
         const inspector = document.getElementById('map-inspector');
         inspector?.focus({ preventScroll: true });
@@ -346,7 +406,7 @@ export function App({ focusAlerts, focusClock, persistence, soundscape, workerFa
         });
       });
     },
-    [reducedEffects, selectMapObject],
+    [frameMapObject, reducedEffects, selectMapObject],
   );
   const queueIntervention = (command: QueuedCommand) => {
     setInterventionPending(true);
@@ -382,33 +442,55 @@ export function App({ focusAlerts, focusClock, persistence, soundscape, workerFa
           </span>
           <span>{PROJECT_META.name}</span>
         </a>
-        <span className="build-badge">v{PROJECT_META.version} · focus forge</span>
+        <nav className="topbar-actions" aria-label="Primary navigation">
+          <a href="#world-map-title">Explore world</a>
+          <a href="#focus-title">Begin focus</a>
+          <span className="build-badge">Private world · v{PROJECT_META.version}</span>
+        </nav>
       </header>
 
       <main id="main" className="world-lab" tabIndex={-1}>
         <section className="lab-intro" aria-labelledby="hero-title">
           <div>
-            <p className="eyebrow">Milestone 7 · A living world at a glance</p>
+            <p className="eyebrow">A civilization shaped by the time you protect</p>
             <h1 id="hero-title">{PROJECT_META.promise}</h1>
           </div>
           <p>
-            Begin a calm session and accepted focus time advances a Worker-owned world. Named people
-            choose their own work, form communities, discover contextual knowledge, and carry
-            relationships through migration, trade, diplomacy, and modeled crises; every displayed
-            history claim comes from an authoritative event.
+            Settle into a quiet session, then return to named people, changing homes, growing towns,
+            difficult seasons, and a history that records only what truly happened in your world.
           </p>
         </section>
+
+        <FocusPersistencePanel
+          alerts={completionAlerts}
+          onReducedEffectsChange={setReducedEffects}
+          onRevisitTarget={revisitFocusTarget}
+          onSettingsChange={setAudioSettings}
+          runtime={runtimePersistence}
+          simulation={simulation}
+          soundscape={gameSoundscape}
+          {...(focusClock === undefined ? {} : { clock: focusClock })}
+        />
 
         <div className="lab-grid">
           <section className="world-card" aria-labelledby="world-map-title">
             <header className="card-heading">
               <div>
-                <p>Projection 01</p>
-                <h2 id="world-map-title">Founding settlement</h2>
+                <p>Live world</p>
+                <h2 id="world-map-title">
+                  {simulation.frame?.civilizations.settlements[0]?.name ?? 'Founding settlement'}
+                </h2>
               </div>
-              <span>
-                {simulation.frame ? `${simulation.frame.width} × ${simulation.frame.height}` : '—'}
-              </span>
+              <div className="world-heading-status">
+                <span>
+                  {simulation.frame ? `Tick ${simulation.frame.tick}` : 'Preparing world'}
+                </span>
+                <span>
+                  {simulation.frame
+                    ? `${simulation.frame.width} × ${simulation.frame.height}`
+                    : '—'}
+                </span>
+              </div>
             </header>
 
             <fieldset className="overlay-picker">
@@ -429,104 +511,106 @@ export function App({ focusAlerts, focusClock, persistence, soundscape, workerFa
               ))}
             </fieldset>
 
-            <div className="map-frame">
-              {simulation.frame ? (
-                <WorldMapCanvas
-                  camera={camera}
-                  onCameraChange={setCamera}
-                  onSelectionChange={selectMapObject}
-                  overlay={overlay}
-                  projection={simulation.frame}
-                  reducedEffects={reducedEffects}
-                  selection={mapSelection}
-                />
-              ) : (
-                <div className="map-loading" aria-live="polite">
-                  <span />
-                  Generating seeded terrain
-                </div>
-              )}
-            </div>
-
-            <div className="overlay-legend" aria-live="polite">
-              <span
-                aria-hidden="true"
-                className={`overlay-pattern overlay-pattern-${overlayInfo.pattern}`}
-              />
-              <span>
-                {overlayInfo.legend}. Pattern cue: {overlayInfo.pattern}.
-              </span>
-            </div>
-
-            <div className="camera-toolbar" aria-label="World camera controls">
-              <div className="camera-directions">
-                <button
-                  aria-label="Pan world left"
-                  onClick={() => {
-                    setCamera((current) => panCamera(current, -36, 0));
-                  }}
-                  type="button"
-                >
-                  ←
-                </button>
-                <button
-                  aria-label="Pan world up"
-                  onClick={() => {
-                    setCamera((current) => panCamera(current, 0, -36));
-                  }}
-                  type="button"
-                >
-                  ↑
-                </button>
-                <button
-                  aria-label="Pan world down"
-                  onClick={() => {
-                    setCamera((current) => panCamera(current, 0, 36));
-                  }}
-                  type="button"
-                >
-                  ↓
-                </button>
-                <button
-                  aria-label="Pan world right"
-                  onClick={() => {
-                    setCamera((current) => panCamera(current, 36, 0));
-                  }}
-                  type="button"
-                >
-                  →
-                </button>
+            <div className="map-stage">
+              <div className="map-frame" ref={mapFrameRef}>
+                {simulation.frame ? (
+                  <WorldMapCanvas
+                    camera={camera}
+                    onCameraChange={setCamera}
+                    onSelectionChange={selectMapObject}
+                    overlay={overlay}
+                    projection={simulation.frame}
+                    reducedEffects={reducedEffects}
+                    selection={mapSelection}
+                  />
+                ) : (
+                  <div className="map-loading" aria-live="polite">
+                    <span />
+                    Forging the first landscape
+                  </div>
+                )}
               </div>
-              <span className="camera-readout" aria-label="Camera position">
-                X {Math.round(camera.x)} · Y {Math.round(camera.y)} · {camera.zoom.toFixed(2)}×
-              </span>
-              <div className="zoom-controls">
-                <button
-                  aria-label="Zoom world out"
-                  onClick={() => {
-                    setCamera((current) => zoomCamera(current, 1 / 1.2));
-                  }}
-                  type="button"
-                >
-                  −
-                </button>
-                <button
-                  onClick={() => {
-                    setCamera(INITIAL_WORLD_CAMERA);
-                  }}
-                  type="button"
-                >
-                  Reset
-                </button>
-                <button
-                  aria-label="Zoom world in"
-                  onClick={() => {
-                    setCamera((current) => zoomCamera(current, 1.2));
-                  }}
-                  type="button"
-                >
-                  +
-                </button>
+
+              <div className="overlay-legend" aria-live="polite">
+                <span
+                  aria-hidden="true"
+                  className={`overlay-pattern overlay-pattern-${overlayInfo.pattern}`}
+                />
+                <span>
+                  {overlayInfo.legend}. Pattern cue: {overlayInfo.pattern}.
+                </span>
+              </div>
+
+              <div className="camera-toolbar" aria-label="World camera controls">
+                <div className="camera-directions">
+                  <button
+                    aria-label="Pan world left"
+                    onClick={() => {
+                      setCamera((current) => panCamera(current, -36, 0));
+                    }}
+                    type="button"
+                  >
+                    ←
+                  </button>
+                  <button
+                    aria-label="Pan world up"
+                    onClick={() => {
+                      setCamera((current) => panCamera(current, 0, -36));
+                    }}
+                    type="button"
+                  >
+                    ↑
+                  </button>
+                  <button
+                    aria-label="Pan world down"
+                    onClick={() => {
+                      setCamera((current) => panCamera(current, 0, 36));
+                    }}
+                    type="button"
+                  >
+                    ↓
+                  </button>
+                  <button
+                    aria-label="Pan world right"
+                    onClick={() => {
+                      setCamera((current) => panCamera(current, 36, 0));
+                    }}
+                    type="button"
+                  >
+                    →
+                  </button>
+                </div>
+                <span className="camera-readout" aria-label="Camera position">
+                  X {Math.round(camera.x)} · Y {Math.round(camera.y)} · {camera.zoom.toFixed(2)}×
+                </span>
+                <div className="zoom-controls">
+                  <button
+                    aria-label="Zoom world out"
+                    onClick={() => {
+                      setCamera((current) => zoomCamera(current, 1 / 1.2));
+                    }}
+                    type="button"
+                  >
+                    −
+                  </button>
+                  <button
+                    onClick={() => {
+                      setCamera(INITIAL_WORLD_CAMERA);
+                    }}
+                    type="button"
+                  >
+                    Overview
+                  </button>
+                  <button
+                    aria-label="Zoom world in"
+                    onClick={() => {
+                      setCamera((current) => zoomCamera(current, 1.2));
+                    }}
+                    type="button"
+                  >
+                    +
+                  </button>
+                </div>
               </div>
             </div>
 
@@ -571,6 +655,16 @@ export function App({ focusAlerts, focusClock, persistence, soundscape, workerFa
                       <li key={line}>{line}</li>
                     ))}
                   </ul>
+                  {selectedMapTile === null ? null : (
+                    <button
+                      onClick={() => {
+                        frameMapObject(mapSelection);
+                      }}
+                      type="button"
+                    >
+                      Frame selection
+                    </button>
+                  )}
                 </article>
               )}
             </section>
@@ -782,17 +876,6 @@ export function App({ focusAlerts, focusClock, persistence, soundscape, workerFa
             )}
           </div>
         )}
-
-        <FocusPersistencePanel
-          alerts={completionAlerts}
-          onReducedEffectsChange={setReducedEffects}
-          onRevisitTarget={revisitFocusTarget}
-          onSettingsChange={setAudioSettings}
-          runtime={runtimePersistence}
-          simulation={simulation}
-          soundscape={gameSoundscape}
-          {...(focusClock === undefined ? {} : { clock: focusClock })}
-        />
       </main>
     </div>
   );

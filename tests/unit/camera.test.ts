@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 
 import {
+  frameCameraOnTile,
   INITIAL_WORLD_CAMERA,
   panCamera,
   zoomCamera,
@@ -35,5 +36,15 @@ describe('world camera', () => {
       y: 48,
       zoom: 2,
     });
+  });
+
+  it('frames a factual tile at the viewport center without changing authority', () => {
+    expect(frameCameraOnTile(82, 16, 960, 540, 3)).toEqual({ x: 435, y: 171, zoom: 3 });
+    expect(frameCameraOnTile(82, 16, 960, 540, 100).zoom).toBe(5);
+  });
+
+  it('falls back safely when a revisit target cannot be framed', () => {
+    expect(frameCameraOnTile(-1, 0, Number.NaN, 0)).toEqual(INITIAL_WORLD_CAMERA);
+    expect(frameCameraOnTile(12, 8, 800, 500, Number.NaN).zoom).toBe(1);
   });
 });

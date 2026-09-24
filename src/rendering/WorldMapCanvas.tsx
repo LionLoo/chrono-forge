@@ -13,6 +13,7 @@ import { panCamera, zoomCamera, zoomCameraAt, type WorldCamera } from './camera'
 import {
   buildPreparedRenderModel,
   prepareRenderProjection,
+  renderDetailForZoom,
   type PreparedRenderProjection,
   type RenderModel,
   type RenderViewport,
@@ -42,6 +43,7 @@ interface PixiScene {
   readonly effectsGraphics: Graphics;
   readonly routeRuinGraphics: Graphics;
   readonly selectionGraphics: Graphics;
+  readonly spaceGraphics: Graphics;
   readonly structureGraphics: Graphics;
   readonly terrainGraphics: Graphics;
   readonly worldLayer: Container;
@@ -123,6 +125,62 @@ function drawTerrain(graphics: Graphics, model: RenderModel): void {
     const y = tile.y * TILE_SIZE;
     graphics.rect(x, y, TILE_SIZE + 0.25, TILE_SIZE + 0.25).fill(tile.color);
     drawPattern(graphics, x, y, model, tile.overlayValue);
+    if (model.overlay.value !== 'terrain') continue;
+    const textureStride =
+      model.detailLevel === 'overview' ? 4 : model.detailLevel === 'district' ? 2 : 1;
+    if ((tile.tileIndex + tile.variant) % textureStride !== 0) continue;
+    const drift = tile.variant * 0.35;
+    if (tile.biome === 0) {
+      graphics
+        .moveTo(x + 0.7, y + 2 + drift)
+        .lineTo(x + 2.2, y + 1.6 + drift)
+        .lineTo(x + 3.7, y + 2 + drift)
+        .lineTo(x + 5.2, y + 1.6 + drift)
+        .stroke({ color: 0x78a7b0, width: 0.35 });
+    } else if (tile.biome === 1) {
+      graphics
+        .moveTo(x + 1.2 + drift, y + 1.4)
+        .lineTo(x + 2.2 + drift, y + 2.4)
+        .moveTo(x + 2.2 + drift, y + 1.4)
+        .lineTo(x + 1.2 + drift, y + 2.4)
+        .stroke({ color: 0xe5ece4, width: 0.3 });
+    } else if (tile.biome === 2) {
+      graphics
+        .moveTo(x + 1.4 + drift, y + 4.8)
+        .lineTo(x + 1.8 + drift, y + 3.25)
+        .lineTo(x + 2.25 + drift, y + 4.8)
+        .stroke({ color: 0xb8c881, width: 0.35 });
+    } else if (tile.biome === 3) {
+      graphics
+        .moveTo(x + 1 + drift, y + 4.8)
+        .lineTo(x + 2.2 + drift, y + 1.1)
+        .lineTo(x + 3.4 + drift, y + 4.8)
+        .closePath()
+        .fill(0x244b36);
+    } else if (tile.biome === 4) {
+      graphics
+        .moveTo(x + 0.7, y + 3.7 + drift * 0.5)
+        .lineTo(x + 2.1, y + 3.05 + drift * 0.5)
+        .lineTo(x + 3.7, y + 3.7 + drift * 0.5)
+        .lineTo(x + 5.3, y + 3.05 + drift * 0.5)
+        .stroke({ color: 0xe1c37b, width: 0.35 });
+    } else if (tile.biome === 5) {
+      for (let reed = 0; reed < 2; reed += 1) {
+        const reedX = x + 1.5 + reed * 2 + drift * 0.25;
+        graphics
+          .moveTo(reedX, y + 5)
+          .lineTo(reedX + (reed === 0 ? -0.25 : 0.25), y + 2.2)
+          .stroke({ color: 0x86aa79, width: 0.35 });
+      }
+    } else if (tile.biome === 6) {
+      graphics
+        .moveTo(x + 0.7, y + 4.9)
+        .lineTo(x + 2.25, y + 1.2 + drift * 0.3)
+        .lineTo(x + 3.4, y + 3.2)
+        .lineTo(x + 4.2, y + 1.9)
+        .lineTo(x + 5.3, y + 4.9)
+        .stroke({ color: 0xc5beb2, width: 0.4 });
+    }
   }
 }
 
@@ -151,28 +209,96 @@ function drawBuiltEnvironment(graphics: Graphics, model: RenderModel): void {
     const [x, y] = tilePoint(settlement.tileIndex, model.width);
     const radius =
       settlement.wealthTier === 'prosperous'
-        ? 3
+        ? 3.1
         : settlement.wealthTier === 'comfortable'
-          ? 2.5
-          : 2;
-    graphics.circle(x, y, radius).stroke({ color: 0xf5ead1, width: 0.7 });
+          ? 2.7
+          : 2.3;
+    if (settlement.layout === 'courtyard') {
+      graphics
+        .rect(x - radius, y - radius, radius * 2, radius * 2)
+        .stroke({ color: settlement.accentColor, width: 0.65 });
+      if (model.detailLevel !== 'overview') {
+        graphics
+          .rect(x - radius * 0.42, y - radius * 0.42, radius * 0.84, radius * 0.84)
+          .stroke({ color: 0xf5ead1, width: 0.45 });
+      }
+    } else if (settlement.layout === 'linear') {
+      graphics
+        .moveTo(x - radius, y)
+        .lineTo(x + radius, y)
+        .moveTo(x - radius * 0.72, y - radius * 0.65)
+        .lineTo(x + radius * 0.72, y - radius * 0.65)
+        .stroke({ color: settlement.accentColor, width: 0.75 });
+    } else {
+      graphics
+        .moveTo(x, y - radius)
+        .lineTo(x + radius, y)
+        .lineTo(x, y + radius)
+        .lineTo(x - radius, y)
+        .closePath()
+        .stroke({ color: settlement.accentColor, width: 0.75 });
+      if (model.detailLevel === 'close') {
+        graphics.circle(x, y, radius * 0.36).stroke({ color: 0xf5ead1, width: 0.45 });
+      }
+    }
   }
   for (const descriptor of model.builtEnvironment) {
-    if (descriptor.kind === 'road') continue;
     const [baseX, baseY] = tilePoint(descriptor.tileIndex, model.width);
     const [offsetX, offsetY] = builtOffset(descriptor.kind);
     const color = materialColor(descriptor.material);
-    if (descriptor.kind === 'farm') {
-      graphics.rect(baseX + offsetX - 1.3, baseY + offsetY - 0.8, 2.6, 1.6).fill(color);
-      graphics.rect(baseX + offsetX - 0.8, baseY + offsetY - 0.8, 0.35, 1.6).fill(0x315b42);
+    const x = baseX + offsetX;
+    const y = baseY + offsetY;
+    if (descriptor.kind === 'road') {
+      if (model.detailLevel === 'close') {
+        graphics
+          .moveTo(baseX - 2.6, baseY + 1.6)
+          .lineTo(baseX + 2.6, baseY - 1.6)
+          .stroke({ color: 0x937a58, width: 0.85 });
+      }
+    } else if (descriptor.kind === 'farm') {
+      graphics
+        .rect(x - 1.5, y - 1, 3, 2)
+        .fill(color)
+        .stroke({ color: 0x27352e, width: 0.4 });
+      for (let row = -1; row <= 1; row += 1) {
+        graphics
+          .moveTo(x - 1.2 + row * 0.75, y - 0.75)
+          .lineTo(x - 1.2 + row * 0.75, y + 0.75)
+          .stroke({ color: 0x315b42, width: 0.3 });
+      }
     } else if (descriptor.kind === 'industry') {
-      graphics.rect(baseX + offsetX - 1.2, baseY + offsetY - 1.2, 2.4, 2.4).fill(color);
-      graphics.rect(baseX + offsetX + 0.5, baseY + offsetY - 2, 0.55, 1.2).fill(0x4b5558);
+      graphics
+        .moveTo(x - 1.45, y + 1.25)
+        .lineTo(x - 1.45, y - 0.25)
+        .lineTo(x - 0.35, y - 1)
+        .lineTo(x - 0.35, y - 0.15)
+        .lineTo(x + 0.85, y - 0.9)
+        .lineTo(x + 1.45, y - 0.4)
+        .lineTo(x + 1.45, y + 1.25)
+        .closePath()
+        .fill(color)
+        .stroke({ color: 0x27352e, width: 0.45 });
+      graphics.rect(x + 0.7, y - 1.9, 0.5, 1.2).fill(0x4b5558);
     } else if (descriptor.kind === 'infrastructure') {
-      graphics.circle(baseX + offsetX, baseY + offsetY, 1.4).stroke({ color, width: 0.7 });
+      graphics
+        .moveTo(x, y - 1.5)
+        .lineTo(x + 1.5, y)
+        .lineTo(x, y + 1.5)
+        .lineTo(x - 1.5, y)
+        .closePath()
+        .stroke({ color, width: 0.7 });
+      graphics
+        .moveTo(x - 0.7, y)
+        .lineTo(x + 0.7, y)
+        .stroke({ color: 0x79cbd1, width: 0.45 });
     } else {
       graphics
-        .rect(baseX + offsetX - 1.2, baseY + offsetY - 1.2, 2.4, 2.4)
+        .moveTo(x - 1.4, y + 1.25)
+        .lineTo(x - 1.4, y - 0.2)
+        .lineTo(x, y - 1.45)
+        .lineTo(x + 1.4, y - 0.2)
+        .lineTo(x + 1.4, y + 1.25)
+        .closePath()
         .stroke({ color, width: 0.65 });
     }
   }
@@ -216,16 +342,169 @@ function drawStructures(graphics: Graphics, model: RenderModel): void {
     const markCount =
       structure.conditionTier === 'sound' ? 1 : structure.conditionTier === 'worn' ? 2 : 3;
     for (let mark = 0; mark < markCount; mark += 1) {
-      graphics.rect(x - 2 + mark * 1.4, y - 2, 0.8, 0.8).fill(0x0b1510);
+      graphics.rect(x - 2.15 + mark * 1.25, y + 2.15, 0.7, 0.7).fill(0x0b1510);
     }
     if (structure.state === STRUCTURE_STATE_CODES.planned) {
-      graphics.rect(x - 2.5, y - 2.5, 5, 5).stroke({ color: outline, width: 1 });
-    } else if (structure.state === STRUCTURE_STATE_CODES.building) {
-      const height = Math.max(1, Math.round((5 * structure.progress) / 1_000));
-      graphics.rect(x - 2, y + 2.5 - height, 4, height).fill(fill);
-      graphics.rect(x - 2.5, y - 2.5, 5, 5).stroke({ color: outline, width: 1 });
+      graphics.rect(x - 2.35, y - 1.55, 4.7, 3.8).stroke({ color: outline, width: 0.75 });
+      graphics
+        .moveTo(x - 2.35, y + 2.25)
+        .lineTo(x + 2.35, y - 1.55)
+        .moveTo(x - 2.35, y - 1.55)
+        .lineTo(x + 2.35, y + 2.25)
+        .stroke({ color: structure.accentColor, width: 0.45 });
+      continue;
+    }
+    const bodyTop = structure.form === 'storehouse' ? -1.25 : -0.95;
+    const bodyHeight = structure.form === 'storehouse' ? 3.45 : 3.15;
+    const completedHeight =
+      structure.state === STRUCTURE_STATE_CODES.building
+        ? Math.max(0.5, (bodyHeight * structure.progress) / 1_000)
+        : bodyHeight;
+    graphics
+      .rect(x - 2.2, y + bodyTop + bodyHeight - completedHeight, 4.4, completedHeight)
+      .fill(fill)
+      .stroke({ color: outline, width: 0.7 });
+    const roofY = y + bodyTop;
+    if (structure.roof === 'flat') {
+      graphics
+        .moveTo(x - 2.45, roofY)
+        .lineTo(x + 2.45, roofY)
+        .stroke({ color: structure.accentColor, width: 0.9 });
+    } else if (structure.roof === 'hip') {
+      graphics
+        .moveTo(x - 2.45, roofY)
+        .lineTo(x - 1.2, roofY - 1.4)
+        .lineTo(x + 1.2, roofY - 1.4)
+        .lineTo(x + 2.45, roofY)
+        .closePath()
+        .fill(structure.accentColor)
+        .stroke({ color: outline, width: 0.55 });
     } else {
-      graphics.circle(x, y, 2).fill(fill).stroke({ color: outline, width: 1 });
+      graphics
+        .moveTo(x - 2.45, roofY)
+        .lineTo(x, roofY - 1.65)
+        .lineTo(x + 2.45, roofY)
+        .closePath()
+        .fill(structure.accentColor)
+        .stroke({ color: outline, width: 0.55 });
+    }
+    if (model.detailLevel !== 'overview') {
+      graphics.rect(x - 0.55, y + 0.25, 1.1, 2).fill(0x27352e);
+      if (structure.form === 'storehouse') {
+        graphics
+          .moveTo(x - 1.65, y + 0.1)
+          .lineTo(x - 0.85, y + 0.1)
+          .moveTo(x + 0.85, y + 0.1)
+          .lineTo(x + 1.65, y + 0.1)
+          .stroke({ color: 0xe9dfba, width: 0.45 });
+      }
+    }
+    if (structure.state === STRUCTURE_STATE_CODES.building) {
+      graphics
+        .moveTo(x - 2.7, y - 2.65)
+        .lineTo(x - 2.7, y + 2.5)
+        .moveTo(x + 2.7, y - 2.65)
+        .lineTo(x + 2.7, y + 2.5)
+        .moveTo(x - 2.7, y - 1.9)
+        .lineTo(x + 2.7, y - 1.9)
+        .stroke({ color: 0xe9dfba, width: 0.4 });
+    }
+    if (structure.conditionTier !== 'sound') {
+      graphics
+        .moveTo(x + 0.6, y - 0.4)
+        .lineTo(x + 1.25, y + 0.25)
+        .lineTo(x + 0.75, y + 0.8)
+        .stroke({ color: 0x5f2c2c, width: 0.5 });
+    }
+  }
+}
+
+function drawSpaceLandmarks(graphics: Graphics, model: RenderModel): void {
+  graphics.clear();
+  for (const landmark of model.spaceLandmarks) {
+    const [baseX, baseY] = tilePoint(landmark.tileIndex, model.width);
+    const x = landmark.kind === 'launch-site' ? baseX + 1.85 : baseX;
+    const y = landmark.kind === 'launch-site' ? baseY - 1.45 : baseY;
+    if (landmark.kind === 'launch-site') {
+      const height = model.detailLevel === 'close' ? 3.4 : 2.7;
+      graphics
+        .moveTo(x - 1.4, y + 2.2)
+        .lineTo(x - 0.55, y - height)
+        .lineTo(x + 0.55, y - height)
+        .lineTo(x + 1.4, y + 2.2)
+        .closePath()
+        .fill(0xd9e3dc)
+        .stroke({ color: landmark.accentColor, width: 0.55 });
+      graphics
+        .moveTo(x - 2.2, y + 2.2)
+        .lineTo(x - 2.2, y - 1.8)
+        .lineTo(x - 0.75, y - 1.8)
+        .moveTo(x - 2.2, y - 0.2)
+        .lineTo(x - 0.95, y - 0.2)
+        .stroke({ color: 0x8fa9a8, width: 0.45 });
+    } else if (landmark.kind === 'body') {
+      if (landmark.bodyKind === 'asteroid') {
+        graphics
+          .moveTo(x - 2.1, y - 0.7)
+          .lineTo(x - 0.8, y - 2)
+          .lineTo(x + 1.6, y - 1.25)
+          .lineTo(x + 2.1, y + 0.7)
+          .lineTo(x + 0.45, y + 2)
+          .lineTo(x - 1.8, y + 1.1)
+          .closePath()
+          .fill(0x8e8272)
+          .stroke({ color: landmark.accentColor, width: 0.5 });
+      } else {
+        const radius = landmark.bodyKind === 'moon' ? 1.55 : 2.05;
+        graphics
+          .circle(x, y, radius)
+          .fill(landmark.habitable ? 0x5f9d78 : 0x76828c)
+          .stroke({ color: landmark.accentColor, width: 0.55 });
+        if (landmark.bodyKind === 'planet') {
+          graphics
+            .moveTo(x - radius - 1, y + 0.55)
+            .lineTo(x + radius + 1, y - 0.55)
+            .stroke({ color: 0xd9e3dc, width: 0.4 });
+        } else {
+          graphics
+            .moveTo(x - 0.55, y - 1)
+            .lineTo(x + 0.65, y + 0.8)
+            .stroke({ color: 0xd9e3dc, width: 0.35 });
+        }
+      }
+    } else if (landmark.kind === 'craft') {
+      const direction = landmark.variant % 2 === 0 ? -1 : 1;
+      graphics
+        .moveTo(x, y - 2.6)
+        .lineTo(x + 1.05, y - 0.45)
+        .lineTo(x + 0.8, y + 1.45)
+        .lineTo(x, y + 0.75)
+        .lineTo(x - 0.8, y + 1.45)
+        .lineTo(x - 1.05, y - 0.45)
+        .closePath()
+        .fill(0xd9e3dc)
+        .stroke({ color: landmark.accentColor, width: 0.55 });
+      graphics.circle(x, y - 0.7, 0.45).fill(0x79cbd1);
+      if (landmark.status.startsWith('in-flight') && model.detailLevel !== 'overview') {
+        graphics
+          .moveTo(x, y + 1.3)
+          .lineTo(x + direction * 1.2, y + 2.8)
+          .stroke({ color: 0xe7bc61, width: 0.55 });
+      }
+    } else {
+      graphics
+        .moveTo(x - 2.4, y + 1.8)
+        .lineTo(x - 1.45, y - 0.65)
+        .lineTo(x, y - 1.7)
+        .lineTo(x + 1.45, y - 0.65)
+        .lineTo(x + 2.4, y + 1.8)
+        .closePath()
+        .fill(landmark.status === 'active' ? 0xaac2b5 : 0x665f5a)
+        .stroke({ color: landmark.accentColor, width: 0.6 });
+      graphics
+        .moveTo(x - 1.45, y + 0.2)
+        .lineTo(x + 1.45, y + 0.2)
+        .stroke({ color: 0x23332d, width: 0.4 });
     }
   }
 }
@@ -252,14 +531,99 @@ function drawAgents(
       motion === undefined
         ? tilePoint(agent.tileIndex, model.width)
         : agentMotionPoint(motion, now);
-    const fill =
-      agent.healthTier === 'sound' ? 0xf4ede0 : agent.healthTier === 'worn' ? 0xe2ac55 : 0xd75d55;
-    const radius = agent.ageTier === 'child' ? 1 : agent.ageTier === 'elder' ? 1.55 : 1.35;
-    graphics.circle(x, y, radius).fill(fill).stroke({ color: 0x0b1510, width: 0.65 });
-    if (agent.action % 2 === 0) {
-      graphics.rect(x - 0.4, y - 2.2, 0.8, 0.8).fill(0xf5ead1);
+    const offsetX = ((agent.selectable.id % 3) - 1) * 0.45;
+    const offsetY = ((Math.floor(agent.selectable.id / 3) % 3) - 1) * 0.3;
+    const centerX = x + offsetX;
+    const centerY = y + offsetY;
+    const height =
+      (model.detailLevel === 'overview' ? 3.2 : model.detailLevel === 'district' ? 4.15 : 5.1) *
+      (agent.ageTier === 'child' ? 0.76 : agent.ageTier === 'elder' ? 0.92 : 1);
+    const halfWidth =
+      height *
+      (agent.identity.silhouette === 'compact'
+        ? 0.18
+        : agent.identity.silhouette === 'broad'
+          ? 0.26
+          : 0.22);
+    const direction = agent.identity.facing === 'left' ? -1 : 1;
+    const headY = centerY - height * 0.32;
+    const bodyTop = centerY - height * 0.08;
+    const bodyBottom = centerY + height * 0.34;
+    const healthOutline =
+      agent.healthTier === 'sound' ? 0x17211c : agent.healthTier === 'worn' ? 0xe2ac55 : 0xd75d55;
+    graphics
+      .moveTo(centerX - halfWidth, bodyTop)
+      .lineTo(centerX + halfWidth, bodyTop)
+      .lineTo(centerX + halfWidth * 0.76, bodyBottom)
+      .lineTo(centerX - halfWidth * 0.76, bodyBottom)
+      .closePath()
+      .fill(agent.identity.clothingColor)
+      .stroke({ color: healthOutline, width: 0.5 });
+    graphics
+      .circle(centerX + direction * height * 0.035, headY, height * 0.115)
+      .fill(agent.identity.skinColor)
+      .stroke({ color: healthOutline, width: 0.45 });
+    graphics
+      .moveTo(centerX - halfWidth * 0.72, bodyBottom)
+      .lineTo(centerX - halfWidth, centerY + height * 0.55)
+      .moveTo(centerX + halfWidth * 0.72, bodyBottom)
+      .lineTo(centerX + halfWidth, centerY + height * 0.55)
+      .stroke({ color: 0x17211c, width: 0.5 });
+    if (agent.identity.accent === 'band') {
+      graphics
+        .moveTo(centerX - halfWidth * 0.9, centerY + height * 0.09)
+        .lineTo(centerX + halfWidth * 0.9, centerY + height * 0.09)
+        .stroke({ color: agent.identity.accentColor, width: 0.45 });
+    } else if (agent.identity.accent === 'sash') {
+      graphics
+        .moveTo(centerX - halfWidth * 0.7, bodyTop)
+        .lineTo(centerX + halfWidth * 0.55, bodyBottom)
+        .stroke({ color: agent.identity.accentColor, width: 0.45 });
     } else {
-      graphics.rect(x + 1.45, y - 0.4, 0.8, 0.8).fill(0xf5ead1);
+      graphics
+        .moveTo(centerX - halfWidth * 0.6, bodyTop - height * 0.02)
+        .lineTo(centerX + halfWidth * 0.6, bodyTop - height * 0.02)
+        .lineTo(centerX + direction * halfWidth, centerY + height * 0.17)
+        .stroke({ color: agent.identity.accentColor, width: 0.4 });
+    }
+    const activityX = centerX + direction * height * 0.27;
+    if (agent.activityVisual === 'carry') {
+      graphics
+        .rect(activityX - height * 0.1, centerY - height * 0.03, height * 0.2, height * 0.2)
+        .fill(agent.identity.accentColor)
+        .stroke({ color: 0x17211c, width: 0.35 });
+    } else if (agent.activityVisual === 'water') {
+      graphics
+        .moveTo(activityX, centerY - height * 0.13)
+        .lineTo(activityX + height * 0.1, centerY + height * 0.04)
+        .lineTo(activityX, centerY + height * 0.17)
+        .lineTo(activityX - height * 0.1, centerY + height * 0.04)
+        .closePath()
+        .fill(0x79cbd1)
+        .stroke({ color: 0x17211c, width: 0.3 });
+    } else if (agent.activityVisual === 'build') {
+      graphics
+        .moveTo(centerX + direction * height * 0.12, centerY)
+        .lineTo(activityX + direction * height * 0.14, centerY - height * 0.2)
+        .moveTo(activityX + direction * height * 0.03, centerY - height * 0.25)
+        .lineTo(activityX + direction * height * 0.2, centerY - height * 0.1)
+        .stroke({ color: agent.identity.accentColor, width: 0.55 });
+    } else if (agent.activityVisual === 'gather') {
+      graphics
+        .moveTo(centerX + direction * height * 0.11, centerY)
+        .lineTo(activityX + direction * height * 0.14, centerY + height * 0.22)
+        .stroke({ color: agent.identity.accentColor, width: 0.55 });
+    } else if (agent.activityVisual === 'rest') {
+      graphics
+        .moveTo(centerX - height * 0.24, centerY + height * 0.58)
+        .lineTo(centerX + height * 0.24, centerY + height * 0.58)
+        .stroke({ color: agent.identity.accentColor, width: 0.55 });
+    }
+    if (agent.ageTier === 'elder' && model.detailLevel === 'close') {
+      graphics
+        .moveTo(centerX - direction * height * 0.28, centerY + height * 0.08)
+        .lineTo(centerX - direction * height * 0.34, centerY + height * 0.58)
+        .stroke({ color: 0x795f3e, width: 0.45 });
     }
   }
 }
@@ -354,17 +718,58 @@ function drawEffects(graphics: Graphics, model: RenderModel): void {
     }
     const [x, y] = tilePoint(effect.markerTileIndex, model.width);
     const radius = effect.severity >= 60 ? 2.4 : 1.9;
-    graphics
-      .moveTo(x, y - radius)
-      .lineTo(x + radius, y)
-      .lineTo(x, y + radius)
-      .lineTo(x - radius, y)
-      .closePath()
-      .stroke({ color: 0xf3c96d, width: 0.9 });
-    graphics
-      .moveTo(x - 1, y)
-      .lineTo(x + 1, y)
-      .stroke({ color: 0xd76d55, width: 0.7 });
+    if (effect.kind === 'storm') {
+      graphics
+        .moveTo(x - radius, y - radius * 0.55)
+        .lineTo(x + radius * 0.15, y - radius * 0.55)
+        .lineTo(x - radius * 0.45, y + radius * 0.2)
+        .lineTo(x + radius, y + radius * 0.2)
+        .lineTo(x - radius * 0.25, y + radius)
+        .stroke({ color: 0xf3c96d, width: 0.85 });
+    } else if (effect.kind === 'fire') {
+      graphics
+        .moveTo(x, y - radius)
+        .lineTo(x + radius * 0.8, y + radius * 0.35)
+        .lineTo(x + radius * 0.25, y + radius)
+        .lineTo(x - radius * 0.75, y + radius * 0.55)
+        .lineTo(x - radius * 0.4, y - radius * 0.1)
+        .closePath()
+        .fill(0xd76d55)
+        .stroke({ color: 0xf3c96d, width: 0.65 });
+    } else if (effect.kind === 'flood') {
+      for (let wave = -1; wave <= 1; wave += 1) {
+        graphics
+          .moveTo(x - radius, y + wave * radius * 0.45)
+          .lineTo(x - radius * 0.35, y + wave * radius * 0.45 - 0.35)
+          .lineTo(x + radius * 0.35, y + wave * radius * 0.45 + 0.35)
+          .lineTo(x + radius, y + wave * radius * 0.45)
+          .stroke({ color: 0x79cbd1, width: 0.55 });
+      }
+    } else if (effect.kind === 'earthquake') {
+      graphics
+        .moveTo(x - radius, y - radius)
+        .lineTo(x - radius * 0.25, y - radius * 0.25)
+        .lineTo(x - radius * 0.7, y + radius * 0.15)
+        .lineTo(x + radius * 0.15, y + radius)
+        .lineTo(x + radius, y + radius * 0.3)
+        .stroke({ color: 0xf3c96d, width: 0.85 });
+    } else if (effect.kind === 'meteor-impact') {
+      graphics
+        .circle(x + radius * 0.35, y + radius * 0.35, radius * 0.55)
+        .stroke({ color: 0xd76d55, width: 0.75 });
+      graphics
+        .moveTo(x - radius, y - radius)
+        .lineTo(x + radius * 0.05, y + radius * 0.05)
+        .stroke({ color: 0xf3c96d, width: 0.85 });
+    } else {
+      graphics.circle(x, y, radius).stroke({ color: 0xf3c96d, width: 0.75 });
+      graphics
+        .moveTo(x - radius * 0.8, y + radius * 0.8)
+        .lineTo(x - radius * 0.2, y + radius * 0.15)
+        .lineTo(x + radius * 0.2, y + radius * 0.7)
+        .lineTo(x + radius * 0.8, y - radius * 0.8)
+        .stroke({ color: 0xd76d55, width: 0.65 });
+    }
   });
 }
 
@@ -406,12 +811,14 @@ function applyProjection(
   viewport: RenderViewport,
   selection: SelectableId | null,
   reducedEffects: boolean,
+  zoom: number,
 ): RenderModel {
   if (scene.preparedSource !== projection || scene.preparedProjection === null) {
     scene.preparedSource = projection;
     scene.preparedProjection = prepareRenderProjection(projection);
   }
   const model = buildPreparedRenderModel(scene.preparedProjection, {
+    detailLevel: renderDetailForZoom(zoom),
     overlay,
     viewport,
     selection,
@@ -446,6 +853,9 @@ function applyProjection(
   }
   if (previous?.layerSignatures.structures !== model.layerSignatures.structures) {
     drawStructures(scene.structureGraphics, model);
+  }
+  if (previous?.layerSignatures.space !== model.layerSignatures.space) {
+    drawSpaceLandmarks(scene.spaceGraphics, model);
   }
   scene.reducedEffects = reducedEffects;
   scene.lastModel = model;
@@ -576,6 +986,7 @@ export function WorldMapCanvas({
         const builtGraphics = new Graphics();
         const routeRuinGraphics = new Graphics();
         const structureGraphics = new Graphics();
+        const spaceGraphics = new Graphics();
         const agentGraphics = new Graphics();
         const effectsGraphics = new Graphics();
         const selectionGraphics = new Graphics();
@@ -584,6 +995,7 @@ export function WorldMapCanvas({
           builtGraphics,
           routeRuinGraphics,
           structureGraphics,
+          spaceGraphics,
           agentGraphics,
           effectsGraphics,
           selectionGraphics,
@@ -602,6 +1014,7 @@ export function WorldMapCanvas({
           effectsGraphics,
           routeRuinGraphics,
           selectionGraphics,
+          spaceGraphics,
           structureGraphics,
           terrainGraphics,
           worldLayer,
@@ -619,11 +1032,13 @@ export function WorldMapCanvas({
           viewportFor(host, cameraRef.current, projectionRef.current),
           selectionRef.current,
           reducedEffectsRef.current,
+          cameraRef.current.zoom,
         );
         application.canvas.setAttribute(
           'aria-label',
           `${model.era} world map, ${projectionRef.current.agentIds.length} visible agents, ${projectionRef.current.structureIds.length} structures, ${model.overlay.legend} overlay`,
         );
+        host.dataset.detail = model.detailLevel;
         worldLayer.position.set(cameraRef.current.x, cameraRef.current.y);
         worldLayer.scale.set(cameraRef.current.zoom);
       })
@@ -657,11 +1072,13 @@ export function WorldMapCanvas({
       viewportFor(host, camera, projection),
       selection,
       reducedEffects,
+      camera.zoom,
     );
     scene.application.canvas.setAttribute(
       'aria-label',
       `${model.era} world map, ${projection.agentIds.length} visible agents, ${projection.structureIds.length} structures, ${model.overlay.legend} overlay`,
     );
+    host.dataset.detail = model.detailLevel;
     scene.worldLayer.position.set(camera.x, camera.y);
     scene.worldLayer.scale.set(camera.zoom);
   }, [camera, overlay, projection, reducedEffects, selection]);

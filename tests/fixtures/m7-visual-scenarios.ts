@@ -28,6 +28,7 @@ const scalar = (value: number): Uint8Array =>
 
 const renderOptions = (overlay: RenderModelOptions['overlay']): RenderModelOptions =>
   Object.freeze({
+    detailLevel: 'district',
     overlay,
     reducedEffects: true,
     selection: null,
@@ -90,8 +91,70 @@ function scenario(
           status: 'active' as const,
         }),
       ]),
+      spaceBodyFacts: Object.freeze(
+        options.era === 'space'
+          ? [
+              Object.freeze({ distance: 0, habitable: true, id: 1, kind: 'home' as const }),
+              Object.freeze({ distance: 4, habitable: true, id: 2, kind: 'planet' as const }),
+              Object.freeze({ distance: 6, habitable: false, id: 3, kind: 'moon' as const }),
+            ]
+          : [],
+      ),
       spaceColonyCount: options.era === 'space' ? 1 : 0,
+      spaceColonyFacts: Object.freeze(
+        options.era === 'space'
+          ? [
+              Object.freeze({
+                bodyId: 2,
+                id: 6,
+                residentCount: 12,
+                settlementId: 1,
+                status: 'active' as const,
+              }),
+            ]
+          : [],
+      ),
+      spaceMissionFacts: Object.freeze(
+        options.era === 'space'
+          ? [
+              Object.freeze({
+                civilizationId: 1,
+                id: 3,
+                kind: 'orbital' as const,
+                spacecraftId: 2,
+                status: 'active' as const,
+              }),
+            ]
+          : [],
+      ),
       spaceProgramStage: options.era === 'space' ? 'spaceflight' : 'none',
+      spaceProgramFacts: Object.freeze(
+        options.era === 'space' || options.era === 'advanced'
+          ? [
+              Object.freeze({
+                civilizationId: 1,
+                id: 1,
+                launchCapacity: options.era === 'space' ? 2 : 0,
+                settlementId: 1,
+                stage:
+                  options.era === 'space' ? ('spaceflight' as const) : ('advanced-energy' as const),
+              }),
+            ]
+          : [],
+      ),
+      spacecraftFacts: Object.freeze(
+        options.era === 'space'
+          ? [
+              Object.freeze({
+                civilizationId: 1,
+                currentBodyId: 1,
+                id: 2,
+                missionId: 3,
+                status: 'orbiting' as const,
+              }),
+            ]
+          : [],
+      ),
       structureFacts: Object.freeze([
         Object.freeze({ condition: 920, id: 1, kind: 1, progress: 1_000, state: 3, tileIndex: 36 }),
         Object.freeze({ condition: 420, id: 2, kind: 2, progress: 650, state: 2, tileIndex: 37 }),

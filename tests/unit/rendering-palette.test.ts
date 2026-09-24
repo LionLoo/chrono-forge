@@ -43,6 +43,12 @@ describe('world palette', () => {
     expect(colorForTile('population', 0, 500, 0, 0, 0)).not.toBe(
       colorForTile('population', 0, 500, 0, 0, 1_000),
     );
+    expect(colorForTile('danger', 2, 0, 0, 120, 800)).not.toBe(
+      colorForTile('danger', 3, 0, 0, 120, 800),
+    );
+    expect(colorForTile('danger', 2, 0, 0, 120, 0)).not.toBe(
+      colorForTile('danger', 2, 0, 0, 120, 1_000),
+    );
   });
 
   it('pairs every scalar overlay with a text legend and redundant pattern cue', () => {

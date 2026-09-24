@@ -90,6 +90,28 @@ const projection = projectWorldFrame(
   createInitialWorld([1, 2, 3, 4], { width: 2, height: 1, chunkSize: 1 }),
 ) satisfies WorldMapProjection;
 
+function overviewAgentHead(
+  frame: WorldMapProjection,
+  agentIndex: number,
+  tileIndex: number,
+): readonly [number, number] {
+  const id = frame.agentIds[agentIndex] ?? 0;
+  const ageYears = frame.society.people.find((person) => person.id === id)?.ageYears ?? 18;
+  const ageScale = ageYears < 18 ? 0.76 : ageYears >= 60 ? 0.92 : 1;
+  const height = 3.2 * ageScale;
+  const offsetX = ((id % 3) - 1) * 0.45;
+  const offsetY = ((Math.floor(id / 3) % 3) - 1) * 0.3;
+  let identity = Math.imul((id | 0) ^ 0x7ce1, 0x45d9f3b);
+  identity ^= identity >>> 16;
+  identity = Math.imul(identity, 0x45d9f3b);
+  identity ^= identity >>> 16;
+  const facing = (identity >>> 0) % 2 === 0 ? -1 : 1;
+  return [
+    (tileIndex % frame.width) * 6 + 3 + offsetX + facing * height * 0.035,
+    Math.floor(tileIndex / frame.width) * 6 + 3 + offsetY - height * 0.32,
+  ];
+}
+
 describe('Pixi world projection', () => {
   beforeEach(() => {
     pixiMocks.reset();
@@ -115,6 +137,10 @@ describe('Pixi world projection', () => {
     expect(graphics?.fill).toHaveBeenCalledTimes(2);
     expect(worldLayer?.position.set).toHaveBeenCalledWith(24, 24);
     expect(worldLayer?.scale.set).toHaveBeenCalledWith(1);
+    expect(view.container.querySelector('.world-map-canvas')).toHaveAttribute(
+      'data-detail',
+      'overview',
+    );
 
     view.rerender(
       <WorldMapCanvas
@@ -127,6 +153,10 @@ describe('Pixi world projection', () => {
     expect(graphics?.clear).toHaveBeenCalledTimes(2);
     expect(worldLayer?.position.set).toHaveBeenLastCalledWith(30, 40);
     expect(worldLayer?.scale.set).toHaveBeenLastCalledWith(1.5);
+    expect(view.container.querySelector('.world-map-canvas')).toHaveAttribute(
+      'data-detail',
+      'district',
+    );
 
     const host = view.container.querySelector<HTMLElement>('.world-map-canvas');
     expect(host).not.toBeNull();
@@ -211,7 +241,7 @@ describe('Pixi world projection', () => {
     );
 
     await waitFor(() => expect(view.getByRole('img')).toBeVisible());
-    const agentGraphics = pixiMocks.graphics[4]!;
+    const agentGraphics = pixiMocks.graphics[5]!;
     const agentCount = initial.agentIds.length;
     const before = agentGraphics.circle.mock.calls[movedAgentIndex]!;
     now = 11_000;
@@ -233,10 +263,7 @@ describe('Pixi world projection', () => {
     scheduledAnimation(now);
     const halfway = agentGraphics.circle.mock.calls.at(-agentCount + movedAgentIndex)!;
     const destinationTile = advanced.agentTiles[movedAgentIndex]!;
-    const destination = [
-      ((destinationTile % advanced.width) + 0.5) * 6,
-      (Math.floor(destinationTile / advanced.width) + 0.5) * 6,
-    ];
+    const destination = overviewAgentHead(advanced, movedAgentIndex, destinationTile);
     expect(halfway.slice(0, 2)).not.toEqual(before.slice(0, 2));
     expect(halfway.slice(0, 2)).not.toEqual(destination);
 
@@ -264,7 +291,7 @@ describe('Pixi world projection', () => {
     );
 
     await waitFor(() => expect(view.getByRole('img')).toBeVisible());
-    const agentGraphics = pixiMocks.graphics[4]!;
+    const agentGraphics = pixiMocks.graphics[5]!;
     view.rerender(
       <WorldMapCanvas
         camera={INITIAL_WORLD_CAMERA}
@@ -278,10 +305,7 @@ describe('Pixi world projection', () => {
     const destinationTile = advanced.agentTiles[movedAgentIndex]!;
     expect(
       agentGraphics.circle.mock.calls.at(-initial.agentIds.length + movedAgentIndex)?.slice(0, 2),
-    ).toEqual([
-      ((destinationTile % advanced.width) + 0.5) * 6,
-      (Math.floor(destinationTile / advanced.width) + 0.5) * 6,
-    ]);
+    ).toEqual(overviewAgentHead(advanced, movedAgentIndex, destinationTile));
     expect(requestAnimationFrame).not.toHaveBeenCalled();
     requestAnimationFrame.mockRestore();
   });
@@ -334,11 +358,12 @@ describe('Pixi world projection', () => {
     });
     expect(pixiMocks.graphics[3]?.rect).toHaveBeenCalled();
     expect(pixiMocks.graphics[3]?.stroke).toHaveBeenCalled();
-    expect(pixiMocks.graphics[4]?.circle).toHaveBeenCalled();
-    expect(pixiMocks.graphics[4]?.rect).toHaveBeenCalled();
+    expect(pixiMocks.graphics[5]?.circle).toHaveBeenCalled();
+    expect(pixiMocks.graphics[5]?.moveTo).toHaveBeenCalled();
+    expect(pixiMocks.graphics[5]?.lineTo).toHaveBeenCalled();
 
     const structureClears = pixiMocks.graphics[3]?.clear.mock.calls.length;
-    const agentClears = pixiMocks.graphics[4]?.clear.mock.calls.length;
+    const agentClears = pixiMocks.graphics[5]?.clear.mock.calls.length;
     view.rerender(
       <WorldMapCanvas
         camera={INITIAL_WORLD_CAMERA}
@@ -348,7 +373,7 @@ describe('Pixi world projection', () => {
       />,
     );
     expect(pixiMocks.graphics[3]?.clear).toHaveBeenCalledTimes(structureClears ?? 0);
-    expect(pixiMocks.graphics[4]?.clear).toHaveBeenCalledTimes(agentClears ?? 0);
+    expect(pixiMocks.graphics[5]?.clear).toHaveBeenCalledTimes(agentClears ?? 0);
 
     view.rerender(
       <WorldMapCanvas
@@ -363,7 +388,101 @@ describe('Pixi world projection', () => {
       />,
     );
     expect(pixiMocks.graphics[3]?.clear).toHaveBeenCalledTimes((structureClears ?? 0) + 1);
-    expect(pixiMocks.graphics[4]?.clear).toHaveBeenCalledTimes((agentClears ?? 0) + 1);
+    expect(pixiMocks.graphics[5]?.clear).toHaveBeenCalledTimes((agentClears ?? 0) + 1);
+  });
+
+  it('draws factual launch, body, craft, and colony silhouettes on a separate presentation layer', async () => {
+    const base = projectWorldFrame(createInitialWorld([13, 21, 34, 55]));
+    const settlement = base.civilizations.settlements[0];
+    const homeBody = base.space.bodies[0];
+    if (settlement === undefined || homeBody === undefined)
+      throw new Error('Expected founding settlement and home body projections.');
+    const emptyStock = { food: 0, metal: 0, stone: 0, timber: 0, water: 0 } as const;
+    const spaceProjection: WorldMapProjection = {
+      ...base,
+      space: {
+        ...base.space,
+        bodies: [
+          homeBody,
+          {
+            distance: 4,
+            habitable: true,
+            id: 2,
+            kind: 'planet',
+            name: 'Test world',
+            remainingDeposit: emptyStock,
+          },
+        ],
+        colonies: [
+          {
+            bodyId: 2,
+            cultureDivergence: 3,
+            cultureId: settlement.cultureId,
+            civilizationId: settlement.civilizationId,
+            foundedTick: 10,
+            id: 6,
+            residentCount: 4,
+            settlementId: settlement.id,
+            status: 'active',
+            stores: emptyStock,
+          },
+        ],
+        missions: [
+          {
+            cargo: emptyStock,
+            civilizationId: settlement.civilizationId,
+            completedTick: null,
+            departureTick: 10,
+            destinationBodyId: 2,
+            dueTick: 20,
+            id: 3,
+            kind: 'colony',
+            originBodyId: homeBody.id,
+            passengerCount: 4,
+            spacecraftId: 2,
+            status: 'active',
+          },
+        ],
+        programs: [
+          {
+            civilizationId: settlement.civilizationId,
+            id: 1,
+            launchCapacity: 2,
+            planetaryTransportCapacity: 4,
+            settlementId: settlement.id,
+            stage: 'spaceflight',
+          },
+        ],
+        spacecraft: [
+          {
+            civilizationId: settlement.civilizationId,
+            currentBodyId: homeBody.id,
+            id: 2,
+            missionId: 3,
+            status: 'in-flight',
+          },
+        ],
+      },
+    };
+    const view = render(
+      <WorldMapCanvas
+        camera={{ ...INITIAL_WORLD_CAMERA, zoom: 3 }}
+        onCameraChange={vi.fn()}
+        overlay="terrain"
+        projection={spaceProjection}
+      />,
+    );
+
+    await view.findByRole('img', { name: /space world map/ });
+    const spaceGraphics = pixiMocks.graphics[4];
+    expect(spaceGraphics?.clear).toHaveBeenCalled();
+    expect(spaceGraphics?.moveTo).toHaveBeenCalled();
+    expect(spaceGraphics?.closePath).toHaveBeenCalled();
+    expect(spaceGraphics?.circle).toHaveBeenCalled();
+    expect(view.container.querySelector('.world-map-canvas')).toHaveAttribute(
+      'data-detail',
+      'close',
+    );
   });
 
   it('offers equivalent pointer and keyboard selection while keyboard camera input stays presentational', async () => {
@@ -489,7 +608,7 @@ describe('Pixi world projection', () => {
     expect(onSelectionChange).toHaveBeenLastCalledWith({ id: 77, kind: 'route' });
     clickTile(0, 12);
     expect(onSelectionChange).toHaveBeenLastCalledWith({ id: 9, kind: 'crisis' });
-    expect(pixiMocks.graphics[5]?.closePath).toHaveBeenCalled();
+    expect(pixiMocks.graphics[6]?.lineTo).toHaveBeenCalled();
   });
 
   it('destroys an application whose async initialization finishes after unmount', async () => {

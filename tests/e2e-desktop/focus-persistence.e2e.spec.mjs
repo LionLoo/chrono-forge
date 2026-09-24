@@ -1,7 +1,7 @@
 import { $, browser, expect } from '@wdio/globals';
 import { readFileSync } from 'node:fs';
 
-/* global CSSMediaRule, describe, document, it */
+/* global CSSMediaRule, HTMLSelectElement, describe, document, it, window */
 
 const M9_E2E_ARCHIVES = JSON.parse(
   readFileSync(new URL('../fixtures/saves/m9-e2e-archives.json', import.meta.url), 'utf8'),
@@ -124,6 +124,41 @@ describe('native focus persistence', () => {
   it('starts, pauses, saves, relaunches, resumes, and completes through real SQLite IPC', async () => {
     await $('#focus-title').waitForDisplayed();
     await $('span=SQLite archive').waitForDisplayed();
+    for (const scale of [100, 150, 200]) {
+      const layout = await browser.execute((percent) => {
+        document.documentElement.style.fontSize = `${percent}%`;
+        return {
+          focusPresent: document.querySelector('#focus-title') !== null,
+          mapPresent: document.querySelector('.world-map-canvas') !== null,
+          noHorizontalOverflow: document.documentElement.scrollWidth <= window.innerWidth,
+        };
+      }, scale);
+      expect(layout).toEqual({ focusPresent: true, mapPresent: true, noHorizontalOverflow: true });
+    }
+    await browser.execute(() => {
+      document.documentElement.style.fontSize = '100%';
+    });
+    await browser.waitUntil(
+      async () => (await $('.simulation-status').getText()).includes('Worker projection ready'),
+      { timeoutMsg: 'native world projection did not become ready for map framing' },
+    );
+    const selectedMapValue = await browser.execute(() => {
+      const select = document.querySelector('#map-inspector select');
+      if (!(select instanceof HTMLSelectElement)) return null;
+      const option = [...select.options].find((candidate) => candidate.value.length > 0);
+      if (option === undefined) return null;
+      Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, 'value').set.call(
+        select,
+        option.value,
+      );
+      select.dispatchEvent(new Event('change', { bubbles: true }));
+      return option.value;
+    });
+    expect(selectedMapValue).not.toBeNull();
+    const frameSelection = await $('button=Frame selection');
+    await frameSelection.waitForExist();
+    await frameSelection.click();
+    expect(await (await $('.camera-readout')).getText()).toContain('3.00×');
     await openWorldInspection();
     expect(await (await $('h2=Settlement and society')).isDisplayed()).toBe(true);
     expect(await (await $('select[aria-label="Inspect person"]')).isDisplayed()).toBe(true);
