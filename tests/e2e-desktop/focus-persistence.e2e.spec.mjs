@@ -158,7 +158,7 @@ describe('native focus persistence', () => {
     const frameSelection = await $('button=Frame selection');
     await frameSelection.waitForExist();
     await frameSelection.click();
-    expect(await (await $('.camera-readout')).getText()).toContain('3.00×');
+    expect(await (await $('.camera-readout')).getText()).toContain('3.50×');
     await openWorldInspection();
     expect(await (await $('h2=Settlement and society')).isDisplayed()).toBe(true);
     expect(await (await $('select[aria-label="Inspect person"]')).isDisplayed()).toBe(true);

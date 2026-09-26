@@ -10,7 +10,7 @@ import {
 
 describe('world camera', () => {
   it('pans without changing zoom', () => {
-    expect(panCamera(INITIAL_WORLD_CAMERA, 12, -8)).toEqual({ x: 36, y: 16, zoom: 1 });
+    expect(panCamera(INITIAL_WORLD_CAMERA, 12, -8)).toEqual({ x: 36, y: 16, zoom: 1.5 });
   });
 
   it('clamps zoom to a calm usable range', () => {
@@ -34,7 +34,7 @@ describe('world camera', () => {
     expect(zoomCameraAt(INITIAL_WORLD_CAMERA, 2, Number.NaN, Number.NaN)).toEqual({
       x: 48,
       y: 48,
-      zoom: 2,
+      zoom: 3,
     });
   });
 
@@ -45,6 +45,6 @@ describe('world camera', () => {
 
   it('falls back safely when a revisit target cannot be framed', () => {
     expect(frameCameraOnTile(-1, 0, Number.NaN, 0)).toEqual(INITIAL_WORLD_CAMERA);
-    expect(frameCameraOnTile(12, 8, 800, 500, Number.NaN).zoom).toBe(1);
+    expect(frameCameraOnTile(12, 8, 800, 500, Number.NaN).zoom).toBe(1.5);
   });
 });

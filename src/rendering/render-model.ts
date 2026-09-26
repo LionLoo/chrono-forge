@@ -1361,7 +1361,7 @@ export function renderModelSvgBaseline(scene: RenderModel, width = 960, height =
     )
     .map(
       (tile) =>
-        `<rect data-pattern="${tile.overlayPattern}" data-tile="${tile.tileIndex}" data-value="${tile.overlayValue}" fill="${svgColor(tile.color)}" height="${number(tileHeight)}" width="${number(tileWidth)}" x="${number((tile.x - scene.viewport.leftTile) * tileWidth)}" y="${number((tile.y - scene.viewport.topTile) * tileHeight)}"/>`,
+        `<rect data-pattern="${tile.overlayPattern}" data-tile="${tile.tileIndex}" data-value="${tile.overlayValue}" fill="${svgColor(tile.color)}" height="${number(tileHeight)}" stroke="#102119" stroke-opacity="${scene.detailLevel === 'close' ? '0.2' : '0.08'}" stroke-width="${number(Math.max(0.5, unit * 0.008))}" width="${number(tileWidth)}" x="${number((tile.x - scene.viewport.leftTile) * tileWidth)}" y="${number((tile.y - scene.viewport.topTile) * tileHeight)}"/>`,
     )
     .join('');
   const terrainTexture =
@@ -1417,7 +1417,11 @@ export function renderModelSvgBaseline(scene: RenderModel, width = 960, height =
           : settlement.layout === 'courtyard'
             ? `M${number(x - radius)} ${number(y - radius)}H${number(x + radius)}V${number(y + radius)}H${number(x - radius)}Z M${number(x - radius * 0.45)} ${number(y - radius * 0.45)}H${number(x + radius * 0.45)}V${number(y + radius * 0.45)}H${number(x - radius * 0.45)}Z`
             : `M${number(x)} ${number(y - radius)}L${number(x + radius)} ${number(y)}L${number(x)} ${number(y + radius)}L${number(x - radius)} ${number(y)}Z`;
-      return `<path d="${path}" data-layout="${settlement.layout}" data-settlement="${settlement.selectable.id}" fill="none" stroke="${svgColor(settlement.accentColor)}" stroke-width="${number(Math.max(2, unit * 0.045))}"/>`;
+      const ground =
+        scene.detailLevel === 'overview'
+          ? ''
+          : `<ellipse cx="${number(x)}" cy="${number(y + radius * 0.28)}" fill="#ead8a0" fill-opacity="0.24" rx="${number(radius * 1.2)}" ry="${number(radius * 0.7)}" stroke="${svgColor(settlement.accentColor)}" stroke-opacity="0.45"/>`;
+      return `<g data-layout="${settlement.layout}" data-settlement="${settlement.selectable.id}">${ground}<path d="${path}" fill="none" stroke="${svgColor(settlement.accentColor)}" stroke-width="${number(Math.max(2, unit * 0.045))}"/></g>`;
     })
     .join('');
   const built = scene.builtEnvironment
@@ -1453,7 +1457,8 @@ export function renderModelSvgBaseline(scene: RenderModel, width = 960, height =
     .map((route) => {
       const [x1, y1] = point(route.fromTileIndex);
       const [x2, y2] = point(route.toTileIndex);
-      return `<path d="M${number(x1)} ${number(y1)}L${number(x2)} ${number(y2)}" data-route="${route.selectable.id}" data-status="${route.status}" fill="none" stroke="${route.status === 'disrupted' ? '#d78b4b' : '#79cbd1'}" stroke-width="${number(Math.max(2, unit * 0.05))}"/>`;
+      const path = `M${number(x1)} ${number(y1)}L${number(x2)} ${number(y2)}`;
+      return `<g data-route="${route.selectable.id}" data-status="${route.status}"><path d="${path}" fill="none" stroke="#1c2922" stroke-opacity="0.7" stroke-width="${number(Math.max(3, unit * 0.075))}"/><path d="${path}" fill="none" stroke="${route.status === 'disrupted' ? '#d78b4b' : '#c6ad77'}" stroke-width="${number(Math.max(2, unit * 0.05))}"/>${route.status === 'active' && scene.detailLevel !== 'overview' ? `<path d="${path}" fill="none" stroke="#79cbd1" stroke-opacity="0.75" stroke-width="${number(Math.max(1, unit * 0.012))}"/>` : ''}</g>`;
     })
     .join('');
   const ruins = scene.ruins
@@ -1465,7 +1470,9 @@ export function renderModelSvgBaseline(scene: RenderModel, width = 960, height =
     .join('');
   const structures = scene.structures
     .map((structure) => {
-      const [x, y] = point(structure.tileIndex);
+      const [baseX, baseY] = point(structure.tileIndex);
+      const x = baseX + ((structure.selectable.id % 3) - 1) * unit * 0.035;
+      const y = baseY + ((Math.floor(structure.selectable.id / 3) % 2) - 0.5) * unit * 0.028;
       const halfWidth = unit * (scene.detailLevel === 'close' ? 0.25 : 0.18);
       const halfHeight = unit * (structure.form === 'storehouse' ? 0.21 : 0.18);
       const roofY = y - halfHeight * 1.75;
@@ -1475,7 +1482,11 @@ export function renderModelSvgBaseline(scene: RenderModel, width = 960, height =
           : structure.roof === 'hip'
             ? `M${number(x - halfWidth)} ${number(y - halfHeight)}L${number(x - halfWidth * 0.55)} ${number(roofY)}H${number(x + halfWidth * 0.55)}L${number(x + halfWidth)} ${number(y - halfHeight)}Z`
             : `M${number(x - halfWidth)} ${number(y - halfHeight)}L${number(x)} ${number(roofY)}L${number(x + halfWidth)} ${number(y - halfHeight)}Z`;
-      return `<g data-condition="${structure.conditionTier}" data-form="${structure.form}" data-progress="${structure.progress}" data-roof="${structure.roof}" data-state="${structure.state}" data-structure="${structure.selectable.id}"><path d="M${number(x - halfWidth)} ${number(y - halfHeight)}H${number(x + halfWidth)}V${number(y + halfHeight)}H${number(x - halfWidth)}Z" fill="${svgColor(materialColorForBaseline(structure.material))}" stroke="#f3dfaa" stroke-width="${number(Math.max(2, unit * 0.035))}"/><path d="${roof}" fill="${svgColor(structure.accentColor)}" stroke="#27352e" stroke-width="${number(Math.max(1.5, unit * 0.025))}"/></g>`;
+      const details =
+        scene.detailLevel === 'overview'
+          ? ''
+          : `<rect fill="#27352e" height="${number(halfHeight * 0.95)}" width="${number(halfWidth * 0.32)}" x="${number(x - halfWidth * 0.16)}" y="${number(y + halfHeight * 0.05)}"/><rect fill="#e9c36a" height="${number(halfHeight * 0.34)}" stroke="#27352e" stroke-width="${number(Math.max(1, unit * 0.01))}" width="${number(halfWidth * 0.28)}" x="${number(x - halfWidth * 0.72)}" y="${number(y - halfHeight * 0.15)}"/>`;
+      return `<g data-condition="${structure.conditionTier}" data-form="${structure.form}" data-progress="${structure.progress}" data-roof="${structure.roof}" data-state="${structure.state}" data-structure="${structure.selectable.id}"><ellipse cx="${number(x + halfWidth * 0.1)}" cy="${number(y + halfHeight * 1.05)}" fill="#111a16" fill-opacity="0.42" rx="${number(halfWidth * 1.18)}" ry="${number(halfHeight * 0.35)}"/><path d="M${number(x - halfWidth)} ${number(y - halfHeight)}H${number(x + halfWidth)}V${number(y + halfHeight)}H${number(x - halfWidth)}Z" fill="${svgColor(materialColorForBaseline(structure.material))}" stroke="#f3dfaa" stroke-width="${number(Math.max(2, unit * 0.035))}"/><path d="${roof}" fill="${svgColor(structure.accentColor)}" stroke="#27352e" stroke-width="${number(Math.max(1.5, unit * 0.025))}"/>${details}</g>`;
     })
     .join('');
   const spaceLandmarks = scene.spaceLandmarks
@@ -1520,6 +1531,14 @@ export function renderModelSvgBaseline(scene: RenderModel, width = 960, height =
       const headY = y - figureHeight * 0.38;
       const bodyTop = y - figureHeight * 0.12;
       const bodyBottom = y + figureHeight * 0.45;
+      const shadow =
+        scene.detailLevel === 'overview'
+          ? ''
+          : `<ellipse cx="${number(x)}" cy="${number(y + figureHeight * 0.64)}" fill="#101813" fill-opacity="0.5" rx="${number(bodyWidth * 1.45)}" ry="${number(figureHeight * 0.11)}"/>`;
+      const closeDetails =
+        scene.detailLevel !== 'close'
+          ? ''
+          : `<path d="M${number(x - figureHeight * 0.08)} ${number(headY - figureHeight * 0.04)}L${number(x + direction * figureHeight * 0.03)} ${number(headY - figureHeight * 0.14)}L${number(x + direction * figureHeight * 0.13)} ${number(headY - figureHeight * 0.04)}" fill="none" stroke="#3e3028" stroke-width="${number(Math.max(1.2, unit * 0.018))}"/><circle cx="${number(x + direction * figureHeight * 0.1)}" cy="${number(headY)}" fill="#17211c" r="${number(Math.max(1, figureHeight * 0.025))}"/>`;
       const activityMark =
         agent.activityVisual === 'carry'
           ? `<rect fill="${svgColor(agent.identity.accentColor)}" height="${number(figureHeight * 0.28)}" width="${number(figureHeight * 0.28)}" x="${number(x + direction * figureHeight * 0.34 - figureHeight * 0.14)}" y="${number(y - figureHeight * 0.05)}"/>`
@@ -1532,7 +1551,7 @@ export function renderModelSvgBaseline(scene: RenderModel, width = 960, height =
                 : agent.activityVisual === 'rest'
                   ? `<path d="M${number(x - figureHeight * 0.36)} ${number(y + figureHeight * 0.48)}H${number(x + figureHeight * 0.36)}" fill="none" stroke="${svgColor(agent.identity.accentColor)}" stroke-width="${number(Math.max(1.5, unit * 0.025))}"/>`
                   : '';
-      return `<g data-accent="${agent.identity.accent}" data-activity="${agent.activityVisual}" data-agent="${agent.selectable.id}" data-facing="${agent.identity.facing}" data-health="${agent.healthTier}" data-silhouette="${agent.identity.silhouette}"><path d="M${number(x - bodyWidth)} ${number(bodyTop)}Q${number(x)} ${number(bodyTop - figureHeight * 0.12)} ${number(x + bodyWidth)} ${number(bodyTop)}L${number(x + bodyWidth * 0.76)} ${number(bodyBottom)}H${number(x - bodyWidth * 0.76)}Z" fill="${svgColor(agent.identity.clothingColor)}" stroke="#17211c" stroke-width="${number(Math.max(1.5, unit * 0.025))}"/><circle cx="${number(x + direction * figureHeight * 0.04)}" cy="${number(headY)}" fill="${svgColor(agent.identity.skinColor)}" r="${number(figureHeight * 0.16)}" stroke="#17211c" stroke-width="${number(Math.max(1.2, unit * 0.02))}"/><path d="M${number(x - bodyWidth * 0.82)} ${number(y + figureHeight * 0.42)}L${number(x - bodyWidth)} ${number(y + figureHeight * 0.68)}M${number(x + bodyWidth * 0.82)} ${number(y + figureHeight * 0.42)}L${number(x + bodyWidth)} ${number(y + figureHeight * 0.68)}" fill="none" stroke="#17211c" stroke-width="${number(Math.max(1.5, unit * 0.025))}"/>${activityMark}</g>`;
+      return `<g data-accent="${agent.identity.accent}" data-activity="${agent.activityVisual}" data-agent="${agent.selectable.id}" data-facing="${agent.identity.facing}" data-health="${agent.healthTier}" data-silhouette="${agent.identity.silhouette}">${shadow}<path d="M${number(x - bodyWidth)} ${number(bodyTop)}Q${number(x)} ${number(bodyTop - figureHeight * 0.12)} ${number(x + bodyWidth)} ${number(bodyTop)}L${number(x + bodyWidth * 0.76)} ${number(bodyBottom)}H${number(x - bodyWidth * 0.76)}Z" fill="${svgColor(agent.identity.clothingColor)}" stroke="#17211c" stroke-width="${number(Math.max(1.5, unit * 0.025))}"/><circle cx="${number(x + direction * figureHeight * 0.04)}" cy="${number(headY)}" fill="${svgColor(agent.identity.skinColor)}" r="${number(figureHeight * 0.16)}" stroke="#17211c" stroke-width="${number(Math.max(1.2, unit * 0.02))}"/>${closeDetails}<path d="M${number(x - bodyWidth * 0.9)} ${number(bodyTop + figureHeight * 0.08)}L${number(x - bodyWidth * 1.4)} ${number(y + figureHeight * 0.17)}M${number(x + bodyWidth * 0.9)} ${number(bodyTop + figureHeight * 0.08)}L${number(x + bodyWidth * 1.4)} ${number(y + figureHeight * 0.17)}M${number(x - bodyWidth * 0.82)} ${number(y + figureHeight * 0.42)}L${number(x - bodyWidth)} ${number(y + figureHeight * 0.68)}M${number(x + bodyWidth * 0.82)} ${number(y + figureHeight * 0.42)}L${number(x + bodyWidth)} ${number(y + figureHeight * 0.68)}" fill="none" stroke="#17211c" stroke-width="${number(Math.max(1.5, unit * 0.025))}"/>${activityMark}</g>`;
     })
     .join('');
   const effects = scene.effects

@@ -127,21 +127,21 @@ describe('deterministic world lab', () => {
     expect(playCue).toHaveBeenCalledWith('selection', expect.any(Object));
 
     await user.click(screen.getByRole('button', { name: 'Zoom world in' }));
-    expect(screen.getByText(/1\.20×/)).toBeVisible();
+    expect(screen.getByText(/1\.80×/)).toBeVisible();
     await user.click(screen.getByRole('button', { name: 'Pan world left' }));
     await user.click(screen.getByRole('button', { name: 'Pan world up' }));
     await user.click(screen.getByRole('button', { name: 'Pan world down' }));
     await user.click(screen.getByRole('button', { name: 'Pan world right' }));
     await user.click(screen.getByRole('button', { name: 'Zoom world out' }));
     await user.click(screen.getByRole('button', { name: 'Overview' }));
-    expect(screen.getByLabelText('Camera position')).toHaveTextContent('X 24 · Y 24 · 1.00×');
+    expect(screen.getByLabelText('Camera position')).toHaveTextContent('X 24 · Y 24 · 1.50×');
 
     await user.selectOptions(
       screen.getByRole('combobox', { name: 'Inspect map object' }),
       'agent:1',
     );
     await user.click(screen.getByRole('button', { name: 'Frame selection' }));
-    expect(screen.getByLabelText('Camera position')).toHaveTextContent('3.00×');
+    expect(screen.getByLabelText('Camera position')).toHaveTextContent('3.50×');
 
     expect(
       screen.queryByRole('button', { name: /Observe .* fixed ticks/ }),

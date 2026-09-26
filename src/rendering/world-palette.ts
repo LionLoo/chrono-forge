@@ -77,7 +77,7 @@ export function colorForTile(
         : hazard;
     // Retain geographic orientation under danger instead of replacing every biome
     // with one debug-like red scalar field.
-    return mixColor(terrainColor, OVERLAY_HIGH[overlay], Math.round(intensity * 0.62));
+    return mixColor(terrainColor, OVERLAY_HIGH[overlay], Math.round(intensity * 0.38));
   }
 
   const value =

@@ -4,7 +4,7 @@ export interface WorldCamera {
   readonly zoom: number;
 }
 
-export const INITIAL_WORLD_CAMERA: WorldCamera = Object.freeze({ x: 24, y: 24, zoom: 1 });
+export const INITIAL_WORLD_CAMERA: WorldCamera = Object.freeze({ x: 24, y: 24, zoom: 1.5 });
 
 const MIN_ZOOM = 0.5;
 const MAX_ZOOM = 5;
@@ -67,7 +67,7 @@ export function frameCameraOnTile(
   worldWidth: number,
   viewportWidth: number,
   viewportHeight: number,
-  requestedZoom = 3,
+  requestedZoom = 3.5,
   tileSize = DEFAULT_TILE_SIZE,
 ): WorldCamera {
   if (

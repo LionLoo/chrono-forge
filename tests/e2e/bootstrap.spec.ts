@@ -107,7 +107,7 @@ test('production frontend renders a Worker-owned autonomous settlement', async (
   await expect(page.locator('.world-map-canvas')).toHaveAttribute('data-overlay', 'resources');
 
   await page.getByRole('button', { name: 'Zoom world in' }).click();
-  await expect(page.getByLabel('Camera position')).toContainText('1.20×');
+  await expect(page.getByLabel('Camera position')).toContainText('1.80×');
 
   await page.getByRole('button', { name: 'Start focus' }).click();
   await page.clock.fastForward(10_000);
@@ -181,7 +181,7 @@ test('primary world controls remain keyboard operable and unclipped from 100% th
   const zoom = page.getByRole('button', { name: 'Zoom world in' });
   await zoom.focus();
   await page.keyboard.press('Enter');
-  await expect(page.getByLabel('Camera position')).toContainText('1.20×');
+  await expect(page.getByLabel('Camera position')).toContainText('1.80×');
 
   const mapObject = page.getByRole('combobox', { name: 'Inspect map object' });
   await mapObject.focus();
@@ -189,7 +189,7 @@ test('primary world controls remain keyboard operable and unclipped from 100% th
   await page.keyboard.press('Enter');
   await expect(page.getByRole('article', { name: 'Selected map object' })).toBeVisible();
   await page.getByRole('button', { name: 'Frame selection' }).click();
-  await expect(page.getByLabel('Camera position')).toContainText('3.00×');
+  await expect(page.getByLabel('Camera position')).toContainText('3.50×');
   const map = page.locator('.world-map-canvas');
   const mapBounds = await map.boundingBox();
   expect(mapBounds).not.toBeNull();
@@ -200,7 +200,7 @@ test('primary world controls remain keyboard operable and unclipped from 100% th
   const scrollBeforeMapZoom = await page.evaluate(() => window.scrollY);
   await page.mouse.move(mapBounds!.x + mapBounds!.width / 2, mapBounds!.y + mapBounds!.height / 2);
   await page.mouse.wheel(0, -120);
-  await expect(page.getByLabel('Camera position')).toContainText('3.45×');
+  await expect(page.getByLabel('Camera position')).toContainText('4.02×');
   expect(await page.evaluate(() => window.scrollY)).toBe(scrollBeforeMapZoom);
 
   const inspection = page.getByRole('button', { name: 'Open world inspection' });

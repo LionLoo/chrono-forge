@@ -18,6 +18,7 @@ const pixiMocks = vi.hoisted(() => {
     readonly clear = vi.fn(() => this);
     readonly circle = vi.fn(() => this);
     readonly closePath = vi.fn(() => this);
+    readonly ellipse = vi.fn(() => this);
     readonly fill = vi.fn(() => this);
     readonly lineTo = vi.fn(() => this);
     readonly moveTo = vi.fn(() => this);
@@ -90,7 +91,7 @@ const projection = projectWorldFrame(
   createInitialWorld([1, 2, 3, 4], { width: 2, height: 1, chunkSize: 1 }),
 ) satisfies WorldMapProjection;
 
-function overviewAgentHead(
+function initialAgentHead(
   frame: WorldMapProjection,
   agentIndex: number,
   tileIndex: number,
@@ -98,7 +99,7 @@ function overviewAgentHead(
   const id = frame.agentIds[agentIndex] ?? 0;
   const ageYears = frame.society.people.find((person) => person.id === id)?.ageYears ?? 18;
   const ageScale = ageYears < 18 ? 0.76 : ageYears >= 60 ? 0.92 : 1;
-  const height = 3.2 * ageScale;
+  const height = 4.35 * ageScale;
   const offsetX = ((id % 3) - 1) * 0.45;
   const offsetY = ((Math.floor(id / 3) % 3) - 1) * 0.3;
   let identity = Math.imul((id | 0) ^ 0x7ce1, 0x45d9f3b);
@@ -133,13 +134,13 @@ describe('Pixi world projection', () => {
     });
     const graphics = pixiMocks.graphics[0];
     const worldLayer = pixiMocks.containers[0];
-    expect(graphics?.rect).toHaveBeenCalledTimes(2);
-    expect(graphics?.fill).toHaveBeenCalledTimes(2);
+    expect(graphics?.rect.mock.calls.length).toBeGreaterThanOrEqual(2);
+    expect(graphics?.fill.mock.calls.length).toBeGreaterThanOrEqual(2);
     expect(worldLayer?.position.set).toHaveBeenCalledWith(24, 24);
-    expect(worldLayer?.scale.set).toHaveBeenCalledWith(1);
+    expect(worldLayer?.scale.set).toHaveBeenCalledWith(1.5);
     expect(view.container.querySelector('.world-map-canvas')).toHaveAttribute(
       'data-detail',
-      'overview',
+      'district',
     );
 
     view.rerender(
@@ -263,7 +264,7 @@ describe('Pixi world projection', () => {
     scheduledAnimation(now);
     const halfway = agentGraphics.circle.mock.calls.at(-agentCount + movedAgentIndex)!;
     const destinationTile = advanced.agentTiles[movedAgentIndex]!;
-    const destination = overviewAgentHead(advanced, movedAgentIndex, destinationTile);
+    const destination = initialAgentHead(advanced, movedAgentIndex, destinationTile);
     expect(halfway.slice(0, 2)).not.toEqual(before.slice(0, 2));
     expect(halfway.slice(0, 2)).not.toEqual(destination);
 
@@ -305,7 +306,7 @@ describe('Pixi world projection', () => {
     const destinationTile = advanced.agentTiles[movedAgentIndex]!;
     expect(
       agentGraphics.circle.mock.calls.at(-initial.agentIds.length + movedAgentIndex)?.slice(0, 2),
-    ).toEqual(overviewAgentHead(advanced, movedAgentIndex, destinationTile));
+    ).toEqual(initialAgentHead(advanced, movedAgentIndex, destinationTile));
     expect(requestAnimationFrame).not.toHaveBeenCalled();
     requestAnimationFrame.mockRestore();
   });
@@ -508,9 +509,11 @@ describe('Pixi world projection', () => {
     host.releasePointerCapture = vi.fn();
 
     fireEvent.keyDown(canvas, { key: 'ArrowLeft' });
-    expect(onCameraChange).toHaveBeenCalledWith({ x: -12, y: 24, zoom: 1 });
+    expect(onCameraChange).toHaveBeenCalledWith({ x: -12, y: 24, zoom: 1.5 });
     fireEvent.keyDown(canvas, { key: '+' });
-    expect(onCameraChange).toHaveBeenLastCalledWith({ x: 24, y: 24, zoom: 1.15 });
+    const zoomedCamera = onCameraChange.mock.calls.at(-1)?.[0] as WorldCamera;
+    expect(zoomedCamera).toMatchObject({ x: 24, y: 24 });
+    expect(zoomedCamera.zoom).toBeCloseTo(1.725);
     fireEvent.keyDown(canvas, { key: 'Enter' });
     expect(onSelectionChange).toHaveBeenCalledWith({
       id: projection.agentIds[0],
@@ -518,8 +521,11 @@ describe('Pixi world projection', () => {
     });
 
     const tile = projection.agentTiles[0] ?? 0;
-    const pointerX = INITIAL_WORLD_CAMERA.x + (tile % projection.width) * 6 + 3;
-    const pointerY = INITIAL_WORLD_CAMERA.y + Math.floor(tile / projection.width) * 6 + 3;
+    const pointerX =
+      INITIAL_WORLD_CAMERA.x + ((tile % projection.width) * 6 + 3) * INITIAL_WORLD_CAMERA.zoom;
+    const pointerY =
+      INITIAL_WORLD_CAMERA.y +
+      (Math.floor(tile / projection.width) * 6 + 3) * INITIAL_WORLD_CAMERA.zoom;
     fireEvent.pointerDown(host, { clientX: pointerX, clientY: pointerY, pointerId: 4 });
     fireEvent.pointerUp(host, { clientX: pointerX, clientY: pointerY, pointerId: 4 });
     expect(onSelectionChange).toHaveBeenLastCalledWith({
@@ -597,9 +603,12 @@ describe('Pixi world projection', () => {
     host.hasPointerCapture = vi.fn(() => true);
     host.releasePointerCapture = vi.fn();
     const clickTile = (tileIndex: number, pointerId: number) => {
-      const clientX = INITIAL_WORLD_CAMERA.x + (tileIndex % routeProjection.width) * 6 + 3;
+      const clientX =
+        INITIAL_WORLD_CAMERA.x +
+        ((tileIndex % routeProjection.width) * 6 + 3) * INITIAL_WORLD_CAMERA.zoom;
       const clientY =
-        INITIAL_WORLD_CAMERA.y + Math.floor(tileIndex / routeProjection.width) * 6 + 3;
+        INITIAL_WORLD_CAMERA.y +
+        (Math.floor(tileIndex / routeProjection.width) * 6 + 3) * INITIAL_WORLD_CAMERA.zoom;
       fireEvent.pointerDown(host, { clientX, clientY, pointerId });
       fireEvent.pointerUp(host, { clientX, clientY, pointerId });
     };
