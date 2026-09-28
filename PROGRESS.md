@@ -80,4 +80,4 @@ Last updated: 2026-09-28
 
 ## Exact next action
 
-Commit the independent-review outcome, verify the documentation-only final head, then push/open the single M10.5 PR. Wait for exact-head aggregate `Required`, merge sequentially, and verify exact merge-head aggregate `Required` before M10.6.
+Push the clean independently accepted M10.5 head and open the single M10.5 PR. Wait for exact-head aggregate `Required`, merge sequentially, and verify exact merge-head aggregate `Required` before M10.6.
