@@ -240,7 +240,6 @@ export interface RuinDescriptor {
 
 export interface EffectDescriptor {
   readonly kind: EffectKind;
-  readonly markerTileIndex: number;
   readonly reduced: boolean;
   readonly selectable: SelectableId;
   readonly severity: number;
@@ -310,7 +309,7 @@ interface PreparedProjectionData {
   readonly activeTrade: number;
   readonly agentsByTile: ReadonlyMap<number, readonly AgentDescriptor[]>;
   readonly builtEnvironmentByTile: ReadonlyMap<number, readonly BuiltEnvironmentDescriptor[]>;
-  readonly effects: readonly Omit<EffectDescriptor, 'markerTileIndex' | 'reduced'>[];
+  readonly effects: readonly Omit<EffectDescriptor, 'reduced'>[];
   readonly era: RenderEra;
   readonly indexedDescriptors: number;
   readonly knowledge: ReadonlySet<string>;
@@ -1181,13 +1180,9 @@ export function buildPreparedRenderModel(
       left.sourceId - right.sourceId ||
       (left.kind < right.kind ? -1 : left.kind > right.kind ? 1 : 0),
   );
-  const markerLeft = Math.max(0, Math.min(projection.width - 1, options.viewport.leftTile));
-  const markerTop = Math.max(0, Math.min(projection.height - 1, options.viewport.topTile));
-  const effects = data.effects.map((effect, index) =>
+  const effects = data.effects.map((effect) =>
     Object.freeze({
       ...effect,
-      markerTileIndex:
-        markerTop * projection.width + Math.min(projection.width - 1, markerLeft + index),
       reduced: options.reducedEffects,
     }),
   );
@@ -1225,8 +1220,7 @@ export function buildPreparedRenderModel(
     effects: layerSignature(
       'effects',
       effects.map(
-        (entry) =>
-          `${entry.selectable.id}:${entry.kind}:${entry.severity}:${entry.markerTileIndex}:${entry.reduced}`,
+        (entry) => `${entry.selectable.id}:${entry.kind}:${entry.severity}:${entry.reduced}`,
       ),
     ),
     routesRuins: layerSignature('routes-ruins', [
@@ -1555,22 +1549,9 @@ export function renderModelSvgBaseline(scene: RenderModel, width = 960, height =
     })
     .join('');
   const effects = scene.effects
-    .map((effect) => {
-      const [x, y] = point(effect.markerTileIndex);
-      const size = unit * 0.18;
-      const path =
-        effect.kind === 'storm'
-          ? `M${number(x - size)} ${number(y - size * 0.55)}H${number(x + size * 0.15)}L${number(x - size * 0.45)} ${number(y + size * 0.2)}H${number(x + size)}L${number(x - size * 0.25)} ${number(y + size)}`
-          : effect.kind === 'fire'
-            ? `M${number(x)} ${number(y - size)}L${number(x + size * 0.8)} ${number(y + size * 0.35)}L${number(x + size * 0.25)} ${number(y + size)}L${number(x - size * 0.75)} ${number(y + size * 0.55)}L${number(x - size * 0.4)} ${number(y - size * 0.1)}Z`
-            : effect.kind === 'flood'
-              ? `M${number(x - size)} ${number(y - size * 0.45)}Q${number(x - size * 0.35)} ${number(y - size * 0.8)} ${number(x + size * 0.35)} ${number(y - size * 0.45)}Q${number(x + size * 0.7)} ${number(y - size * 0.1)} ${number(x + size)} ${number(y - size * 0.45)}M${number(x - size)} ${number(y + size * 0.45)}Q${number(x - size * 0.35)} ${number(y + size * 0.1)} ${number(x + size * 0.35)} ${number(y + size * 0.45)}Q${number(x + size * 0.7)} ${number(y + size * 0.8)} ${number(x + size)} ${number(y + size * 0.45)}`
-              : effect.kind === 'earthquake'
-                ? `M${number(x - size)} ${number(y - size)}L${number(x - size * 0.25)} ${number(y - size * 0.25)}L${number(x - size * 0.7)} ${number(y + size * 0.15)}L${number(x + size * 0.15)} ${number(y + size)}L${number(x + size)} ${number(y + size * 0.3)}`
-                : effect.kind === 'meteor-impact'
-                  ? `M${number(x - size)} ${number(y - size)}L${number(x + size * 0.1)} ${number(y + size * 0.1)}M${number(x - size * 0.1)} ${number(y + size * 0.1)}A${number(size * 0.65)} ${number(size * 0.65)} 0 1 0 ${number(x + size * 1.2)} ${number(y + size * 0.1)}`
-                  : `M${number(x - size)} ${number(y + size)}L${number(x - size * 0.25)} ${number(y + size * 0.2)}L${number(x + size * 0.25)} ${number(y + size * 0.75)}L${number(x + size)} ${number(y - size)}`;
-      return `<path d="${path}" data-effect="${effect.kind}" data-reduced="${effect.reduced}" data-severity="${effect.severity}" fill="${effect.kind === 'fire' ? '#d76d55' : 'none'}" stroke="${effect.kind === 'flood' ? '#79cbd1' : '#d76d55'}" stroke-width="${number(Math.max(2, unit * 0.04))}"/>`;
+    .map((effect, index) => {
+      const inset = Math.max(2, unit * 0.035) + index * Math.max(1.5, unit * 0.02);
+      return `<rect data-effect="${effect.kind}" data-location="nonspatial" data-reduced="${effect.reduced}" data-severity="${effect.severity}" fill="none" height="${number(Math.max(1, height - inset * 2))}" stroke="#d76d55" stroke-opacity="${effect.reduced ? '0.5' : '0.78'}" stroke-width="${number(effect.severity >= 60 ? Math.max(2, unit * 0.04) : Math.max(1, unit * 0.025))}" width="${number(Math.max(1, width - inset * 2))}" x="${number(inset)}" y="${number(inset)}"/>`;
     })
     .join('');
   const selected =

@@ -1,4 +1,4 @@
-import { fireEvent, render, waitFor } from '@testing-library/react';
+import { act, fireEvent, render, waitFor } from '@testing-library/react';
 import { vi } from 'vitest';
 
 import { INITIAL_WORLD_CAMERA, type WorldCamera } from '../../src/rendering/camera';
@@ -171,6 +171,8 @@ describe('Pixi world projection', () => {
     fireEvent.pointerDown(host, { clientX: 10, clientY: 10, pointerId: 7 });
     fireEvent.pointerMove(host, { clientX: 25, clientY: 30, pointerId: 7 });
     expect(onCameraChange).toHaveBeenCalledWith({ x: 45, y: 60, zoom: 1.5 });
+    fireEvent.pointerMove(host, { clientX: 30, clientY: 30, pointerId: 7 });
+    expect(onCameraChange).toHaveBeenLastCalledWith({ x: 50, y: 60, zoom: 1.5 });
     fireEvent.pointerMove(host, { clientX: 30, clientY: 30, pointerId: 9 });
     fireEvent.pointerUp(host, { pointerId: 7 });
     expect(releasePointerCapture).toHaveBeenCalledWith(7);
@@ -179,8 +181,8 @@ describe('Pixi world projection', () => {
     document.addEventListener('wheel', pageWheel);
     const mousePoint = { clientX: 150, clientY: 160 };
     const worldPoint = {
-      x: (mousePoint.clientX - 50 - 30) / 1.5,
-      y: (mousePoint.clientY - 100 - 40) / 1.5,
+      x: (mousePoint.clientX - 50 - 50) / 1.5,
+      y: (mousePoint.clientY - 100 - 60) / 1.5,
     };
     const zoomIn = new WheelEvent('wheel', {
       bubbles: true,
@@ -212,6 +214,63 @@ describe('Pixi world projection', () => {
 
     view.unmount();
     expect(pixiMocks.applications[0]?.destroy).toHaveBeenCalled();
+  });
+
+  it('replans the visible projection and reports the exact host size after a resize', async () => {
+    let notifyResize: ((width: number, height: number) => void) | null = null;
+    const disconnect = vi.fn();
+    const observe = vi.fn();
+    vi.stubGlobal(
+      'ResizeObserver',
+      class {
+        constructor(callback: ResizeObserverCallback) {
+          notifyResize = (width, height) => {
+            callback(
+              [
+                {
+                  contentRect: { height, width } as DOMRectReadOnly,
+                } as ResizeObserverEntry,
+              ],
+              this as unknown as ResizeObserver,
+            );
+          };
+        }
+
+        readonly disconnect = disconnect;
+        readonly observe = observe;
+      },
+    );
+    const onViewportResize = vi.fn();
+    const view = render(
+      <WorldMapCanvas
+        camera={INITIAL_WORLD_CAMERA}
+        onCameraChange={vi.fn()}
+        onViewportResize={onViewportResize}
+        overlay="terrain"
+        projection={projection}
+      />,
+    );
+
+    await view.findByRole('img', { name: /founding world map/ });
+    const host = view.container.querySelector<HTMLElement>('.world-map-canvas');
+    if (host === null || notifyResize === null) throw new Error('Resize observer was not ready.');
+    Object.defineProperty(host, 'clientWidth', { configurable: true, value: 720 });
+    Object.defineProperty(host, 'clientHeight', { configurable: true, value: 420 });
+    const worldLayer = pixiMocks.containers[0];
+    const priorApplications = worldLayer?.position.set.mock.calls.length ?? 0;
+
+    act(() => {
+      notifyResize?.(720, 420);
+    });
+
+    expect(onViewportResize).toHaveBeenCalledWith(720, 420);
+    await waitFor(() => {
+      expect(worldLayer?.position.set.mock.calls.length).toBeGreaterThan(priorApplications);
+    });
+    expect(observe).toHaveBeenCalledWith(host);
+    view.unmount();
+    expect(disconnect).toHaveBeenCalled();
+    vi.unstubAllGlobals();
   });
 
   it('interpolates authoritative agent tile changes without changing the world projection', async () => {
@@ -512,7 +571,7 @@ describe('Pixi world projection', () => {
     expect(onCameraChange).toHaveBeenCalledWith({ x: -12, y: 24, zoom: 1.5 });
     fireEvent.keyDown(canvas, { key: '+' });
     const zoomedCamera = onCameraChange.mock.calls.at(-1)?.[0] as WorldCamera;
-    expect(zoomedCamera).toMatchObject({ x: 24, y: 24 });
+    expect(zoomedCamera).toMatchObject({ x: -12, y: 24 });
     expect(zoomedCamera.zoom).toBeCloseTo(1.725);
     fireEvent.keyDown(canvas, { key: 'Enter' });
     expect(onSelectionChange).toHaveBeenCalledWith({
@@ -535,7 +594,7 @@ describe('Pixi world projection', () => {
     expect(host).toHaveAttribute('data-effects', 'reduced');
   });
 
-  it('pointer-picks route lines and the static reduced-effects crisis marker', async () => {
+  it('pointer-picks route lines without inventing a location for a nonspatial crisis', async () => {
     const onSelectionChange = vi.fn();
     const base = projectWorldFrame(
       createInitialWorld([5, 6, 7, 8], { width: 6, height: 2, chunkSize: 1 }),
@@ -616,8 +675,14 @@ describe('Pixi world projection', () => {
     clickTile(3, 11);
     expect(onSelectionChange).toHaveBeenLastCalledWith({ id: 77, kind: 'route' });
     clickTile(0, 12);
-    expect(onSelectionChange).toHaveBeenLastCalledWith({ id: 9, kind: 'crisis' });
-    expect(pixiMocks.graphics[6]?.lineTo).toHaveBeenCalled();
+    expect(onSelectionChange).toHaveBeenLastCalledWith(null);
+    expect(onSelectionChange).not.toHaveBeenCalledWith({ id: 9, kind: 'crisis' });
+    expect(pixiMocks.graphics[6]?.rect).toHaveBeenCalledWith(2, 2, 32, 8);
+    expect(pixiMocks.graphics[6]?.stroke).toHaveBeenCalledWith({
+      alpha: 0.42,
+      color: 0xd76d55,
+      width: 1.2,
+    });
   });
 
   it('destroys an application whose async initialization finishes after unmount', async () => {

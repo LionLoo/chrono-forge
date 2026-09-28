@@ -4,6 +4,7 @@ import { Application, Container, Graphics } from 'pixi.js';
 import {
   useEffect,
   useRef,
+  useState,
   type KeyboardEvent as ReactKeyboardEvent,
   type PointerEvent as ReactPointerEvent,
 } from 'react';
@@ -27,6 +28,7 @@ interface WorldMapCanvasProps {
   readonly camera: WorldCamera;
   readonly onCameraChange: (camera: WorldCamera) => void;
   readonly onSelectionChange?: (selection: SelectableId | null) => void;
+  readonly onViewportResize?: (width: number, height: number) => void;
   readonly overlay: WorldOverlay;
   readonly projection: WorldMapProjection;
   readonly reducedEffects?: boolean;
@@ -865,71 +867,19 @@ function scheduleAgentMotion(scene: PixiScene): void {
 function drawEffects(graphics: Graphics, model: RenderModel): void {
   graphics.clear();
   model.effects.forEach((effect, index) => {
-    if (!effect.reduced) {
-      const inset = 2 + index * 1.5;
-      graphics
-        .rect(
-          inset,
-          inset,
-          Math.max(1, model.width * TILE_SIZE - inset * 2),
-          Math.max(1, model.height * TILE_SIZE - inset * 2),
-        )
-        .stroke({ alpha: 0.72, color: 0xd76d55, width: effect.severity >= 60 ? 1.2 : 0.6 });
-    }
-    const [x, y] = tilePoint(effect.markerTileIndex, model.width);
-    const radius = effect.severity >= 60 ? 2.4 : 1.9;
-    if (effect.kind === 'storm') {
-      graphics
-        .moveTo(x - radius, y - radius * 0.55)
-        .lineTo(x + radius * 0.15, y - radius * 0.55)
-        .lineTo(x - radius * 0.45, y + radius * 0.2)
-        .lineTo(x + radius, y + radius * 0.2)
-        .lineTo(x - radius * 0.25, y + radius)
-        .stroke({ color: 0xf3c96d, width: 0.85 });
-    } else if (effect.kind === 'fire') {
-      graphics
-        .moveTo(x, y - radius)
-        .lineTo(x + radius * 0.8, y + radius * 0.35)
-        .lineTo(x + radius * 0.25, y + radius)
-        .lineTo(x - radius * 0.75, y + radius * 0.55)
-        .lineTo(x - radius * 0.4, y - radius * 0.1)
-        .closePath()
-        .fill(0xd76d55)
-        .stroke({ color: 0xf3c96d, width: 0.65 });
-    } else if (effect.kind === 'flood') {
-      for (let wave = -1; wave <= 1; wave += 1) {
-        graphics
-          .moveTo(x - radius, y + wave * radius * 0.45)
-          .lineTo(x - radius * 0.35, y + wave * radius * 0.45 - 0.35)
-          .lineTo(x + radius * 0.35, y + wave * radius * 0.45 + 0.35)
-          .lineTo(x + radius, y + wave * radius * 0.45)
-          .stroke({ color: 0x79cbd1, width: 0.55 });
-      }
-    } else if (effect.kind === 'earthquake') {
-      graphics
-        .moveTo(x - radius, y - radius)
-        .lineTo(x - radius * 0.25, y - radius * 0.25)
-        .lineTo(x - radius * 0.7, y + radius * 0.15)
-        .lineTo(x + radius * 0.15, y + radius)
-        .lineTo(x + radius, y + radius * 0.3)
-        .stroke({ color: 0xf3c96d, width: 0.85 });
-    } else if (effect.kind === 'meteor-impact') {
-      graphics
-        .circle(x + radius * 0.35, y + radius * 0.35, radius * 0.55)
-        .stroke({ color: 0xd76d55, width: 0.75 });
-      graphics
-        .moveTo(x - radius, y - radius)
-        .lineTo(x + radius * 0.05, y + radius * 0.05)
-        .stroke({ color: 0xf3c96d, width: 0.85 });
-    } else {
-      graphics.circle(x, y, radius).stroke({ color: 0xf3c96d, width: 0.75 });
-      graphics
-        .moveTo(x - radius * 0.8, y + radius * 0.8)
-        .lineTo(x - radius * 0.2, y + radius * 0.15)
-        .lineTo(x + radius * 0.2, y + radius * 0.7)
-        .lineTo(x + radius * 0.8, y - radius * 0.8)
-        .stroke({ color: 0xd76d55, width: 0.65 });
-    }
+    const inset = 2 + index * 1.5;
+    graphics
+      .rect(
+        inset,
+        inset,
+        Math.max(1, model.width * TILE_SIZE - inset * 2),
+        Math.max(1, model.height * TILE_SIZE - inset * 2),
+      )
+      .stroke({
+        alpha: effect.reduced ? 0.42 : 0.72,
+        color: 0xd76d55,
+        width: effect.severity >= 60 ? 1.2 : 0.6,
+      });
   });
 }
 
@@ -942,11 +892,7 @@ function selectedTile(model: RenderModel, selection: SelectableId): number | nul
     (entry) => entry.selectable.kind === selection.kind && entry.selectable.id === selection.id,
   );
   if (route !== undefined) return Math.min(route.fromTileIndex, route.toTileIndex);
-  return (
-    model.effects.find(
-      (entry) => entry.selectable.kind === selection.kind && entry.selectable.id === selection.id,
-    )?.markerTileIndex ?? null
-  );
+  return null;
 }
 
 function drawSelection(graphics: Graphics, model: RenderModel): void {
@@ -1055,8 +1001,6 @@ function selectableAtTile(model: RenderModel, tileIndex: number): SelectableId |
     return (tileX - nearestX) ** 2 + (tileY - nearestY) ** 2 <= 0.5;
   });
   if (route !== undefined) return route.selectable;
-  const effect = model.effects.find((entry) => entry.markerTileIndex === tileIndex);
-  if (effect !== undefined) return effect.selectable;
   return null;
 }
 
@@ -1064,6 +1008,7 @@ export function WorldMapCanvas({
   camera,
   onCameraChange,
   onSelectionChange,
+  onViewportResize,
   overlay,
   projection,
   reducedEffects = false,
@@ -1074,10 +1019,13 @@ export function WorldMapCanvas({
   const cameraRef = useRef(camera);
   const onCameraChangeRef = useRef(onCameraChange);
   const onSelectionChangeRef = useRef(onSelectionChange);
+  const onViewportResizeRef = useRef(onViewportResize);
   const overlayRef = useRef(overlay);
   const projectionRef = useRef(projection);
   const reducedEffectsRef = useRef(reducedEffects);
   const selectionRef = useRef(selection);
+  const lastViewportSizeRef = useRef({ height: 0, width: 0 });
+  const [viewportRevision, setViewportRevision] = useState(0);
   const dragRef = useRef<{
     pointerId: number;
     x: number;
@@ -1089,11 +1037,41 @@ export function WorldMapCanvas({
     cameraRef.current = camera;
     onCameraChangeRef.current = onCameraChange;
     onSelectionChangeRef.current = onSelectionChange;
+    onViewportResizeRef.current = onViewportResize;
     overlayRef.current = overlay;
     projectionRef.current = projection;
     reducedEffectsRef.current = reducedEffects;
     selectionRef.current = selection;
-  }, [camera, onCameraChange, onSelectionChange, overlay, projection, reducedEffects, selection]);
+  }, [
+    camera,
+    onCameraChange,
+    onSelectionChange,
+    onViewportResize,
+    overlay,
+    projection,
+    reducedEffects,
+    selection,
+  ]);
+
+  useEffect(() => {
+    const host = hostRef.current;
+    if (!host || typeof ResizeObserver === 'undefined') return;
+    const observer = new ResizeObserver((entries) => {
+      const contentRect = entries[0]?.contentRect;
+      const width = Math.round(contentRect?.width ?? host.clientWidth);
+      const height = Math.round(contentRect?.height ?? host.clientHeight);
+      if (width < 1 || height < 1) return;
+      const previous = lastViewportSizeRef.current;
+      if (previous.width === width && previous.height === height) return;
+      lastViewportSizeRef.current = { height, width };
+      setViewportRevision((revision) => revision + 1);
+      onViewportResizeRef.current?.(width, height);
+    });
+    observer.observe(host);
+    return () => {
+      observer.disconnect();
+    };
+  }, []);
 
   useEffect(() => {
     const host = hostRef.current;
@@ -1241,7 +1219,7 @@ export function WorldMapCanvas({
     host.dataset.detail = model.detailLevel;
     scene.worldLayer.position.set(camera.x, camera.y);
     scene.worldLayer.scale.set(camera.zoom);
-  }, [camera, overlay, projection, reducedEffects, selection]);
+  }, [camera, overlay, projection, reducedEffects, selection, viewportRevision]);
 
   const handlePointerDown = (event: ReactPointerEvent<HTMLDivElement>) => {
     dragRef.current = {
@@ -1265,6 +1243,7 @@ export function WorldMapCanvas({
       y: event.clientY,
       moved: drag.moved || Math.abs(deltaX) + Math.abs(deltaY) > 2,
     };
+    cameraRef.current = next;
     onCameraChangeRef.current(next);
   };
 
@@ -1302,13 +1281,19 @@ export function WorldMapCanvas({
     const direction = directions[event.key];
     if (direction !== undefined) {
       event.preventDefault();
-      onCameraChangeRef.current(panCamera(cameraRef.current, direction[0], direction[1]));
+      const next = panCamera(cameraRef.current, direction[0], direction[1]);
+      cameraRef.current = next;
+      onCameraChangeRef.current(next);
     } else if (event.key === '+' || event.key === '=') {
       event.preventDefault();
-      onCameraChangeRef.current(zoomCamera(cameraRef.current, 1.15));
+      const next = zoomCamera(cameraRef.current, 1.15);
+      cameraRef.current = next;
+      onCameraChangeRef.current(next);
     } else if (event.key === '-' || event.key === '_') {
       event.preventDefault();
-      onCameraChangeRef.current(zoomCamera(cameraRef.current, 1 / 1.15));
+      const next = zoomCamera(cameraRef.current, 1 / 1.15);
+      cameraRef.current = next;
+      onCameraChangeRef.current(next);
     } else if (event.key === 'Enter') {
       const model = sceneRef.current?.lastModel;
       const selectable =

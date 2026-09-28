@@ -147,6 +147,7 @@ export function App({ focusAlerts, focusClock, persistence, soundscape, workerFa
   const runtimePersistence = persistence ?? getRuntimePersistence();
   const mapFrameRef = useRef<HTMLDivElement>(null);
   const mapDimensionsRef = useRef<string | null>(null);
+  const cameraFollowsOverviewRef = useRef(true);
   const [camera, setCamera] = useState(INITIAL_WORLD_CAMERA);
   const [overlay, setOverlay] = useState<WorldOverlay>('terrain');
   const [inspectionOpen, setInspectionOpen] = useState(false);
@@ -181,6 +182,7 @@ export function App({ focusAlerts, focusClock, persistence, soundscape, workerFa
     const dimensions = `${frameWidth}x${frameHeight}`;
     if (mapDimensionsRef.current === dimensions) return;
     mapDimensionsRef.current = dimensions;
+    cameraFollowsOverviewRef.current = true;
     const mapFrame = mapFrameRef.current;
     const viewportWidth = mapFrame?.clientWidth;
     const viewportHeight = mapFrame?.clientHeight;
@@ -193,6 +195,20 @@ export function App({ focusAlerts, focusClock, persistence, soundscape, workerFa
       ),
     );
   }, [frameHeight, frameWidth]);
+
+  const setExploredCamera = useCallback((nextCamera: typeof INITIAL_WORLD_CAMERA) => {
+    cameraFollowsOverviewRef.current = false;
+    setCamera(nextCamera);
+  }, []);
+  const refitOverviewOnResize = useCallback(
+    (viewportWidth: number, viewportHeight: number) => {
+      if (!cameraFollowsOverviewRef.current || frameWidth === null || frameHeight === null) {
+        return;
+      }
+      setCamera(fitCameraToWorld(frameWidth, frameHeight, viewportWidth, viewportHeight));
+    },
+    [frameHeight, frameWidth],
+  );
 
   const selectMapObject = useCallback(
     (selection: SelectableId | null) => {
@@ -405,7 +421,7 @@ export function App({ focusAlerts, focusClock, persistence, soundscape, workerFa
       const tileIndex = frame === null ? null : tileForSelection(frame, selection);
       const mapFrame = mapFrameRef.current;
       if (frame === null || tileIndex === null || mapFrame === null) return;
-      setCamera(
+      setExploredCamera(
         frameCameraOnTile(
           tileIndex,
           frame.width,
@@ -415,7 +431,7 @@ export function App({ focusAlerts, focusClock, persistence, soundscape, workerFa
         ),
       );
     },
-    [simulation.frame],
+    [setExploredCamera, simulation.frame],
   );
   const revisitFocusTarget = useCallback(
     (target: FocusRevisitTarget) => {
@@ -544,8 +560,9 @@ export function App({ focusAlerts, focusClock, persistence, soundscape, workerFa
                 {simulation.frame ? (
                   <WorldMapCanvas
                     camera={camera}
-                    onCameraChange={setCamera}
+                    onCameraChange={setExploredCamera}
                     onSelectionChange={selectMapObject}
+                    onViewportResize={refitOverviewOnResize}
                     overlay={overlay}
                     projection={simulation.frame}
                     reducedEffects={reducedEffects}
@@ -574,6 +591,7 @@ export function App({ focusAlerts, focusClock, persistence, soundscape, workerFa
                   <button
                     aria-label="Pan world left"
                     onClick={() => {
+                      cameraFollowsOverviewRef.current = false;
                       setCamera((current) => panCamera(current, -36, 0));
                     }}
                     type="button"
@@ -583,6 +601,7 @@ export function App({ focusAlerts, focusClock, persistence, soundscape, workerFa
                   <button
                     aria-label="Pan world up"
                     onClick={() => {
+                      cameraFollowsOverviewRef.current = false;
                       setCamera((current) => panCamera(current, 0, -36));
                     }}
                     type="button"
@@ -592,6 +611,7 @@ export function App({ focusAlerts, focusClock, persistence, soundscape, workerFa
                   <button
                     aria-label="Pan world down"
                     onClick={() => {
+                      cameraFollowsOverviewRef.current = false;
                       setCamera((current) => panCamera(current, 0, 36));
                     }}
                     type="button"
@@ -601,6 +621,7 @@ export function App({ focusAlerts, focusClock, persistence, soundscape, workerFa
                   <button
                     aria-label="Pan world right"
                     onClick={() => {
+                      cameraFollowsOverviewRef.current = false;
                       setCamera((current) => panCamera(current, 36, 0));
                     }}
                     type="button"
@@ -615,6 +636,7 @@ export function App({ focusAlerts, focusClock, persistence, soundscape, workerFa
                   <button
                     aria-label="Zoom world out"
                     onClick={() => {
+                      cameraFollowsOverviewRef.current = false;
                       setCamera((current) => zoomCamera(current, 1 / 1.2));
                     }}
                     type="button"
@@ -625,6 +647,7 @@ export function App({ focusAlerts, focusClock, persistence, soundscape, workerFa
                     onClick={() => {
                       const frame = simulation.frame;
                       const mapFrame = mapFrameRef.current;
+                      cameraFollowsOverviewRef.current = true;
                       setCamera(
                         frame === null || mapFrame === null
                           ? INITIAL_WORLD_CAMERA
@@ -643,6 +666,7 @@ export function App({ focusAlerts, focusClock, persistence, soundscape, workerFa
                   <button
                     aria-label="Zoom world in"
                     onClick={() => {
+                      cameraFollowsOverviewRef.current = false;
                       setCamera((current) => zoomCamera(current, 1.2));
                     }}
                     type="button"

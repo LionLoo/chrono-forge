@@ -196,6 +196,24 @@ describe('M7 render model', () => {
     ]);
   });
 
+  it('keeps nonspatial crisis presentation independent of the camera viewport', () => {
+    const disaster = M7_VISUAL_SCENARIOS.find((scenario) => scenario.name === 'disaster');
+    if (disaster === undefined) throw new Error('Disaster fixture is missing.');
+    const first = createFixtureRenderModel(disaster.projection, {
+      ...disaster.renderOptions,
+      viewport: { heightTiles: 3, leftTile: 0, topTile: 0, widthTiles: 4 },
+    });
+    const moved = createFixtureRenderModel(disaster.projection, {
+      ...disaster.renderOptions,
+      viewport: { heightTiles: 3, leftTile: 4, topTile: 2, widthTiles: 4 },
+    });
+
+    expect(first.effects).toEqual(moved.effects);
+    expect(first.effects[0]).not.toHaveProperty('markerTileIndex');
+    expect(first.layerSignatures.effects).toBe(moved.layerSignatures.effects);
+    expect(renderModelSvgBaseline(first)).toContain('data-location="nonspatial"');
+  });
+
   it('keeps advanced and space vocabulary test-only rather than accepting a production frame', () => {
     const advanced = M7_VISUAL_SCENARIOS.find((scenario) => scenario.name === 'advanced');
     const space = M7_VISUAL_SCENARIOS.find((scenario) => scenario.name === 'space');
