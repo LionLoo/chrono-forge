@@ -1305,7 +1305,6 @@ export function WorldMapCanvas({
               ...model.settlements,
               ...model.routes,
               ...model.ruins,
-              ...model.effects,
             ][0]?.selectable ?? null);
       onSelectionChangeRef.current?.(selectable);
     }

@@ -685,6 +685,62 @@ describe('Pixi world projection', () => {
     });
   });
 
+  it('does not keyboard-pick an effect-only nonspatial crisis from the map', async () => {
+    const onSelectionChange = vi.fn();
+    const base = projectWorldFrame(
+      createInitialWorld([8, 13, 21, 34], { width: 4, height: 2, chunkSize: 1 }),
+    );
+    const effectOnlyProjection: WorldMapProjection = {
+      ...base,
+      agentActions: new Uint8Array(),
+      agentHealth: new Uint16Array(),
+      agentIds: new Uint32Array(),
+      agentTiles: new Uint32Array(),
+      civilizations: {
+        ...base.civilizations,
+        routes: [],
+        ruins: [],
+        settlements: [],
+      },
+      development: {
+        ...base.development,
+        activeCrises: [
+          {
+            id: 19,
+            kind: 'storm',
+            severity: 80,
+            startedTick: 0,
+            triggerCondition: 'stormPressure',
+            triggerValue: 95,
+          },
+        ],
+      },
+      structureCondition: new Uint16Array(),
+      structureIds: new Uint32Array(),
+      structureKinds: new Uint8Array(),
+      structureProgress: new Uint16Array(),
+      structureStates: new Uint8Array(),
+      structureTiles: new Uint32Array(),
+    };
+    const view = render(
+      <WorldMapCanvas
+        camera={INITIAL_WORLD_CAMERA}
+        onCameraChange={vi.fn()}
+        onSelectionChange={onSelectionChange}
+        overlay="danger"
+        projection={effectOnlyProjection}
+        reducedEffects
+      />,
+    );
+
+    const canvas = await view.findByRole('img', { name: /founding world map/ });
+    fireEvent.keyDown(canvas, { key: 'Enter' });
+
+    expect(onSelectionChange).toHaveBeenCalledOnce();
+    expect(onSelectionChange).toHaveBeenCalledWith(null);
+    expect(onSelectionChange).not.toHaveBeenCalledWith({ id: 19, kind: 'crisis' });
+  });
+
   it('destroys an application whose async initialization finishes after unmount', async () => {
     const resolveInitialization = pixiMocks.deferInitialization();
     const view = render(
