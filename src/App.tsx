@@ -10,7 +10,13 @@ import {
 } from './adapters/soundscape';
 import type { FocusRevisitTarget } from './focus/session-review';
 import { STRUCTURE_STATE_CODES, type QueuedCommand, type WorldFrameProjection } from './protocol';
-import { frameCameraOnTile, INITIAL_WORLD_CAMERA, panCamera, zoomCamera } from './rendering/camera';
+import {
+  fitCameraToWorld,
+  frameCameraOnTile,
+  INITIAL_WORLD_CAMERA,
+  panCamera,
+  zoomCamera,
+} from './rendering/camera';
 import { WorldMapCanvas } from './rendering/WorldMapCanvas';
 import type { SelectableId } from './rendering/render-model';
 import { overlayDefinition, WORLD_OVERLAYS, type WorldOverlay } from './rendering/world-palette';
@@ -140,6 +146,7 @@ export function App({ focusAlerts, focusClock, persistence, soundscape, workerFa
   const gameSoundscape = soundscape ?? getGameSoundscape();
   const runtimePersistence = persistence ?? getRuntimePersistence();
   const mapFrameRef = useRef<HTMLDivElement>(null);
+  const mapDimensionsRef = useRef<string | null>(null);
   const [camera, setCamera] = useState(INITIAL_WORLD_CAMERA);
   const [overlay, setOverlay] = useState<WorldOverlay>('terrain');
   const [inspectionOpen, setInspectionOpen] = useState(false);
@@ -166,6 +173,26 @@ export function App({ focusAlerts, focusClock, persistence, soundscape, workerFa
     },
     [gameSoundscape],
   );
+
+  const frameWidth = simulation.frame?.width ?? null;
+  const frameHeight = simulation.frame?.height ?? null;
+  useEffect(() => {
+    if (frameWidth === null || frameHeight === null) return;
+    const dimensions = `${frameWidth}x${frameHeight}`;
+    if (mapDimensionsRef.current === dimensions) return;
+    mapDimensionsRef.current = dimensions;
+    const mapFrame = mapFrameRef.current;
+    const viewportWidth = mapFrame?.clientWidth;
+    const viewportHeight = mapFrame?.clientHeight;
+    setCamera(
+      fitCameraToWorld(
+        frameWidth,
+        frameHeight,
+        viewportWidth === undefined || viewportWidth < 1 ? 960 : viewportWidth,
+        viewportHeight === undefined || viewportHeight < 1 ? 540 : viewportHeight,
+      ),
+    );
+  }, [frameHeight, frameWidth]);
 
   const selectMapObject = useCallback(
     (selection: SelectableId | null) => {
@@ -382,8 +409,9 @@ export function App({ focusAlerts, focusClock, persistence, soundscape, workerFa
         frameCameraOnTile(
           tileIndex,
           frame.width,
-          mapFrame.clientWidth || 960,
-          mapFrame.clientHeight || 540,
+          frame.height,
+          mapFrame.clientWidth < 1 ? 960 : mapFrame.clientWidth,
+          mapFrame.clientHeight < 1 ? 540 : mapFrame.clientHeight,
         ),
       );
     },
@@ -595,7 +623,18 @@ export function App({ focusAlerts, focusClock, persistence, soundscape, workerFa
                   </button>
                   <button
                     onClick={() => {
-                      setCamera(INITIAL_WORLD_CAMERA);
+                      const frame = simulation.frame;
+                      const mapFrame = mapFrameRef.current;
+                      setCamera(
+                        frame === null || mapFrame === null
+                          ? INITIAL_WORLD_CAMERA
+                          : fitCameraToWorld(
+                              frame.width,
+                              frame.height,
+                              mapFrame.clientWidth < 1 ? 960 : mapFrame.clientWidth,
+                              mapFrame.clientHeight < 1 ? 540 : mapFrame.clientHeight,
+                            ),
+                      );
                     }}
                     type="button"
                   >

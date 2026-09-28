@@ -137,6 +137,8 @@ The release shell keeps the focus session hearth in the primary reading order be
 
 Tauri keeps a strict CSP without `unsafe-eval`. PixiJS loads its statically generated `pixi.js/unsafe-eval` fallback before renderer initialization; despite the package entrypoint name, this removes runtime code generation and is required for WebView2 under the strict policy.
 
+Native persistence defaults to Tauri's OS-resolved application-local-data directory. For isolated installed-artifact verification, `CHRONO_FORGE_PROFILE` may select one validated 1-64 character ASCII profile name below that same application root at `profiles/<name>`. The value cannot contain separators, traversal, whitespace, or an arbitrary path; invalid values fail startup closed. This native-only boundary never exposes a filesystem path or general file access to the WebView.
+
 All runtime assets are bundled locally. Tauri uses a restrictive capability list and CSP; no account or remote content is required.
 
 ## Performance budgets

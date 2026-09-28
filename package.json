@@ -45,6 +45,7 @@
     "bench": "vitest bench --run",
     "generate:sbom": "node scripts/generate-sbom.mjs release-artifacts/chrono-forge.cdx.json",
     "generate:render-baselines": "tsx scripts/generate-render-baselines.mts",
+    "capture:installed-review": "tsx scripts/capture-installed-review.mts",
     "ci:web": "npm run format:check:web && npm run lint:web && npm run typecheck && npm run test && npm run test:sim:long && npm run build:web",
     "ci": "npm run format:check && npm run lint && npm run typecheck && npm run test && npm run test:sim:long && npm run test:rust && npm run test:e2e:web && npm run test:e2e:desktop && npm run generate:sbom && npm run verify:production-exclusion"
   },

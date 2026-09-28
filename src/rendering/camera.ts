@@ -7,9 +7,10 @@ export interface WorldCamera {
 export const INITIAL_WORLD_CAMERA: WorldCamera = Object.freeze({ x: 24, y: 24, zoom: 1.5 });
 
 const MIN_ZOOM = 0.5;
-const MAX_ZOOM = 5;
+const MAX_ZOOM = 8;
 const MAX_OFFSET = 20_000;
 const DEFAULT_TILE_SIZE = 6;
+const WORLD_FRAME_PADDING = 32;
 
 function finiteClamp(value: number, minimum: number, maximum: number): number {
   if (!Number.isFinite(value)) return 0;
@@ -61,10 +62,51 @@ export function zoomCameraAt(
   };
 }
 
+/**
+ * Frames the factual world for its actual viewport. Large production worlds retain the calm
+ * launch composition; compact authoritative worlds are centered and enlarged instead of being
+ * stranded in one corner. This transform is presentation-only.
+ */
+export function fitCameraToWorld(
+  worldWidth: number,
+  worldHeight: number,
+  viewportWidth: number,
+  viewportHeight: number,
+  tileSize = DEFAULT_TILE_SIZE,
+): WorldCamera {
+  if (
+    !Number.isSafeInteger(worldWidth) ||
+    worldWidth < 1 ||
+    !Number.isSafeInteger(worldHeight) ||
+    worldHeight < 1 ||
+    !Number.isFinite(viewportWidth) ||
+    viewportWidth < 1 ||
+    !Number.isFinite(viewportHeight) ||
+    viewportHeight < 1 ||
+    !Number.isFinite(tileSize) ||
+    tileSize <= 0
+  ) {
+    return INITIAL_WORLD_CAMERA;
+  }
+
+  const fitZoom = Math.max(
+    Math.max(1, viewportWidth - WORLD_FRAME_PADDING) / (worldWidth * tileSize),
+    Math.max(1, viewportHeight - WORLD_FRAME_PADDING) / (worldHeight * tileSize),
+  );
+  if (fitZoom <= 2) return INITIAL_WORLD_CAMERA;
+  const zoom = finiteClamp(fitZoom, MIN_ZOOM, MAX_ZOOM);
+  return {
+    x: finiteClamp((viewportWidth - worldWidth * tileSize * zoom) / 2, -MAX_OFFSET, MAX_OFFSET),
+    y: finiteClamp((viewportHeight - worldHeight * tileSize * zoom) / 2, -MAX_OFFSET, MAX_OFFSET),
+    zoom,
+  };
+}
+
 /** Centers one factual map tile in the visible presentation without affecting world authority. */
 export function frameCameraOnTile(
   tileIndex: number,
   worldWidth: number,
+  worldHeight: number,
   viewportWidth: number,
   viewportHeight: number,
   requestedZoom = 3.5,
@@ -75,6 +117,9 @@ export function frameCameraOnTile(
     tileIndex < 0 ||
     !Number.isSafeInteger(worldWidth) ||
     worldWidth < 1 ||
+    !Number.isSafeInteger(worldHeight) ||
+    worldHeight < 1 ||
+    tileIndex >= worldWidth * worldHeight ||
     !Number.isFinite(viewportWidth) ||
     !Number.isFinite(viewportHeight) ||
     viewportWidth < 1 ||
@@ -85,9 +130,18 @@ export function frameCameraOnTile(
     return INITIAL_WORLD_CAMERA;
   }
 
-  const zoom = Number.isFinite(requestedZoom)
-    ? finiteClamp(requestedZoom, MIN_ZOOM, MAX_ZOOM)
-    : INITIAL_WORLD_CAMERA.zoom;
+  const overview = fitCameraToWorld(
+    worldWidth,
+    worldHeight,
+    viewportWidth,
+    viewportHeight,
+    tileSize,
+  );
+  const zoom = finiteClamp(
+    Number.isFinite(requestedZoom) ? Math.max(requestedZoom, overview.zoom) : overview.zoom,
+    MIN_ZOOM,
+    MAX_ZOOM,
+  );
   const tileX = tileIndex % worldWidth;
   const tileY = Math.floor(tileIndex / worldWidth);
   return {
