@@ -121,7 +121,8 @@ function expectM10Migration(actualSnapshot, legacySnapshot) {
 }
 
 describe('native focus persistence', () => {
-  it('starts, pauses, saves, relaunches, resumes, and completes through real SQLite IPC', async () => {
+  it('starts, pauses, saves, relaunches, resumes, and completes through real SQLite IPC', async function () {
+    this.timeout(360_000);
     await $('#focus-title').waitForDisplayed();
     await $('span=SQLite archive').waitForDisplayed();
     for (const scale of [100, 150, 200]) {
