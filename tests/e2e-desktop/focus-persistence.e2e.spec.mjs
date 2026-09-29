@@ -142,6 +142,11 @@ describe('native focus persistence', () => {
       async () => (await $('.simulation-status').getText()).includes('Worker projection ready'),
       { timeoutMsg: 'native world projection did not become ready for map framing' },
     );
+    const worldDimensions = await browser.execute(
+      () =>
+        document.querySelector('.world-heading-status span:last-child')?.textContent?.trim() ?? '',
+    );
+    expect(['12 × 8', '96 × 64']).toContain(worldDimensions);
     const selectedMapValue = await browser.execute(() => {
       const select = document.querySelector('#map-inspector select');
       if (!(select instanceof HTMLSelectElement)) return null;
@@ -158,7 +163,8 @@ describe('native focus persistence', () => {
     const frameSelection = await $('button=Frame selection');
     await frameSelection.waitForExist();
     await frameSelection.click();
-    expect(await (await $('.camera-readout')).getText()).toContain('8.00×');
+    const expectedFrameZoom = worldDimensions === '12 × 8' ? '8.00×' : '3.50×';
+    expect(await (await $('.camera-readout')).getText()).toContain(expectedFrameZoom);
     await openWorldInspection();
     expect(await (await $('h2=Settlement and society')).isDisplayed()).toBe(true);
     expect(await (await $('select[aria-label="Inspect person"]')).isDisplayed()).toBe(true);
