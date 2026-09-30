@@ -191,4 +191,34 @@ describe('focus controller', () => {
     expect(ticks).toEqual([10]);
     expect(result.current.state.totalIssuedSimulationTicks).toBe(10);
   });
+
+  it('freezes automatic and manual elapsed-time transitions while simulation is suspended', () => {
+    const controlled = createClock();
+    const ticks: number[] = [];
+    const { result, rerender } = renderHook(
+      ({ suspended }) =>
+        useFocusController({
+          clock: controlled.clock,
+          slotId: null,
+          createSessionId: () => 'suspended-session',
+          onSimulationTicks: (count) => ticks.push(count),
+          suspended,
+        }),
+      { initialProps: { suspended: false } },
+    );
+    act(() => result.current.start(configuration));
+
+    rerender({ suspended: true });
+    controlled.set(4_000);
+    void act(() => vi.advanceTimersByTime(4_000));
+    void act(() => document.dispatchEvent(new Event('visibilitychange')));
+    act(() => result.current.complete());
+
+    expect(result.current.state).toMatchObject({
+      phase: 'focus-running',
+      accumulatedFocusMs: 0,
+      totalIssuedSimulationTicks: 0,
+    });
+    expect(ticks).toStrictEqual([]);
+  });
 });

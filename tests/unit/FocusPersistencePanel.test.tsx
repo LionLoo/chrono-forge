@@ -56,6 +56,7 @@ function createSimulation(): {
       requestRelationshipEventPage: vi.fn(),
       requestRelationshipPage: vi.fn(),
       requestTimelinePage: vi.fn(),
+      retryInitialization: vi.fn(),
       relationshipEventPage: {
         personId: null,
         relationshipId: null,
@@ -108,6 +109,7 @@ function createStatefulSimulation(initialWorld?: WorldState): {
       requestTimelinePage: vi.fn(),
       requestRelationshipEventPage: vi.fn(),
       requestRelationshipPage: vi.fn(),
+      retryInitialization: vi.fn(),
       relationshipEventPage: {
         personId: null,
         relationshipId: null,
@@ -503,6 +505,63 @@ describe('FocusPersistencePanel offline progression', () => {
     await act(async () => Promise.resolve());
     expect(screen.getByRole('combobox', { name: 'Load local slot' })).toHaveValue('world-2');
     expect(screen.getByText('Loaded Second world.')).toBeVisible();
+  });
+
+  it('freezes an active focus session when the authoritative Worker faults', async () => {
+    const user = userEvent.setup();
+    let nowMs = 1_000;
+    const gateway = createInMemoryPersistenceGateway(() => nowMs);
+    const stateful = createStatefulSimulation();
+    const alerts = { notifyCompletion: () => Promise.resolve() };
+    const clock = { now: () => nowMs };
+    const runtime = { gateway, mode: 'browser-preview' } as const;
+    const rendered = render(
+      <FocusPersistencePanel
+        alerts={alerts}
+        clock={clock}
+        runtime={runtime}
+        simulation={stateful.simulation}
+      />,
+    );
+
+    await user.click(await screen.findByRole('button', { name: 'Start focus' }));
+    nowMs += 1_000;
+    act(() => {
+      document.dispatchEvent(new Event('visibilitychange'));
+    });
+    await waitFor(() => expect(stateful.currentTick()).toBe(10));
+    const timerBeforeFault = screen.getByRole('timer', {
+      name: 'Focus time remaining',
+    }).textContent;
+
+    rendered.rerender(
+      <FocusPersistencePanel
+        alerts={alerts}
+        clock={clock}
+        runtime={runtime}
+        simulation={{
+          ...stateful.simulation,
+          error: 'Injected fatal Worker fault',
+          status: 'faulted',
+        }}
+      />,
+    );
+
+    expect(await screen.findByText(/Focus controls are frozen/)).toBeVisible();
+    expect(screen.getByRole('button', { name: 'Pause' })).toBeDisabled();
+    expect(screen.getByRole('button', { name: 'Complete focus' })).toBeDisabled();
+    expect(screen.getByRole('button', { name: 'Cancel' })).toBeDisabled();
+    expect(screen.getByRole('button', { name: 'Save now' })).toBeDisabled();
+
+    nowMs += 5_000;
+    act(() => {
+      document.dispatchEvent(new Event('visibilitychange'));
+    });
+    await act(async () => Promise.resolve());
+    expect(stateful.currentTick()).toBe(10);
+    expect(screen.getByRole('timer', { name: 'Focus time remaining' })).toHaveTextContent(
+      timerBeforeFault ?? '',
+    );
   });
 
   it('scopes statistics and recaps to the active world slot', async () => {

@@ -578,16 +578,37 @@ export function App({ focusAlerts, focusClock, persistence, soundscape, workerFa
             <div className="map-stage">
               <div className="map-frame" ref={mapFrameRef}>
                 {simulation.frame ? (
-                  <WorldMapCanvas
-                    camera={camera}
-                    onCameraChange={setExploredCamera}
-                    onSelectionChange={selectMapObject}
-                    onViewportResize={refitOverviewOnResize}
-                    overlay={overlay}
-                    projection={simulation.frame}
-                    reducedEffects={reducedEffects}
-                    selection={activeMapSelection}
-                  />
+                  <>
+                    <WorldMapCanvas
+                      camera={camera}
+                      onCameraChange={setExploredCamera}
+                      onSelectionChange={selectMapObject}
+                      onViewportResize={refitOverviewOnResize}
+                      overlay={overlay}
+                      projection={simulation.frame}
+                      reducedEffects={reducedEffects}
+                      selection={activeMapSelection}
+                    />
+                    {simulation.status === 'faulted' ? (
+                      <div className="map-render-error" role="alert">
+                        <p>
+                          <strong>World simulation paused.</strong> The last verified frame remains
+                          visible. {simulation.error ?? 'The simulation Worker stopped.'} Reopen
+                          Chrono Forge to recover the saved world before continuing focus.
+                        </p>
+                      </div>
+                    ) : null}
+                  </>
+                ) : simulation.status === 'faulted' ? (
+                  <div className="map-render-error" role="alert">
+                    <p>
+                      <strong>World simulation unavailable.</strong>{' '}
+                      {simulation.error ?? 'The simulation Worker could not start.'}
+                    </p>
+                    <button onClick={simulation.retryInitialization} type="button">
+                      Retry world simulation
+                    </button>
+                  </div>
                 ) : (
                   <div className="map-loading" aria-live="polite">
                     <span />

@@ -583,6 +583,7 @@ function FocusWorkspace({
     [persistSession],
   );
 
+  const focusFrozen = simulation.status === 'faulted';
   const focus = useFocusController({
     clock,
     initialSession: initial.initialSession,
@@ -590,6 +591,7 @@ function FocusWorkspace({
     onSimulationTicks: simulation.advanceTicks,
     onSessionState,
     createSessionId: () => `focus-${globalThis.crypto.randomUUID()}`,
+    suspended: focusFrozen,
   });
 
   useEffect(() => {
@@ -608,6 +610,13 @@ function FocusWorkspace({
   }, [onSettingsChange, settings]);
 
   useEffect(() => {
+    if (focusFrozen) {
+      if (autosaveTimerRef.current !== null) {
+        window.clearTimeout(autosaveTimerRef.current);
+        autosaveTimerRef.current = null;
+      }
+      return undefined;
+    }
     const checkpointBeforeSuspension = () => {
       if (document.visibilityState !== 'hidden') return;
       queueMicrotask(() => {
@@ -624,7 +633,7 @@ function FocusWorkspace({
       document.removeEventListener('visibilitychange', checkpointBeforeSuspension);
       if (autosaveTimerRef.current !== null) window.clearTimeout(autosaveTimerRef.current);
     };
-  }, [persistSession]);
+  }, [focusFrozen, persistSession]);
 
   const runOperation = useCallback(async (operation: () => Promise<void>): Promise<void> => {
     try {
@@ -853,6 +862,14 @@ function FocusWorkspace({
             are non-punitive
           </p>
 
+          {focusFrozen ? (
+            <p className="focus-runtime-fault" role="alert">
+              Focus controls are frozen because the simulation Worker stopped. No additional focus
+              time or world ticks will be issued. Reopen Chrono Forge to recover the last saved
+              session state.
+            </p>
+          ) : null}
+
           {focus.state.phase === 'idle' ? (
             <div className="focus-setup">
               <p className="focus-world-context">
@@ -922,6 +939,7 @@ function FocusWorkspace({
             <div className="session-actions">
               {(focus.state.phase === 'focus-running' || focus.state.phase === 'break-running') && (
                 <button
+                  disabled={focusFrozen}
                   onClick={() => {
                     void soundscape.playCue('focus-pause', settings);
                     focus.pause();
@@ -934,6 +952,7 @@ function FocusWorkspace({
               {(focus.state.phase === 'focus-paused' || focus.state.phase === 'break-paused') && (
                 <button
                   className="primary-action"
+                  disabled={focusFrozen}
                   onClick={() => {
                     void soundscape.playCue('focus-resume', settings);
                     focus.resume();
@@ -945,21 +964,21 @@ function FocusWorkspace({
               )}
               {(focus.state.phase === 'focus-running' || focus.state.phase === 'focus-paused') && (
                 <>
-                  <button onClick={() => focus.complete()} type="button">
+                  <button disabled={focusFrozen} onClick={() => focus.complete()} type="button">
                     Complete focus
                   </button>
-                  <button onClick={() => focus.cancel()} type="button">
+                  <button disabled={focusFrozen} onClick={() => focus.cancel()} type="button">
                     Cancel
                   </button>
                 </>
               )}
               {(focus.state.phase === 'break-running' || focus.state.phase === 'break-paused') && (
-                <button onClick={() => focus.skipBreak()} type="button">
+                <button disabled={focusFrozen} onClick={() => focus.skipBreak()} type="button">
                   End break
                 </button>
               )}
               {canSwitchWorld && (
-                <button onClick={startNewSession} type="button">
+                <button disabled={focusFrozen} onClick={startNewSession} type="button">
                   New session
                 </button>
               )}
@@ -976,7 +995,7 @@ function FocusWorkspace({
           <label>
             Load local slot
             <select
-              disabled={!canSwitchWorld}
+              disabled={focusFrozen || !canSwitchWorld}
               onChange={(event) => {
                 void runOperation(() => replaceWithSlot(event.currentTarget.value));
               }}
@@ -990,7 +1009,11 @@ function FocusWorkspace({
             </select>
           </label>
           <div className="archive-actions">
-            <button onClick={() => void runOperation(saveCurrentWorld)} type="button">
+            <button
+              disabled={focusFrozen}
+              onClick={() => void runOperation(saveCurrentWorld)}
+              type="button"
+            >
               Save now
             </button>
             <button
@@ -1022,7 +1045,7 @@ function FocusWorkspace({
               />
             </label>
             <button
-              disabled={!canSwitchWorld}
+              disabled={focusFrozen || !canSwitchWorld}
               onClick={() =>
                 void runOperation(async () => {
                   if (focus.state.phase !== 'idle') startNewSession();
@@ -1049,7 +1072,7 @@ function FocusWorkspace({
               />
             </label>
             <button
-              disabled={!canSwitchWorld || importPackage.trim().length === 0}
+              disabled={focusFrozen || !canSwitchWorld || importPackage.trim().length === 0}
               onClick={() =>
                 void runOperation(async () => {
                   const imported = await runtime.gateway.importSaveSlot(importPackage);

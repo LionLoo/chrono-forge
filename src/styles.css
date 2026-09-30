@@ -754,6 +754,15 @@ textarea:focus-visible,
   text-transform: uppercase;
 }
 
+.focus-runtime-fault {
+  margin: 16px 0 0;
+  padding: 12px;
+  border-left: 3px solid #f0c875;
+  background: rgba(121, 47, 39, 0.24);
+  color: #ffe0d7;
+  line-height: 1.55;
+}
+
 .audio-settings-status {
   margin: 0;
   padding: 9px 11px;

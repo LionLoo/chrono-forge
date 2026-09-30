@@ -30,7 +30,9 @@ function createRuntimeWorker(): SimulationWorkerPort {
   return port;
 }
 
-function createLoadFaultWorker(): SimulationWorkerPort {
+function createLoadFaultWorker(
+  code: 'protocol-version-mismatch' | 'world-error' = 'world-error',
+): SimulationWorkerPort {
   let active = true;
   const runtime = createSimulationRuntime((message: WorkerToUiMessage) => {
     queueMicrotask(() => {
@@ -50,12 +52,51 @@ function createLoadFaultWorker(): SimulationWorkerPort {
                   type: 'fault',
                   protocolVersion: message.protocolVersion,
                   requestId: message.requestId,
-                  code: 'world-error',
+                  code,
                   message: 'Injected load failure',
                 } satisfies WorkerToUiMessage,
               }),
             );
           }
+        });
+        return;
+      }
+      runtime.handleMessage(message);
+    },
+    terminate() {
+      active = false;
+    },
+  };
+  return port;
+}
+
+function createRequestFaultWorker(
+  targetType: 'queueCommand' | 'requestSave',
+): SimulationWorkerPort {
+  let active = true;
+  const runtime = createSimulationRuntime((message: WorkerToUiMessage) => {
+    queueMicrotask(() => {
+      if (active) port.onmessage?.(new MessageEvent('message', { data: message }));
+    });
+  });
+  const port: SimulationWorkerPort = {
+    onerror: null,
+    onmessage: null,
+    postMessage(message: UiToWorkerMessage) {
+      if (message.type === targetType) {
+        queueMicrotask(() => {
+          if (!active) return;
+          port.onmessage?.(
+            new MessageEvent('message', {
+              data: {
+                type: 'fault',
+                protocolVersion: message.protocolVersion,
+                requestId: message.requestId,
+                code: 'world-error',
+                message: `Injected ${targetType} failure`,
+              } satisfies WorkerToUiMessage,
+            }),
+          );
         });
         return;
       }
@@ -139,7 +180,95 @@ function createStaleDeltaWorker(): SimulationWorkerPort {
   return port;
 }
 
+function createFalseRecoveryWorker(): SimulationWorkerPort {
+  const initial = createInitialWorld([11, 13, 17, 19]);
+  const initialFrame = projectWorldFrame(initial);
+  const nextFrame = projectWorldFrame(stepWorld(initial, 1));
+  const staleDelta = {
+    ...createWorldFrameDelta(initialFrame, nextFrame),
+    baseTick: initialFrame.tick + 1,
+  };
+  let active = true;
+  const port: SimulationWorkerPort = {
+    onerror: null,
+    onmessage: null,
+    postMessage(message: UiToWorkerMessage) {
+      if (message.type === 'initialize') {
+        queueMicrotask(() => {
+          if (!active) return;
+          port.onmessage?.(
+            new MessageEvent('message', {
+              data: {
+                type: 'ready',
+                protocolVersion: message.protocolVersion,
+                requestId: message.requestId,
+                frame: initialFrame,
+              } satisfies WorkerToUiMessage,
+            }),
+          );
+        });
+        return;
+      }
+      if (message.type === 'advanceTicks') {
+        queueMicrotask(() => {
+          if (!active) return;
+          port.onmessage?.(
+            new MessageEvent('message', {
+              data: {
+                type: 'frameDelta',
+                protocolVersion: message.protocolVersion,
+                requestId: message.requestId,
+                delta: staleDelta,
+                payloadBytes: estimateFrameDeltaPayloadBytes(staleDelta),
+              } satisfies WorkerToUiMessage,
+            }),
+          );
+          if (!active) return;
+          port.onmessage?.(
+            new MessageEvent('message', {
+              data: {
+                type: 'ready',
+                protocolVersion: message.protocolVersion,
+                requestId: 'false-recovery',
+                frame: nextFrame,
+              } satisfies WorkerToUiMessage,
+            }),
+          );
+        });
+      }
+    },
+    terminate() {
+      active = false;
+    },
+  };
+  return port;
+}
+
 describe('world simulation UI gateway', () => {
+  it('retries a failed bootstrap but cannot replace an established authoritative frame', async () => {
+    let attempts = 0;
+    const workerFactory = () => {
+      attempts += 1;
+      if (attempts === 1) throw new Error('Injected bootstrap failure');
+      return createRuntimeWorker();
+    };
+    const { result } = renderHook(() => useWorldSimulation(workerFactory));
+
+    await waitFor(() => expect(result.current.status).toBe('faulted'));
+    expect(result.current.frame).toBeNull();
+    expect(result.current.error).toBe('Injected bootstrap failure');
+
+    act(() => result.current.retryInitialization());
+    await waitFor(() => expect(result.current.status).toBe('ready'));
+    expect(result.current.frame?.tick).toBe(0);
+    expect(attempts).toBe(2);
+
+    act(() => result.current.retryInitialization());
+    expect(attempts).toBe(2);
+    expect(result.current.status).toBe('ready');
+    expect(result.current.frame?.tick).toBe(0);
+  });
+
   it('rejects a stale frame delta without replacing the authoritative UI projection', async () => {
     const { result } = renderHook(() => useWorldSimulation(createStaleDeltaWorker));
     await waitFor(() => expect(result.current.status).toBe('ready'));
@@ -149,6 +278,20 @@ describe('world simulation UI gateway', () => {
     await waitFor(() => expect(result.current.status).toBe('faulted'));
     expect(result.current.error).toMatch(/base tick/i);
     expect(result.current.frame?.tick).toBe(0);
+  });
+
+  it('fails closed after an invalid delta instead of accepting a later replacement frame', async () => {
+    const { result } = renderHook(() => useWorldSimulation(createFalseRecoveryWorker));
+    await waitFor(() => expect(result.current.status).toBe('ready'));
+
+    act(() => result.current.advanceTicks(1));
+    await waitFor(() => expect(result.current.status).toBe('faulted'));
+    await act(async () => Promise.resolve());
+
+    expect(result.current.error).toMatch(/base tick/i);
+    expect(result.current.frame?.tick).toBe(0);
+    expect(result.current.status).toBe('faulted');
+    await expect(result.current.requestSave()).rejects.toThrow('unavailable');
   });
 
   it('queues a closed intervention and resolves only after Worker acceptance', async () => {
@@ -381,8 +524,12 @@ describe('world simulation UI gateway', () => {
       expect(result.current.status).toBe('ready');
     });
 
-    await expect(result.current.loadSnapshot('{"not":"a snapshot"}')).rejects.toThrow('snapshot');
+    await act(async () => {
+      await expect(result.current.loadSnapshot('{"not":"a snapshot"}')).rejects.toThrow('snapshot');
+    });
     expect(result.current.frame?.tick).toBe(0);
+    expect(result.current.status).toBe('ready');
+    expect(result.current.error).toBeNull();
   });
 
   it('keeps the last frame when the worker rejects a load', async () => {
@@ -398,14 +545,71 @@ describe('world simulation UI gateway', () => {
       expect(result.current.frame?.tick).toBe(10);
     });
 
-    await expect(result.current.loadSnapshot(initialSnapshot)).rejects.toThrow(
-      'Injected load failure',
-    );
+    await act(async () => {
+      await expect(result.current.loadSnapshot(initialSnapshot)).rejects.toThrow(
+        'Injected load failure',
+      );
+    });
+    expect(result.current.status).toBe('ready');
+    expect(result.current.error).toBeNull();
     act(() => {
       result.current.advanceTicks(5);
     });
     await waitFor(() => {
       expect(result.current.frame?.tick).toBe(15);
     });
+  });
+
+  it('treats a matching pending request as fatal when its fault code is a protocol failure', async () => {
+    const workerFactory = () => createLoadFaultWorker('protocol-version-mismatch');
+    const { result } = renderHook(() => useWorldSimulation(workerFactory));
+    await waitFor(() => expect(result.current.status).toBe('ready'));
+    const snapshot = await result.current.requestSave();
+
+    await act(async () => {
+      await expect(result.current.loadSnapshot(snapshot)).rejects.toThrow('Injected load failure');
+    });
+
+    expect(result.current.status).toBe('faulted');
+    expect(result.current.frame?.tick).toBe(0);
+    await expect(result.current.requestSave()).rejects.toThrow('unavailable');
+  });
+
+  it('fails closed when a matching save request receives a world-error fault', async () => {
+    const workerFactory = () => createRequestFaultWorker('requestSave');
+    const { result } = renderHook(() => useWorldSimulation(workerFactory));
+    await waitFor(() => expect(result.current.status).toBe('ready'));
+
+    await act(async () => {
+      await expect(result.current.requestSave()).rejects.toThrow('Injected requestSave failure');
+    });
+
+    expect(result.current.status).toBe('faulted');
+    expect(result.current.frame?.tick).toBe(0);
+    await expect(result.current.requestSave()).rejects.toThrow('unavailable');
+  });
+
+  it('keeps a command world-error request-scoped and leaves the Worker ready', async () => {
+    const workerFactory = () => createRequestFaultWorker('queueCommand');
+    const { result } = renderHook(() => useWorldSimulation(workerFactory));
+    await waitFor(() => expect(result.current.status).toBe('ready'));
+
+    await act(async () => {
+      await expect(
+        result.current.queueCommand({
+          kind: 'intervention',
+          payload: {
+            interventionKind: 'protection',
+            intensity: 20,
+            polarity: 'supportive',
+            targetTileIndex: 0,
+          },
+        }),
+      ).rejects.toThrow('Injected queueCommand failure');
+    });
+
+    expect(result.current.status).toBe('ready');
+    expect(result.current.error).toBeNull();
+    await expect(result.current.requestSave()).resolves.toBeTypeOf('string');
   });
 });

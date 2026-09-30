@@ -150,6 +150,26 @@ function createFrameRemovalWorker(): {
   };
 }
 
+function createRuntimeErrorWorker(): {
+  readonly fail: () => void;
+  readonly workerFactory: () => SimulationWorkerPort;
+} {
+  let fail: (() => void) | null = null;
+  return {
+    fail() {
+      if (fail === null) throw new Error('test worker is not ready');
+      fail();
+    },
+    workerFactory() {
+      const port = createRuntimeWorker();
+      fail = () => {
+        port.onerror?.(new ErrorEvent('error', { message: 'Injected runtime failure' }));
+      };
+      return port;
+    },
+  };
+}
+
 function createPreviewPersistence(): RuntimePersistence {
   return { gateway: createInMemoryPersistenceGateway(), mode: 'browser-preview' };
 }
@@ -321,18 +341,53 @@ describe('deterministic world lab', () => {
     ).toBeVisible();
   });
 
-  it('reports a worker bootstrap fault without hiding the map controls', async () => {
+  it('replaces an indefinite map bootstrap spinner with a recoverable worker fault', async () => {
+    const user = userEvent.setup();
+    let attempts = 0;
     render(
       <App
         persistence={createPreviewPersistence()}
         workerFactory={() => {
-          throw new Error('Worker blocked for test');
+          attempts += 1;
+          if (attempts === 1) throw new Error('Worker blocked for test');
+          return createRuntimeWorker();
         }}
       />,
     );
 
     expect(await screen.findByText('Simulation fault: Worker blocked for test')).toBeVisible();
+    const mapFault = screen.getByRole('alert');
+    expect(within(mapFault).getByText('World simulation unavailable.')).toBeVisible();
+    expect(within(mapFault).getByText('Worker blocked for test')).toBeVisible();
+    expect(screen.queryByText('Forging the first landscape')).not.toBeInTheDocument();
     expect(screen.getByRole('group', { name: 'Map overlay' })).toBeVisible();
+
+    await user.click(within(mapFault).getByRole('button', { name: 'Retry world simulation' }));
+
+    expect(await screen.findByRole('img', { name: 'Generated Chrono Forge world' })).toBeVisible();
+    expect(screen.getByText('Worker projection ready · autonomous world active')).toBeVisible();
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument();
+    expect(attempts).toBe(2);
+  });
+
+  it('keeps the last verified frame visible while making a fatal Worker error prominent', async () => {
+    const controlledWorker = createRuntimeErrorWorker();
+    render(
+      <App
+        persistence={createPreviewPersistence()}
+        workerFactory={controlledWorker.workerFactory}
+      />,
+    );
+    expect(await screen.findByRole('img', { name: 'Generated Chrono Forge world' })).toBeVisible();
+
+    act(() => controlledWorker.fail());
+
+    const faultHeading = await screen.findByText('World simulation paused.');
+    const mapFault = faultHeading.closest<HTMLElement>('[role="alert"]');
+    expect(mapFault).not.toBeNull();
+    expect(within(mapFault!).getByText(/Injected runtime failure/)).toBeVisible();
+    expect(screen.getByRole('img', { name: 'Generated Chrono Forge world' })).toBeVisible();
+    expect(screen.getByRole('button', { name: 'Start focus' })).toBeDisabled();
   });
 
   it('runs a controlled-clock focus session and durably records its factual recap', async () => {

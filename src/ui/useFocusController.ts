@@ -31,6 +31,8 @@ export interface UseFocusControllerOptions {
   readonly onSessionState?: (session: FocusSession) => void;
   readonly checkpointIntervalMs?: number;
   readonly createSessionId?: () => string;
+  /** Freezes all elapsed-time transitions when authoritative simulation ticks cannot be issued. */
+  readonly suspended?: boolean;
 }
 
 export interface FocusController {
@@ -126,6 +128,7 @@ function remaining(duration: number | null, elapsed: number): number {
  */
 export function useFocusController(options: UseFocusControllerOptions): FocusController {
   const { clock, createSessionId, onSessionState, onSimulationTicks, slotId } = options;
+  const suspended = options.suspended ?? false;
   const [state, setState] = useState<FocusState>(() => initialState(options.initialSession));
   const [sessionId, setSessionId] = useState<string | null>(
     options.initialSession?.sessionId ?? null,
@@ -144,6 +147,7 @@ export function useFocusController(options: UseFocusControllerOptions): FocusCon
 
   const transition = useCallback(
     (operation: (current: FocusState, epochMs: number) => FocusState): void => {
+      if (suspended) return;
       const previous = stateRef.current;
       const next = operation(previous, clock.now());
       if (next === previous) return;
@@ -154,7 +158,7 @@ export function useFocusController(options: UseFocusControllerOptions): FocusCon
       if (issuedDelta > 0) onSimulationTicks(issuedDelta);
       publish(next);
     },
-    [clock, onSimulationTicks, publish],
+    [clock, onSimulationTicks, publish, suspended],
   );
 
   const start = useCallback(
@@ -214,7 +218,8 @@ export function useFocusController(options: UseFocusControllerOptions): FocusCon
     throw new RangeError('Focus checkpoint interval must be a positive safe integer.');
   }
 
-  const running = state.phase === 'focus-running' || state.phase === 'break-running';
+  const running =
+    !suspended && (state.phase === 'focus-running' || state.phase === 'break-running');
   useEffect(() => {
     if (!running) return undefined;
     const interval = window.setInterval(checkpoint, checkpointIntervalMs);
@@ -222,10 +227,11 @@ export function useFocusController(options: UseFocusControllerOptions): FocusCon
   }, [checkpoint, checkpointIntervalMs, running]);
 
   useEffect(() => {
+    if (suspended) return undefined;
     const onVisibilityChange = (): void => checkpoint();
     document.addEventListener('visibilitychange', onVisibilityChange);
     return () => document.removeEventListener('visibilitychange', onVisibilityChange);
-  }, [checkpoint]);
+  }, [checkpoint, suspended]);
 
   const session =
     sessionId === null || state.phase === 'idle'
