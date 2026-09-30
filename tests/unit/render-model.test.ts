@@ -1,3 +1,6 @@
+import { readFileSync } from 'node:fs';
+import { resolve } from 'node:path';
+
 import { describe, expect, it } from 'vitest';
 
 import {
@@ -5,10 +8,12 @@ import {
   createFixtureRenderModel,
   createRenderModel,
   prepareFixtureRenderProjection,
+  renderDetailForZoom,
   renderModelSvgBaseline,
   type RenderModelOptions,
 } from '../../src/rendering/render-model';
 import { M7_VISUAL_SCENARIOS } from '../fixtures/m7-visual-scenarios';
+import { M10_5_VISUAL_SCENARIOS } from '../fixtures/m10-5-visual-scenarios';
 
 describe('M7 render model', () => {
   it('keeps every required visual fixture fixed at the documented viewport', () => {
@@ -44,6 +49,39 @@ describe('M7 render model', () => {
     expect(industrialScene.era).toBe('industrial');
     expect(industrialScene.builtEnvironment.map((entry) => entry.kind)).toContain('industry');
     expect(industrialScene.builtEnvironment.map((entry) => entry.kind)).toContain('road');
+  });
+
+  it('derives stable person identity and factual activity presentation independently of detail', () => {
+    const town = M7_VISUAL_SCENARIOS.find((scenario) => scenario.name === 'town');
+    if (town === undefined) throw new Error('Town fixture is missing.');
+    const overview = createFixtureRenderModel(town.projection, {
+      ...town.renderOptions,
+      detailLevel: 'overview',
+    });
+    const close = createFixtureRenderModel(town.projection, {
+      ...town.renderOptions,
+      detailLevel: 'close',
+    });
+
+    expect(overview.detailLevel).toBe('overview');
+    expect(close.detailLevel).toBe('close');
+    expect(overview.agents.map((agent) => agent.identity)).toEqual(
+      close.agents.map((agent) => agent.identity),
+    );
+    expect(close.agents.map((agent) => agent.activityVisual)).toEqual(['build', 'gather']);
+    expect(close.agents[0]?.identity).not.toEqual(close.agents[1]?.identity);
+    expect(close.structures.map((structure) => structure.form)).toEqual(['home', 'storehouse']);
+    expect(close.structures.every((structure) => structure.roof.length > 0)).toBe(true);
+  });
+
+  it('uses bounded zoom bands for presentation density only', () => {
+    expect(renderDetailForZoom(Number.NaN)).toBe('overview');
+    expect(renderDetailForZoom(0.5)).toBe('overview');
+    expect(renderDetailForZoom(1.249)).toBe('overview');
+    expect(renderDetailForZoom(1.25)).toBe('district');
+    expect(renderDetailForZoom(2.749)).toBe('district');
+    expect(renderDetailForZoom(2.75)).toBe('close');
+    expect(renderDetailForZoom(5)).toBe('close');
   });
 
   it('uses typed stable selections, guard-band culling, and reusable layer signatures', () => {
@@ -158,6 +196,24 @@ describe('M7 render model', () => {
     ]);
   });
 
+  it('keeps nonspatial crisis presentation independent of the camera viewport', () => {
+    const disaster = M7_VISUAL_SCENARIOS.find((scenario) => scenario.name === 'disaster');
+    if (disaster === undefined) throw new Error('Disaster fixture is missing.');
+    const first = createFixtureRenderModel(disaster.projection, {
+      ...disaster.renderOptions,
+      viewport: { heightTiles: 3, leftTile: 0, topTile: 0, widthTiles: 4 },
+    });
+    const moved = createFixtureRenderModel(disaster.projection, {
+      ...disaster.renderOptions,
+      viewport: { heightTiles: 3, leftTile: 4, topTile: 2, widthTiles: 4 },
+    });
+
+    expect(first.effects).toEqual(moved.effects);
+    expect(first.effects[0]).not.toHaveProperty('markerTileIndex');
+    expect(first.layerSignatures.effects).toBe(moved.layerSignatures.effects);
+    expect(renderModelSvgBaseline(first)).toContain('data-location="nonspatial"');
+  });
+
   it('keeps advanced and space vocabulary test-only rather than accepting a production frame', () => {
     const advanced = M7_VISUAL_SCENARIOS.find((scenario) => scenario.name === 'advanced');
     const space = M7_VISUAL_SCENARIOS.find((scenario) => scenario.name === 'space');
@@ -166,7 +222,21 @@ describe('M7 render model', () => {
     expect(createFixtureRenderModel(advanced.projection, advanced.renderOptions).era).toBe(
       'advanced',
     );
-    expect(createFixtureRenderModel(space.projection, space.renderOptions).era).toBe('space');
+    const advancedScene = createFixtureRenderModel(advanced.projection, advanced.renderOptions);
+    const spaceScene = createFixtureRenderModel(space.projection, space.renderOptions);
+    expect(advancedScene.spaceLandmarks.map((landmark) => landmark.kind)).toEqual(['launch-site']);
+    expect(spaceScene.era).toBe('space');
+    expect(spaceScene.spaceLandmarks.map((landmark) => landmark.kind).sort()).toEqual([
+      'body',
+      'body',
+      'colony',
+      'craft',
+      'launch-site',
+    ]);
+    expect(spaceScene.spaceLandmarks.find((landmark) => landmark.kind === 'craft')?.status).toBe(
+      'orbiting:orbital',
+    );
+    expect(spaceScene.layerSignatures.space).not.toBe(advancedScene.layerSignatures.space);
     expect(advanced.projection).not.toHaveProperty('version');
     expect(createRenderModel).toBeTypeOf('function');
   });
@@ -183,6 +253,48 @@ describe('M7 render model', () => {
       readFileSync(resolve('tests', 'visual', 'baselines', `${scenario.name}.svg`), 'utf8').trim(),
     );
   });
+
+  it('locks five M10.5 factual scenarios at both wide and close exploration scales', () => {
+    expect(M10_5_VISUAL_SCENARIOS.map((scenario) => `${scenario.name}:${scenario.view}`)).toEqual([
+      'founding:wide',
+      'founding:close',
+      'mature-settlement:wide',
+      'mature-settlement:close',
+      'crisis:wide',
+      'crisis:close',
+      'advanced-city:wide',
+      'advanced-city:close',
+      'space:wide',
+      'space:close',
+    ]);
+    expect(
+      M10_5_VISUAL_SCENARIOS.every(
+        (scenario) =>
+          scenario.detailLevel === (scenario.view === 'wide' ? 'overview' : 'close') &&
+          scenario.renderOptions.reducedEffects,
+      ),
+    ).toBe(true);
+  });
+
+  it.each(M10_5_VISUAL_SCENARIOS)(
+    'emits a byte-stable M10.5 SVG baseline for $name $view',
+    (scenario) => {
+      const first = renderModelSvgBaseline(
+        createFixtureRenderModel(scenario.projection, scenario.renderOptions),
+      );
+      const second = renderModelSvgBaseline(
+        createFixtureRenderModel(scenario.projection, scenario.renderOptions),
+      );
+      expect(first).toBe(second);
+      expect(first).toContain(`data-detail="${scenario.detailLevel}"`);
+      expect(first).toContain('data-silhouette=');
+      expect(first).toContain('data-form=');
+      expect(first).toBe(
+        readFileSync(
+          resolve('tests', 'visual', 'baselines', `m10-5-${scenario.name}-${scenario.view}.svg`),
+          'utf8',
+        ).trim(),
+      );
+    },
+  );
 });
-import { readFileSync } from 'node:fs';
-import { resolve } from 'node:path';

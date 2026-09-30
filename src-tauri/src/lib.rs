@@ -1,7 +1,35 @@
+use std::{
+    ffi::OsStr,
+    path::{Path, PathBuf},
+};
+
 use serde::Serialize;
 use tauri::Manager;
 
 mod persistence;
+
+const PROFILE_ENVIRONMENT_VARIABLE: &str = "CHRONO_FORGE_PROFILE";
+
+fn persistence_directory(base: &Path, profile: Option<&OsStr>) -> Result<PathBuf, String> {
+    let Some(profile) = profile else {
+        return Ok(base.to_path_buf());
+    };
+    let profile = profile
+        .to_str()
+        .ok_or_else(|| "Chrono Forge profile names must be valid UTF-8.".to_owned())?;
+    if profile.is_empty()
+        || profile.len() > 64
+        || !profile
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+    {
+        return Err(
+            "Chrono Forge profile names must contain 1-64 ASCII letters, digits, hyphens, or underscores."
+                .to_owned(),
+        );
+    }
+    Ok(base.join("profiles").join(profile))
+}
 
 #[derive(Debug, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
@@ -31,7 +59,12 @@ pub fn run() {
 
     builder
         .setup(|app| {
-            let app_local_data = app.path().app_local_data_dir()?;
+            let base_app_local_data = app.path().app_local_data_dir()?;
+            let profile = std::env::var_os(PROFILE_ENVIRONMENT_VARIABLE);
+            let app_local_data = persistence_directory(&base_app_local_data, profile.as_deref())
+                .map_err(|message| {
+                    std::io::Error::new(std::io::ErrorKind::InvalidInput, message)
+                })?;
             app.manage(persistence::PersistenceState::open_app_local_data(
                 &app_local_data,
             )?);
@@ -57,7 +90,9 @@ pub fn run() {
 
 #[cfg(test)]
 mod tests {
-    use super::{AppInfo, app_info};
+    use std::{ffi::OsStr, path::Path};
+
+    use super::{AppInfo, app_info, persistence_directory};
 
     #[test]
     fn app_info_reports_local_first_identity() {
@@ -69,5 +104,42 @@ mod tests {
                 local_first: true,
             }
         );
+    }
+
+    #[test]
+    fn persistence_directory_defaults_to_the_app_local_data_root() {
+        let base = Path::new("root").join("com.lionloo.chronoforge");
+
+        assert_eq!(persistence_directory(&base, None), Ok(base));
+    }
+
+    #[test]
+    fn persistence_directory_scopes_a_valid_profile_below_the_app_root() {
+        let base = Path::new("root").join("com.lionloo.chronoforge");
+
+        assert_eq!(
+            persistence_directory(&base, Some(OsStr::new("installed-review_759026b"))),
+            Ok(base.join("profiles").join("installed-review_759026b")),
+        );
+    }
+
+    #[test]
+    fn persistence_directory_rejects_paths_and_unbounded_profile_names() {
+        let base = Path::new("root").join("com.lionloo.chronoforge");
+
+        for invalid in [
+            "",
+            ".",
+            "..",
+            "review/profile",
+            "review\\profile",
+            "review profile",
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        ] {
+            assert!(
+                persistence_directory(&base, Some(OsStr::new(invalid))).is_err(),
+                "profile {invalid:?} must be rejected",
+            );
+        }
     }
 }

@@ -13,6 +13,7 @@ import type { GameSoundscape } from '../../src/adapters/soundscape';
 import { projectFocusCheckpoint } from '../../src/focus/session-review';
 import { PROJECT_META } from '../../src/project-meta';
 import type { UiToWorkerMessage, WorkerToUiMessage } from '../../src/protocol';
+import type { WorldCamera } from '../../src/rendering/camera';
 import type { WorldOverlay } from '../../src/rendering/world-palette';
 import { deserializeWorldSnapshot } from '../../src/simulation/persistence';
 import type { SimulationWorkerPort } from '../../src/ui/useWorldSimulation';
@@ -20,18 +21,35 @@ import { createSimulationRuntime } from '../../src/workers/simulation-runtime';
 
 vi.mock('../../src/rendering/WorldMapCanvas', () => ({
   WorldMapCanvas: ({
+    camera,
+    onViewportResize,
     overlay,
     reducedEffects,
   }: {
+    readonly camera: WorldCamera;
+    readonly onViewportResize?: (width: number, height: number) => void;
     readonly overlay: WorldOverlay;
     readonly reducedEffects?: boolean;
   }) => (
-    <div
-      aria-label="Generated Chrono Forge world"
-      data-effects={reducedEffects ? 'reduced' : 'full'}
-      data-overlay={overlay}
-      role="img"
-    />
+    <>
+      <div
+        aria-label="Generated Chrono Forge world"
+        data-camera={`${camera.x}:${camera.y}:${camera.zoom}`}
+        data-effects={reducedEffects ? 'reduced' : 'full'}
+        data-overlay={overlay}
+        role="img"
+      />
+      <button
+        aria-label="Simulate large map viewport"
+        onClick={() => onViewportResize?.(1_600, 1_000)}
+        type="button"
+      />
+      <button
+        aria-label="Simulate larger map viewport"
+        onClick={() => onViewportResize?.(2_000, 1_200)}
+        type="button"
+      />
+    </>
   ),
 }));
 
@@ -127,14 +145,21 @@ describe('deterministic world lab', () => {
     expect(playCue).toHaveBeenCalledWith('selection', expect.any(Object));
 
     await user.click(screen.getByRole('button', { name: 'Zoom world in' }));
-    expect(screen.getByText(/1\.20×/)).toBeVisible();
+    expect(screen.getByText(/1\.80×/)).toBeVisible();
     await user.click(screen.getByRole('button', { name: 'Pan world left' }));
     await user.click(screen.getByRole('button', { name: 'Pan world up' }));
     await user.click(screen.getByRole('button', { name: 'Pan world down' }));
     await user.click(screen.getByRole('button', { name: 'Pan world right' }));
     await user.click(screen.getByRole('button', { name: 'Zoom world out' }));
-    await user.click(screen.getByRole('button', { name: 'Reset' }));
-    expect(screen.getByLabelText('Camera position')).toHaveTextContent('X 24 · Y 24 · 1.00×');
+    await user.click(screen.getByRole('button', { name: 'Overview' }));
+    expect(screen.getByLabelText('Camera position')).toHaveTextContent('X 24 · Y 24 · 1.50×');
+
+    await user.selectOptions(
+      screen.getByRole('combobox', { name: 'Inspect map object' }),
+      'agent:1',
+    );
+    await user.click(screen.getByRole('button', { name: 'Frame selection' }));
+    expect(screen.getByLabelText('Camera position')).toHaveTextContent('3.50×');
 
     expect(
       screen.queryByRole('button', { name: /Observe .* fixed ticks/ }),
@@ -143,6 +168,26 @@ describe('deterministic world lab', () => {
     expect(
       screen.getByText(/Only accepted focus time advances the live world directly/),
     ).toBeVisible();
+  });
+
+  it('refits overview framing on resize without discarding deliberate exploration', async () => {
+    const user = userEvent.setup();
+    render(<App persistence={createPreviewPersistence()} workerFactory={createRuntimeWorker} />);
+    await screen.findByText('Worker projection ready · autonomous world active');
+    const world = screen.getByRole('img', { name: 'Generated Chrono Forge world' });
+
+    expect(world).toHaveAttribute('data-camera', '24:24:1.5');
+    await user.click(screen.getByRole('button', { name: 'Simulate large map viewport' }));
+    expect(world).not.toHaveAttribute('data-camera', '24:24:1.5');
+
+    await user.click(screen.getByRole('button', { name: 'Zoom world in' }));
+    const exploredCamera = world.getAttribute('data-camera');
+    await user.click(screen.getByRole('button', { name: 'Simulate larger map viewport' }));
+    expect(world).toHaveAttribute('data-camera', exploredCamera ?? 'missing');
+
+    await user.click(screen.getByRole('button', { name: 'Overview' }));
+    await user.click(screen.getByRole('button', { name: 'Simulate larger map viewport' }));
+    expect(world.getAttribute('data-camera')).not.toBe(exploredCamera);
   });
 
   it('keeps indirect interventions optional and queues them through the Worker', async () => {

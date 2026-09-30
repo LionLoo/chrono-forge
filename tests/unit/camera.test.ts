@@ -1,6 +1,8 @@
 import { describe, expect, it } from 'vitest';
 
 import {
+  fitCameraToWorld,
+  frameCameraOnTile,
   INITIAL_WORLD_CAMERA,
   panCamera,
   zoomCamera,
@@ -9,12 +11,12 @@ import {
 
 describe('world camera', () => {
   it('pans without changing zoom', () => {
-    expect(panCamera(INITIAL_WORLD_CAMERA, 12, -8)).toEqual({ x: 36, y: 16, zoom: 1 });
+    expect(panCamera(INITIAL_WORLD_CAMERA, 12, -8)).toEqual({ x: 36, y: 16, zoom: 1.5 });
   });
 
   it('clamps zoom to a calm usable range', () => {
     expect(zoomCamera(INITIAL_WORLD_CAMERA, 0.001).zoom).toBe(0.5);
-    expect(zoomCamera(INITIAL_WORLD_CAMERA, 100).zoom).toBe(5);
+    expect(zoomCamera(INITIAL_WORLD_CAMERA, 100).zoom).toBe(8);
   });
 
   it('zooms around the supplied viewport point', () => {
@@ -33,7 +35,24 @@ describe('world camera', () => {
     expect(zoomCameraAt(INITIAL_WORLD_CAMERA, 2, Number.NaN, Number.NaN)).toEqual({
       x: 48,
       y: 48,
-      zoom: 2,
+      zoom: 3,
     });
+  });
+
+  it('frames a factual tile at the viewport center without changing authority', () => {
+    expect(frameCameraOnTile(482, 96, 64, 960, 540, 3)).toEqual({ x: 435, y: 171, zoom: 3 });
+    expect(frameCameraOnTile(82, 16, 9, 960, 540, 3)).toEqual({ x: 360, y: 6, zoom: 8 });
+    expect(frameCameraOnTile(482, 96, 64, 960, 540, 100).zoom).toBe(8);
+  });
+
+  it('centers compact authoritative worlds without changing large-world launch framing', () => {
+    expect(fitCameraToWorld(96, 64, 960, 540)).toEqual(INITIAL_WORLD_CAMERA);
+    expect(fitCameraToWorld(16, 9, 960, 540)).toEqual({ x: 96, y: 54, zoom: 8 });
+  });
+
+  it('falls back safely when a revisit target cannot be framed', () => {
+    expect(frameCameraOnTile(-1, 0, 0, Number.NaN, 0)).toEqual(INITIAL_WORLD_CAMERA);
+    expect(frameCameraOnTile(64, 8, 8, 800, 500)).toEqual(INITIAL_WORLD_CAMERA);
+    expect(frameCameraOnTile(12, 8, 8, 800, 500, Number.NaN).zoom).toBe(8);
   });
 });
