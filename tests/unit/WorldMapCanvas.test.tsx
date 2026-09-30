@@ -68,6 +68,9 @@ const pixiMocks = vi.hoisted(() => {
     rejectInitialization(message: string) {
       initialize = () => Promise.reject(new Error(message));
     },
+    allowInitialization() {
+      initialize = () => Promise.resolve();
+    },
     deferInitialization() {
       let resolve!: () => void;
       initialize = () =>
@@ -386,8 +389,23 @@ describe('Pixi world projection', () => {
         'data-render-error',
         'WebGL unavailable',
       );
+      expect(view.getByRole('alert')).toHaveTextContent(
+        'The world map could not start. WebGL unavailable',
+      );
       expect(pixiMocks.applications[0]?.destroy).toHaveBeenCalledWith(true, { children: true });
     });
+
+    pixiMocks.allowInitialization();
+    fireEvent.click(view.getByRole('button', { name: 'Retry world map' }));
+
+    await waitFor(() => {
+      expect(view.queryByRole('alert')).not.toBeInTheDocument();
+      expect(view.getByRole('img', { name: /world map/ })).toBeVisible();
+      expect(view.container.querySelector('.world-map-canvas')).not.toHaveAttribute(
+        'data-render-error',
+      );
+    });
+    expect(pixiMocks.applications).toHaveLength(2);
   });
 
   it('draws separate agent and construction layers with progress, condition outlines, and redundant condition marks', async () => {

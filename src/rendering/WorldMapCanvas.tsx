@@ -1025,6 +1025,8 @@ export function WorldMapCanvas({
   const reducedEffectsRef = useRef(reducedEffects);
   const selectionRef = useRef(selection);
   const lastViewportSizeRef = useRef({ height: 0, width: 0 });
+  const [renderAttempt, setRenderAttempt] = useState(0);
+  const [renderError, setRenderError] = useState<string | null>(null);
   const [viewportRevision, setViewportRevision] = useState(0);
   const dragRef = useRef<{
     pointerId: number;
@@ -1103,6 +1105,7 @@ export function WorldMapCanvas({
   useEffect(() => {
     const host = hostRef.current;
     if (!host) return;
+    delete host.dataset.renderError;
     let disposed = false;
     const application = new Application();
     void application
@@ -1179,11 +1182,13 @@ export function WorldMapCanvas({
         host.dataset.detail = model.detailLevel;
         worldLayer.position.set(cameraRef.current.x, cameraRef.current.y);
         worldLayer.scale.set(cameraRef.current.zoom);
+        setRenderError(null);
       })
       .catch((error: unknown) => {
         if (!disposed) {
-          host.dataset.renderError =
-            error instanceof Error ? error.message : 'Renderer unavailable';
+          const message = error instanceof Error ? error.message : 'Renderer unavailable';
+          host.dataset.renderError = message;
+          setRenderError(message);
         }
         application.destroy(true, { children: true });
       });
@@ -1197,7 +1202,7 @@ export function WorldMapCanvas({
         application.destroy(true, { children: true });
       }
     };
-  }, []);
+  }, [renderAttempt]);
 
   useEffect(() => {
     const scene = sceneRef.current;
@@ -1311,16 +1316,34 @@ export function WorldMapCanvas({
   };
 
   return (
-    <div
-      className="world-map-canvas"
-      data-effects={reducedEffects ? 'reduced' : 'full'}
-      data-overlay={overlay}
-      onKeyDown={handleKeyDown}
-      onPointerCancel={handlePointerUp}
-      onPointerDown={handlePointerDown}
-      onPointerMove={handlePointerMove}
-      onPointerUp={handlePointerUp}
-      ref={hostRef}
-    />
+    <>
+      <div
+        className="world-map-canvas"
+        data-effects={reducedEffects ? 'reduced' : 'full'}
+        data-overlay={overlay}
+        onKeyDown={handleKeyDown}
+        onPointerCancel={handlePointerUp}
+        onPointerDown={handlePointerDown}
+        onPointerMove={handlePointerMove}
+        onPointerUp={handlePointerUp}
+        ref={hostRef}
+      />
+      {renderError === null ? null : (
+        <div className="map-render-error" role="alert">
+          <p>
+            <strong>The world map could not start.</strong> {renderError}
+          </p>
+          <button
+            onClick={() => {
+              setRenderError(null);
+              setRenderAttempt((attempt) => attempt + 1);
+            }}
+            type="button"
+          >
+            Retry world map
+          </button>
+        </div>
+      )}
+    </>
   );
 }

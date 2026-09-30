@@ -12,7 +12,12 @@ import type { RuntimePersistence } from '../../src/adapters/runtime-persistence'
 import type { GameSoundscape } from '../../src/adapters/soundscape';
 import { projectFocusCheckpoint } from '../../src/focus/session-review';
 import { PROJECT_META } from '../../src/project-meta';
-import type { UiToWorkerMessage, WorkerToUiMessage } from '../../src/protocol';
+import {
+  WORKER_PROTOCOL_VERSION,
+  type UiToWorkerMessage,
+  type WorkerToUiMessage,
+  type WorldFrameProjection,
+} from '../../src/protocol';
 import type { WorldCamera } from '../../src/rendering/camera';
 import type { WorldOverlay } from '../../src/rendering/world-palette';
 import { deserializeWorldSnapshot } from '../../src/simulation/persistence';
@@ -25,11 +30,13 @@ vi.mock('../../src/rendering/WorldMapCanvas', () => ({
     onViewportResize,
     overlay,
     reducedEffects,
+    selection,
   }: {
     readonly camera: WorldCamera;
     readonly onViewportResize?: (width: number, height: number) => void;
     readonly overlay: WorldOverlay;
     readonly reducedEffects?: boolean;
+    readonly selection?: { readonly id: number; readonly kind: string } | null;
   }) => (
     <>
       <div
@@ -37,6 +44,11 @@ vi.mock('../../src/rendering/WorldMapCanvas', () => ({
         data-camera={`${camera.x}:${camera.y}:${camera.zoom}`}
         data-effects={reducedEffects ? 'reduced' : 'full'}
         data-overlay={overlay}
+        data-selection={
+          selection === undefined || selection === null
+            ? 'none'
+            : `${selection.kind}:${selection.id}`
+        }
         role="img"
       />
       <button
@@ -72,6 +84,70 @@ function createRuntimeWorker(): SimulationWorkerPort {
     },
   };
   return port;
+}
+
+function createFrameRemovalWorker(): {
+  readonly removeFirstAgent: () => void;
+  readonly workerFactory: () => SimulationWorkerPort;
+} {
+  let removeFirstAgent: (() => void) | null = null;
+  const workerFactory = () => {
+    let active = true;
+    const runtime = createSimulationRuntime((message: WorkerToUiMessage) => {
+      if (message.type === 'ready' && removeFirstAgent === null) {
+        const initialFrame = message.frame;
+        removeFirstAgent = () => {
+          const removedId = initialFrame.agentIds[0];
+          if (removedId === undefined) throw new Error('test frame has no removable agent');
+          const frame: WorldFrameProjection = {
+            ...initialFrame,
+            agentActions: initialFrame.agentActions.slice(1),
+            agentHealth: initialFrame.agentHealth.slice(1),
+            agentIds: initialFrame.agentIds.slice(1),
+            agentTiles: initialFrame.agentTiles.slice(1),
+            society: {
+              ...initialFrame.society,
+              people: initialFrame.society.people.filter((person) => person.id !== removedId),
+            },
+            stateHash: `${initialFrame.stateHash}-without-${removedId}`,
+            tick: initialFrame.tick + 1,
+          };
+          port.onmessage?.(
+            new MessageEvent('message', {
+              data: {
+                frame,
+                protocolVersion: WORKER_PROTOCOL_VERSION,
+                requestId: 'frame-removal-test',
+                type: 'ready',
+              } satisfies WorkerToUiMessage,
+            }),
+          );
+        };
+      }
+      queueMicrotask(() => {
+        if (active) port.onmessage?.(new MessageEvent('message', { data: message }));
+      });
+    });
+
+    const port: SimulationWorkerPort = {
+      onerror: null,
+      onmessage: null,
+      postMessage(message: UiToWorkerMessage) {
+        runtime.handleMessage(message);
+      },
+      terminate() {
+        active = false;
+      },
+    };
+    return port;
+  };
+  return {
+    removeFirstAgent() {
+      if (removeFirstAgent === null) throw new Error('test worker is not ready');
+      removeFirstAgent();
+    },
+    workerFactory,
+  };
 }
 
 function createPreviewPersistence(): RuntimePersistence {
@@ -168,6 +244,42 @@ describe('deterministic world lab', () => {
     expect(
       screen.getByText(/Only accepted focus time advances the live world directly/),
     ).toBeVisible();
+  });
+
+  it('clears a map selection when the next valid Worker frame removes that object', async () => {
+    const user = userEvent.setup();
+    const controlledWorker = createFrameRemovalWorker();
+    render(
+      <App
+        persistence={createPreviewPersistence()}
+        workerFactory={controlledWorker.workerFactory}
+      />,
+    );
+    await screen.findByText('Worker projection ready · autonomous world active');
+
+    const inspector = screen.getByRole('combobox', { name: 'Inspect map object' });
+    await user.selectOptions(inspector, 'agent:1');
+    expect(inspector).toHaveValue('agent:1');
+    expect(screen.getByRole('article', { name: 'Selected map object' })).toBeVisible();
+    expect(screen.getByRole('img', { name: 'Generated Chrono Forge world' })).toHaveAttribute(
+      'data-selection',
+      'agent:1',
+    );
+
+    act(() => {
+      controlledWorker.removeFirstAgent();
+    });
+
+    await waitFor(() => {
+      expect(inspector).toHaveValue('');
+      expect(
+        screen.queryByRole('article', { name: 'Selected map object' }),
+      ).not.toBeInTheDocument();
+      expect(screen.getByRole('img', { name: 'Generated Chrono Forge world' })).toHaveAttribute(
+        'data-selection',
+        'none',
+      );
+    });
   });
 
   it('refits overview framing on resize without discarding deliberate exploration', async () => {
