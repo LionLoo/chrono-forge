@@ -12,7 +12,10 @@ const appBinaryPath = path.join(
 
 export const config = {
   runner: 'local',
-  specs: ['./tests/e2e-desktop/**/*.spec.mjs'],
+  specs: [
+    './tests/e2e-desktop/focus-persistence.phase-1.e2e.spec.mjs',
+    './tests/e2e-desktop/focus-persistence.phase-2.e2e.spec.mjs',
+  ],
   maxInstances: 1,
   logLevel: 'warn',
   framework: 'mocha',
