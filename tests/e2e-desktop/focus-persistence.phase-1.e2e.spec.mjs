@@ -81,13 +81,12 @@ describe('native focus persistence phase 1', () => {
     const firstMapSelection = selectedMapValue;
 
     const mapHost = await $('.world-map-canvas');
-    const mapCanvas = await $('canvas[role="img"]');
-    await mapCanvas.waitForDisplayed();
+    await mapHost.waitForDisplayed();
     await mapHost.scrollIntoView({ block: 'center', inline: 'center' });
     await setMapSelectionValue('');
     const pointerDispatched = await browser.execute(() => {
       const host = document.querySelector('.world-map-canvas');
-      const canvas = host?.querySelector('canvas[role="img"]');
+      const canvas = host?.querySelector('canvas');
       if (!(host instanceof HTMLElement) || !(canvas instanceof HTMLElement)) {
         throw new Error('world map canvas is unavailable');
       }
@@ -176,10 +175,12 @@ describe('native focus persistence phase 1', () => {
     ).toBeLessThan(1);
     expect(await browser.execute(() => window.scrollY)).toBe(mapViewport.scrollY);
 
-    await mapCanvas.click();
-    expect(await browser.execute(() => document.activeElement?.matches('canvas[role="img"]'))).toBe(
-      true,
-    );
+    await mapHost.click();
+    expect(
+      await browser.execute(() =>
+        document.activeElement?.matches('.world-map-canvas[role="application"]'),
+      ),
+    ).toBe(true);
     await browser.keys(['ArrowRight']);
     await browser.waitUntil(
       async () => parseCameraReadout(await cameraReadout.getText()).x === afterWheel.x + 36,

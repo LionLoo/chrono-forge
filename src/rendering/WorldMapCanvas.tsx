@@ -3,6 +3,7 @@ import 'pixi.js/unsafe-eval';
 import { Application, Container, Graphics } from 'pixi.js';
 import {
   useEffect,
+  useId,
   useRef,
   useState,
   type KeyboardEvent as ReactKeyboardEvent,
@@ -1014,6 +1015,7 @@ export function WorldMapCanvas({
   reducedEffects = false,
   selection = null,
 }: WorldMapCanvasProps) {
+  const keyboardHelpId = useId();
   const hostRef = useRef<HTMLDivElement>(null);
   const sceneRef = useRef<PixiScene | null>(null);
   const cameraRef = useRef(camera);
@@ -1025,6 +1027,7 @@ export function WorldMapCanvas({
   const reducedEffectsRef = useRef(reducedEffects);
   const selectionRef = useRef(selection);
   const lastViewportSizeRef = useRef({ height: 0, width: 0 });
+  const [accessibleLabel, setAccessibleLabel] = useState('World map loading');
   const [renderAttempt, setRenderAttempt] = useState(0);
   const [renderError, setRenderError] = useState<string | null>(null);
   const [viewportRevision, setViewportRevision] = useState(0);
@@ -1142,8 +1145,7 @@ export function WorldMapCanvas({
           selectionGraphics,
         );
         application.stage.addChild(worldLayer);
-        application.canvas.setAttribute('role', 'img');
-        application.canvas.tabIndex = 0;
+        application.canvas.setAttribute('aria-hidden', 'true');
         host.appendChild(application.canvas);
         const scene: PixiScene = {
           agentGraphics,
@@ -1175,8 +1177,7 @@ export function WorldMapCanvas({
           reducedEffectsRef.current,
           cameraRef.current.zoom,
         );
-        application.canvas.setAttribute(
-          'aria-label',
+        setAccessibleLabel(
           `${model.era} world map, ${projectionRef.current.agentIds.length} visible agents, ${projectionRef.current.structureIds.length} structures, ${model.overlay.legend} overlay`,
         );
         host.dataset.detail = model.detailLevel;
@@ -1217,8 +1218,7 @@ export function WorldMapCanvas({
       reducedEffects,
       camera.zoom,
     );
-    scene.application.canvas.setAttribute(
-      'aria-label',
+    setAccessibleLabel(
       `${model.era} world map, ${projection.agentIds.length} visible agents, ${projection.structureIds.length} structures, ${model.overlay.legend} overlay`,
     );
     host.dataset.detail = model.detailLevel;
@@ -1227,6 +1227,7 @@ export function WorldMapCanvas({
   }, [camera, overlay, projection, reducedEffects, selection, viewportRevision]);
 
   const handlePointerDown = (event: ReactPointerEvent<HTMLDivElement>) => {
+    event.currentTarget.focus({ preventScroll: true });
     dragRef.current = {
       pointerId: event.pointerId,
       x: event.clientX,
@@ -1318,6 +1319,9 @@ export function WorldMapCanvas({
   return (
     <>
       <div
+        aria-describedby={keyboardHelpId}
+        aria-label={accessibleLabel}
+        aria-roledescription="interactive world map"
         className="world-map-canvas"
         data-effects={reducedEffects ? 'reduced' : 'full'}
         data-overlay={overlay}
@@ -1327,7 +1331,13 @@ export function WorldMapCanvas({
         onPointerMove={handlePointerMove}
         onPointerUp={handlePointerUp}
         ref={hostRef}
+        role="application"
+        tabIndex={0}
       />
+      <p className="visually-hidden" id={keyboardHelpId}>
+        Use arrow keys to pan. Use plus and minus to zoom. Press Enter to inspect the first visible
+        map object.
+      </p>
       {renderError === null ? null : (
         <div className="map-render-error" role="alert">
           <p>
