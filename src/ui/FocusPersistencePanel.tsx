@@ -43,6 +43,7 @@ interface WorkspaceData {
   readonly activeSave: LoadedSave;
   readonly history: readonly FocusSession[];
   readonly initialSession: FocusSession | null;
+  readonly initialOperationError: string | null;
   readonly offlineCatchUpApplied: boolean;
   /** Latest event in the exact generation that restored the focus session. */
   readonly recapBaselineEventId: number;
@@ -141,6 +142,7 @@ async function loadWorkspace(
     activeSave,
     history,
     initialSession: selectRestorableSession(activeSave),
+    initialOperationError: null,
     offlineCatchUpApplied,
     recapBaselineEventId: deserializeWorldSnapshot(activeSave.snapshot).eventLog.at(-1)?.id ?? 0,
     settings,
@@ -374,7 +376,9 @@ function FocusWorkspace({
         ? `Recovered generation ${initial.activeSave.recoveredGeneration} after rejecting a newer save.`
         : `Loaded ${initial.activeSave.name}.`,
   );
-  const [operationError, setOperationError] = useState<string | null>(null);
+  const [operationError, setOperationError] = useState<string | null>(
+    initial.initialOperationError,
+  );
   const operationQueueRef = useRef<Promise<void>>(Promise.resolve());
   const activeSaveRef = useRef(activeSave);
   const latestSessionRef = useRef<FocusSession | null>(initial.initialSession);
@@ -683,33 +687,49 @@ function FocusWorkspace({
   }, [activeSave.name, activeSave.slotId, focus, persistSession, saveWorld]);
 
   const replaceWithSlot = useCallback(
-    async (slotId: string): Promise<void> => {
-      const loaded = await runtime.gateway.loadSaveSlot(slotId);
-      if (loaded === null) throw new Error('The selected slot has no valid save.');
-      await simulation.loadSnapshot(loaded.snapshot);
-      const [loadedSettings, nextSlots, nextHistory] = await Promise.all([
-        runtime.gateway.loadSettings(),
-        runtime.gateway.listSaveSlots(),
-        runtime.gateway.listFocusSessions(loaded),
-      ]);
-      const nextSettings =
-        loadedSettings.activeSlotId === loaded.slotId
-          ? loadedSettings
-          : await runtime.gateway.saveSettings({
-              ...loadedSettings,
-              activeSlotId: loaded.slotId,
-            });
-      onReplaceWorkspace({
-        activeSave: loaded,
-        history: nextHistory,
-        initialSession: selectRestorableSession(loaded),
-        offlineCatchUpApplied: false,
-        recapBaselineEventId: deserializeWorldSnapshot(loaded.snapshot).eventLog.at(-1)?.id ?? 0,
-        settings: nextSettings,
-        slots: nextSlots,
-      });
-    },
-    [onReplaceWorkspace, runtime.gateway, simulation],
+    (slotId: string): Promise<void> =>
+      enqueue(async () => {
+        const loaded = await runtime.gateway.loadSaveSlot(slotId);
+        if (loaded === null) throw new Error('The selected slot has no valid save.');
+        const recapBaselineEventId =
+          deserializeWorldSnapshot(loaded.snapshot).eventLog.at(-1)?.id ?? 0;
+        const [loadedSettings, nextSlots, nextHistory] = await Promise.all([
+          runtime.gateway.loadSettings(),
+          runtime.gateway.listSaveSlots(),
+          runtime.gateway.listFocusSessions(loaded),
+        ]);
+
+        // No persistence read remains after this boundary. Once the Worker accepts the target,
+        // React must adopt the same slot even if saving the restart preference is unavailable.
+        await simulation.loadSnapshot(loaded.snapshot);
+        let nextSettings = loadedSettings;
+        let activationError: string | null = null;
+        if (loadedSettings.activeSlotId !== loaded.slotId) {
+          const selectedSettings = { ...loadedSettings, activeSlotId: loaded.slotId };
+          try {
+            nextSettings = await runtime.gateway.saveSettings(selectedSettings);
+          } catch (error) {
+            nextSettings = selectedSettings;
+            activationError =
+              error instanceof Error
+                ? error.message
+                : typeof error === 'string' && error.length > 0
+                  ? error
+                  : 'The active slot preference could not be saved.';
+          }
+        }
+        onReplaceWorkspace({
+          activeSave: loaded,
+          history: nextHistory,
+          initialSession: selectRestorableSession(loaded),
+          initialOperationError: activationError,
+          offlineCatchUpApplied: false,
+          recapBaselineEventId,
+          settings: nextSettings,
+          slots: nextSlots,
+        });
+      }),
+    [enqueue, onReplaceWorkspace, runtime.gateway, simulation],
   );
 
   const canSwitchWorld =
@@ -1324,7 +1344,7 @@ function FocusWorkspace({
       </div>
 
       <div className="persistence-status" aria-live="polite" role="status">
-        {operationError === null ? notice : `Save fault: ${operationError}`}
+        {operationError === null ? notice : `Archive fault: ${operationError}`}
       </div>
     </section>
   );

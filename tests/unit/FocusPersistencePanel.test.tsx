@@ -507,6 +507,224 @@ describe('FocusPersistencePanel offline progression', () => {
     expect(screen.getByText('Loaded Second world.')).toBeVisible();
   });
 
+  it('keeps Worker authority on the active slot when target-slot archive refresh fails', async () => {
+    const user = userEvent.setup();
+    const base = createInMemoryPersistenceGateway(() => 1_000);
+    const secondWorld = stepWorld(
+      createInitialWorld([5, 6, 7, 8], { width: 2, height: 2, chunkSize: 2 }),
+      42,
+    );
+    await base.commitSaveSlot('primary', 'Founding world', snapshot);
+    await base.commitSaveSlot('world-2', 'Second world', serializeWorldSnapshot(secondWorld));
+    await base.saveSettings({
+      ...DEFAULT_APP_SETTINGS,
+      activeSlotId: 'primary',
+      offlineProgressionEnabled: false,
+    });
+    let rejectSecondWorldHistory = false;
+    const gateway: PersistenceGateway = {
+      ...base,
+      async listFocusSessions(sourceSave) {
+        if (rejectSecondWorldHistory && sourceSave?.slotId === 'world-2') {
+          throw new Error('Injected target history failure');
+        }
+        return base.listFocusSessions(sourceSave);
+      },
+    };
+    const stateful = createStatefulSimulation();
+
+    render(
+      <FocusPersistencePanel
+        alerts={{ notifyCompletion: () => Promise.resolve() }}
+        clock={{ now: () => 1_000 }}
+        runtime={{ gateway, mode: 'browser-preview' }}
+        simulation={stateful.simulation}
+      />,
+    );
+
+    await screen.findByRole('button', { name: 'Start focus' });
+    expect(stateful.currentTick()).toBe(0);
+    rejectSecondWorldHistory = true;
+    await user.selectOptions(screen.getByRole('combobox', { name: 'Load local slot' }), 'world-2');
+
+    expect(await screen.findByText('Archive fault: Injected target history failure')).toBeVisible();
+    expect(screen.getByRole('combobox', { name: 'Load local slot' })).toHaveValue('primary');
+    expect(stateful.currentTick()).toBe(0);
+
+    await user.click(screen.getByRole('button', { name: 'Save now' }));
+    await waitFor(async () => {
+      const primary = await base.loadSaveSlot('primary');
+      expect(deserializeWorldSnapshot(primary!.snapshot).tick).toBe(0);
+    });
+  });
+
+  it('does not change the active-slot setting when the target Worker load fails', async () => {
+    const user = userEvent.setup();
+    const base = createInMemoryPersistenceGateway(() => 1_000);
+    const secondSnapshot = serializeWorldSnapshot(
+      stepWorld(createInitialWorld([5, 6, 7, 8], { width: 2, height: 2, chunkSize: 2 }), 42),
+    );
+    await base.commitSaveSlot('primary', 'Founding world', snapshot);
+    await base.commitSaveSlot('world-2', 'Second world', secondSnapshot);
+    await base.saveSettings({
+      ...DEFAULT_APP_SETTINGS,
+      activeSlotId: 'primary',
+      offlineProgressionEnabled: false,
+    });
+    const savedActiveSlots: (string | null)[] = [];
+    const gateway: PersistenceGateway = {
+      ...base,
+      async saveSettings(settings) {
+        savedActiveSlots.push(settings.activeSlotId);
+        return base.saveSettings(settings);
+      },
+    };
+    const stateful = createStatefulSimulation();
+    const loadSnapshot = stateful.simulation.loadSnapshot;
+    const simulation: WorldSimulationView = {
+      ...stateful.simulation,
+      loadSnapshot: vi.fn(async (savedSnapshot: string) => {
+        if (savedSnapshot === secondSnapshot) throw new Error('Injected target load failure');
+        await loadSnapshot(savedSnapshot);
+      }),
+    };
+
+    render(
+      <FocusPersistencePanel
+        alerts={{ notifyCompletion: () => Promise.resolve() }}
+        clock={{ now: () => 1_000 }}
+        runtime={{ gateway, mode: 'browser-preview' }}
+        simulation={simulation}
+      />,
+    );
+
+    await screen.findByRole('button', { name: 'Start focus' });
+    await user.selectOptions(screen.getByRole('combobox', { name: 'Load local slot' }), 'world-2');
+
+    expect(await screen.findByText('Archive fault: Injected target load failure')).toBeVisible();
+    expect(screen.getByRole('combobox', { name: 'Load local slot' })).toHaveValue('primary');
+    expect(stateful.currentTick()).toBe(0);
+    expect(savedActiveSlots).toStrictEqual([]);
+    expect((await base.loadSettings()).activeSlotId).toBe('primary');
+  });
+
+  it('adopts the loaded target safely when its active-slot preference write fails', async () => {
+    const user = userEvent.setup();
+    const base = createInMemoryPersistenceGateway(() => 1_000);
+    const secondSnapshot = serializeWorldSnapshot(
+      stepWorld(createInitialWorld([5, 6, 7, 8], { width: 2, height: 2, chunkSize: 2 }), 42),
+    );
+    await base.commitSaveSlot('primary', 'Founding world', snapshot);
+    await base.commitSaveSlot('world-2', 'Second world', secondSnapshot);
+    await base.saveSettings({
+      ...DEFAULT_APP_SETTINGS,
+      activeSlotId: 'primary',
+      offlineProgressionEnabled: false,
+    });
+    let rejectTargetPreference = false;
+    const gateway: PersistenceGateway = {
+      ...base,
+      async saveSettings(settings) {
+        if (rejectTargetPreference && settings.activeSlotId === 'world-2') {
+          throw new Error('Injected active preference failure');
+        }
+        return base.saveSettings(settings);
+      },
+    };
+    const stateful = createStatefulSimulation();
+
+    render(
+      <FocusPersistencePanel
+        alerts={{ notifyCompletion: () => Promise.resolve() }}
+        clock={{ now: () => 1_000 }}
+        runtime={{ gateway, mode: 'browser-preview' }}
+        simulation={stateful.simulation}
+      />,
+    );
+
+    await screen.findByRole('button', { name: 'Start focus' });
+    rejectTargetPreference = true;
+    await user.selectOptions(screen.getByRole('combobox', { name: 'Load local slot' }), 'world-2');
+
+    expect(
+      await screen.findByText('Archive fault: Injected active preference failure'),
+    ).toBeVisible();
+    expect(screen.getByRole('combobox', { name: 'Load local slot' })).toHaveValue('world-2');
+    expect(stateful.currentTick()).toBe(42);
+    expect((await base.loadSettings()).activeSlotId).toBe('primary');
+
+    await user.click(screen.getByRole('button', { name: 'Save now' }));
+    await waitFor(async () => {
+      const primary = await base.loadSaveSlot('primary');
+      const second = await base.loadSaveSlot('world-2');
+      expect(deserializeWorldSnapshot(primary!.snapshot).tick).toBe(0);
+      expect(deserializeWorldSnapshot(second!.snapshot).tick).toBe(42);
+    });
+  });
+
+  it('serializes rapid slot selections so the final choice owns Worker, UI, and settings', async () => {
+    const base = createInMemoryPersistenceGateway(() => 1_000);
+    const secondSnapshot = serializeWorldSnapshot(
+      stepWorld(createInitialWorld([5, 6, 7, 8], { width: 2, height: 2, chunkSize: 2 }), 42),
+    );
+    const thirdSnapshot = serializeWorldSnapshot(
+      stepWorld(createInitialWorld([9, 10, 11, 12], { width: 2, height: 2, chunkSize: 2 }), 84),
+    );
+    await base.commitSaveSlot('primary', 'Founding world', snapshot);
+    await base.commitSaveSlot('world-2', 'Second world', secondSnapshot);
+    await base.commitSaveSlot('world-3', 'Third world', thirdSnapshot);
+    await base.saveSettings({
+      ...DEFAULT_APP_SETTINGS,
+      activeSlotId: 'primary',
+      offlineProgressionEnabled: false,
+    });
+    let releaseSecondWorld!: () => void;
+    const secondWorldGate = new Promise<void>((resolve) => {
+      releaseSecondWorld = resolve;
+    });
+    const targetLoadOrder: string[] = [];
+    let targetLoadsInFlight = 0;
+    let maximumTargetLoadsInFlight = 0;
+    const gateway: PersistenceGateway = {
+      ...base,
+      async loadSaveSlot(slotId) {
+        if (slotId === 'primary') return base.loadSaveSlot(slotId);
+        targetLoadOrder.push(slotId);
+        targetLoadsInFlight += 1;
+        maximumTargetLoadsInFlight = Math.max(maximumTargetLoadsInFlight, targetLoadsInFlight);
+        if (slotId === 'world-2') await secondWorldGate;
+        const loaded = await base.loadSaveSlot(slotId);
+        targetLoadsInFlight -= 1;
+        return loaded;
+      },
+    };
+    const stateful = createStatefulSimulation();
+
+    render(
+      <FocusPersistencePanel
+        alerts={{ notifyCompletion: () => Promise.resolve() }}
+        clock={{ now: () => 1_000 }}
+        runtime={{ gateway, mode: 'browser-preview' }}
+        simulation={stateful.simulation}
+      />,
+    );
+
+    const slots = await screen.findByRole('combobox', { name: 'Load local slot' });
+    fireEvent.change(slots, { target: { value: 'world-2' } });
+    fireEvent.change(slots, { target: { value: 'world-3' } });
+    await act(async () => Promise.resolve());
+    expect(targetLoadOrder).toStrictEqual(['world-2']);
+    expect(maximumTargetLoadsInFlight).toBe(1);
+
+    releaseSecondWorld();
+    await screen.findByText('Loaded Third world.');
+    expect(targetLoadOrder).toStrictEqual(['world-2', 'world-3']);
+    expect(maximumTargetLoadsInFlight).toBe(1);
+    expect(screen.getByRole('combobox', { name: 'Load local slot' })).toHaveValue('world-3');
+    expect(stateful.currentTick()).toBe(84);
+    expect((await base.loadSettings()).activeSlotId).toBe('world-3');
+  });
+
   it('freezes an active focus session when the authoritative Worker faults', async () => {
     const user = userEvent.setup();
     let nowMs = 1_000;
@@ -788,7 +1006,7 @@ describe('FocusPersistencePanel offline progression', () => {
     await user.click(screen.getByText('Focus and accessibility settings'));
     await user.click(screen.getByRole('button', { name: 'Save settings' }));
 
-    expect(await screen.findByText('Save fault: native settings write failed')).toBeVisible();
+    expect(await screen.findByText('Archive fault: native settings write failed')).toBeVisible();
   });
 
   it('keeps focus history distinct across remounts at the same clock value', async () => {

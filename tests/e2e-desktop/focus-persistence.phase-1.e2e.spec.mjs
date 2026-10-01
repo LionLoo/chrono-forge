@@ -272,7 +272,7 @@ describe('native focus persistence phase 1', () => {
     await browser.waitUntil(
       async () => {
         const status = await $('.persistence-status').getText();
-        if (status.startsWith('Save fault:')) throw new Error(status);
+        if (status.startsWith('Archive fault:')) throw new Error(status);
         return status.includes('Settings saved locally.');
       },
       { timeoutMsg: 'reduced-effects setting did not persist' },
@@ -307,7 +307,7 @@ describe('native focus persistence phase 1', () => {
       await browser.waitUntil(
         async () => {
           lastSaveStatus = await $('.persistence-status').getText();
-          if (lastSaveStatus.startsWith('Save fault:')) throw new Error(lastSaveStatus);
+          if (lastSaveStatus.startsWith('Archive fault:')) throw new Error(lastSaveStatus);
           lastSessions = await browser.tauri.execute(({ core }) =>
             core.invoke('list_focus_sessions'),
           );
