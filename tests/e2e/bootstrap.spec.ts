@@ -149,6 +149,7 @@ test('society controls remain readable with reduced motion and 200% text', async
   await page.emulateMedia({ reducedMotion: 'reduce' });
   await page.goto(origin);
   await expect(page.locator('.simulation-status')).toContainText('Worker projection ready');
+  await expect(page.locator('.world-map-canvas')).toHaveAttribute('data-effects', 'reduced');
   await page.evaluate(() => {
     document.documentElement.style.fontSize = '200%';
   });

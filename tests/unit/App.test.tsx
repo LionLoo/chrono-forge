@@ -204,6 +204,69 @@ describe('deterministic world lab', () => {
     expect(within(society!).getByText('The founding world formed.')).toBeVisible();
   });
 
+  it('reduces map motion when the operating system requests reduced motion', async () => {
+    const preference = {
+      addEventListener: vi.fn(),
+      addListener: vi.fn(),
+      dispatchEvent: vi.fn(() => true),
+      matches: true,
+      media: '(prefers-reduced-motion: reduce)',
+      onchange: null,
+      removeEventListener: vi.fn(),
+      removeListener: vi.fn(),
+    } satisfies MediaQueryList;
+    vi.stubGlobal(
+      'matchMedia',
+      vi.fn(() => preference),
+    );
+    try {
+      render(<App persistence={createPreviewPersistence()} workerFactory={createRuntimeWorker} />);
+
+      expect(
+        await screen.findByText('Worker projection ready · autonomous world active'),
+      ).toBeVisible();
+      expect(screen.getByRole('img', { name: 'Generated Chrono Forge world' })).toHaveAttribute(
+        'data-effects',
+        'reduced',
+      );
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it('updates map motion when the operating system preference changes', async () => {
+    const preference = Object.assign(new EventTarget(), {
+      addListener: vi.fn(),
+      matches: false,
+      media: '(prefers-reduced-motion: reduce)',
+      onchange: null,
+      removeListener: vi.fn(),
+    }) satisfies MediaQueryList;
+    vi.stubGlobal(
+      'matchMedia',
+      vi.fn(() => preference),
+    );
+    try {
+      render(<App persistence={createPreviewPersistence()} workerFactory={createRuntimeWorker} />);
+
+      expect(
+        await screen.findByText('Worker projection ready · autonomous world active'),
+      ).toBeVisible();
+      const map = screen.getByRole('img', { name: 'Generated Chrono Forge world' });
+      expect(map).toHaveAttribute('data-effects', 'full');
+
+      act(() => {
+        const change = new Event('change');
+        Object.defineProperty(change, 'matches', { value: true });
+        preference.dispatchEvent(change);
+      });
+
+      expect(map).toHaveAttribute('data-effects', 'reduced');
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
   it('changes overlays and camera without exposing a direct world-advance control', async () => {
     const user = userEvent.setup();
     const playCue = vi.fn<GameSoundscape['playCue']>(() => Promise.resolve());

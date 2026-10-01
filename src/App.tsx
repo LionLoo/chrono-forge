@@ -140,6 +140,14 @@ function tileForSelection(
   return null;
 }
 
+function systemPrefersReducedMotion(): boolean {
+  return (
+    typeof window !== 'undefined' &&
+    typeof window.matchMedia === 'function' &&
+    window.matchMedia('(prefers-reduced-motion: reduce)').matches
+  );
+}
+
 export function App({ focusAlerts, focusClock, persistence, soundscape, workerFactory }: AppProps) {
   const simulation = useWorldSimulation(workerFactory);
   const completionAlerts = focusAlerts ?? getFocusAlerts();
@@ -152,7 +160,9 @@ export function App({ focusAlerts, focusClock, persistence, soundscape, workerFa
   const [overlay, setOverlay] = useState<WorldOverlay>('terrain');
   const [inspectionOpen, setInspectionOpen] = useState(false);
   const [mapSelection, setMapSelection] = useState<SelectableId | null>(null);
-  const [reducedEffects, setReducedEffects] = useState(false);
+  const [userReducedEffects, setUserReducedEffects] = useState(false);
+  const [systemReducedMotion, setSystemReducedMotion] = useState(systemPrefersReducedMotion);
+  const reducedEffects = userReducedEffects || systemReducedMotion;
   const [audioSettings, setAudioSettings] = useState<AppSettings>(DEFAULT_APP_SETTINGS);
   const [interventionPending, setInterventionPending] = useState(false);
   const [interventionStatus, setInterventionStatus] = useState<string | null>(null);
@@ -160,6 +170,16 @@ export function App({ focusAlerts, focusClock, persistence, soundscape, workerFa
     () => (simulation.frame === null ? null : deriveAtmosphereScene(simulation.frame)),
     [simulation.frame],
   );
+
+  useEffect(() => {
+    if (typeof window.matchMedia !== 'function') return;
+    const preference = window.matchMedia('(prefers-reduced-motion: reduce)');
+    const updatePreference = (event: MediaQueryListEvent) => {
+      setSystemReducedMotion(event.matches);
+    };
+    preference.addEventListener('change', updatePreference);
+    return () => preference.removeEventListener('change', updatePreference);
+  }, []);
 
   useEffect(() => {
     if (atmosphereScene === null) return;
@@ -527,7 +547,7 @@ export function App({ focusAlerts, focusClock, persistence, soundscape, workerFa
 
         <FocusPersistencePanel
           alerts={completionAlerts}
-          onReducedEffectsChange={setReducedEffects}
+          onReducedEffectsChange={setUserReducedEffects}
           onRevisitTarget={revisitFocusTarget}
           onSettingsChange={setAudioSettings}
           runtime={runtimePersistence}
