@@ -33,7 +33,6 @@ async function setMapSelectionValue(value) {
 
 describe('native focus persistence phase 1', () => {
   it('validates the initial native UI and persists a paused ten-second focus session through SQLite', async function () {
-    this.timeout(360_000);
     await $('#focus-title').waitForDisplayed();
     await $('span=SQLite archive').waitForDisplayed();
     for (const scale of [100, 150, 200]) {
@@ -346,5 +345,5 @@ describe('native focus persistence phase 1', () => {
       status: 'paused',
       focusedMs: 10_000,
     });
-  });
+  }).timeout(360_000);
 });
