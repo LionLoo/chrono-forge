@@ -5,6 +5,7 @@ import { vi } from 'vitest';
 import {
   DEFAULT_APP_SETTINGS,
   createInMemoryPersistenceGateway,
+  type AppSettings,
   type PersistenceGateway,
 } from '../../src/adapters/persistence';
 import { completeFocus, createIdleFocusState, startFocus } from '../../src/focus';
@@ -876,11 +877,192 @@ describe('FocusPersistencePanel offline progression', () => {
     await user.click(screen.getByRole('button', { name: 'Save now' }));
 
     releaseSecondWorld();
-    await screen.findByText('Loaded Second world.');
+    await waitFor(() =>
+      expect(screen.getByRole('combobox', { name: 'Load local slot' })).toHaveValue('world-2'),
+    );
     await waitFor(() => expect(committedSlots).toStrictEqual(['world-2']));
     expect(stateful.currentTick()).toBe(42);
     expect(deserializeWorldSnapshot((await base.loadSaveSlot('primary'))!.snapshot).tick).toBe(0);
     expect(deserializeWorldSnapshot((await base.loadSaveSlot('world-2'))!.snapshot).tick).toBe(42);
+  });
+
+  it('checkpoints accepted focus time before exporting the current world', async () => {
+    const user = userEvent.setup();
+    let nowMs = 1_000;
+    const gateway = createInMemoryPersistenceGateway(() => nowMs);
+    await gateway.commitSaveSlot('primary', 'Founding world', snapshot);
+    await gateway.saveSettings({
+      ...DEFAULT_APP_SETTINGS,
+      activeSlotId: 'primary',
+      offlineProgressionEnabled: false,
+    });
+    const stateful = createStatefulSimulation();
+
+    render(
+      <FocusPersistencePanel
+        alerts={{ notifyCompletion: () => Promise.resolve() }}
+        clock={{ now: () => nowMs }}
+        runtime={{ gateway, mode: 'browser-preview' }}
+        simulation={stateful.simulation}
+      />,
+    );
+
+    await user.click(await screen.findByRole('button', { name: 'Start focus' }));
+    await screen.findByText('Session saved.');
+    nowMs += 1_000;
+    await user.click(screen.getByText('Import or export package'));
+    await user.click(screen.getByRole('button', { name: 'Export' }));
+    await screen.findByText('Export package refreshed from the current world.');
+
+    const savePackage = screen.getByRole<HTMLTextAreaElement>('textbox', {
+      name: 'Export package',
+    }).value;
+    const exported = JSON.parse(savePackage) as { snapshot: string };
+    expect(deserializeWorldSnapshot(exported.snapshot).tick).toBe(10);
+    const persisted = await gateway.loadSaveSlot('primary');
+    expect(persisted?.focusSession).toMatchObject({
+      focusedMs: 1_000,
+      issuedSimulationTicks: 10,
+      status: 'active',
+    });
+  });
+
+  it('queues settings behind a slot switch and preserves the final active world', async () => {
+    const user = userEvent.setup();
+    const base = createInMemoryPersistenceGateway(() => 1_000);
+    const secondSnapshot = serializeWorldSnapshot(
+      stepWorld(createInitialWorld([5, 6, 7, 8], { width: 2, height: 2, chunkSize: 2 }), 42),
+    );
+    await base.commitSaveSlot('primary', 'Founding world', snapshot);
+    await base.commitSaveSlot('world-2', 'Second world', secondSnapshot);
+    await base.saveSettings({
+      ...DEFAULT_APP_SETTINGS,
+      activeSlotId: 'primary',
+      offlineProgressionEnabled: false,
+    });
+    let releaseSecondWorld!: () => void;
+    const secondWorldGate = new Promise<void>((resolve) => {
+      releaseSecondWorld = resolve;
+    });
+    let secondWorldLoadStarted = false;
+    const runtimeSettingsWrites: AppSettings[] = [];
+    const gateway: PersistenceGateway = {
+      ...base,
+      async loadSaveSlot(slotId) {
+        if (slotId === 'world-2') {
+          secondWorldLoadStarted = true;
+          await secondWorldGate;
+        }
+        return base.loadSaveSlot(slotId);
+      },
+      async saveSettings(nextSettings) {
+        runtimeSettingsWrites.push(nextSettings);
+        return base.saveSettings(nextSettings);
+      },
+    };
+
+    render(
+      <FocusPersistencePanel
+        alerts={{ notifyCompletion: () => Promise.resolve() }}
+        clock={{ now: () => 1_000 }}
+        runtime={{ gateway, mode: 'browser-preview' }}
+        simulation={createStatefulSimulation().simulation}
+      />,
+    );
+
+    const slots = await screen.findByRole('combobox', { name: 'Load local slot' });
+    await user.click(screen.getByText('Focus and accessibility settings'));
+    await user.click(screen.getByRole('checkbox', { name: 'Calm focus mode' }));
+    fireEvent.change(slots, { target: { value: 'world-2' } });
+    await waitFor(() => expect(secondWorldLoadStarted).toBe(true));
+    await user.click(screen.getByRole('button', { name: 'Save settings' }));
+    await act(async () => Promise.resolve());
+    expect(runtimeSettingsWrites).toStrictEqual([]);
+
+    releaseSecondWorld();
+    await screen.findByText('Settings saved locally.');
+    expect(screen.getByRole('combobox', { name: 'Load local slot' })).toHaveValue('world-2');
+    expect(document.documentElement).toHaveClass('calm-mode');
+    await expect(base.loadSettings()).resolves.toMatchObject({
+      activeSlotId: 'world-2',
+      calmMode: true,
+    });
+  });
+
+  it('publishes an export queued by an outgoing workspace into the remounted target', async () => {
+    const user = userEvent.setup();
+    const base = createInMemoryPersistenceGateway(() => 1_000);
+    const secondSnapshot = serializeWorldSnapshot(
+      stepWorld(createInitialWorld([5, 6, 7, 8], { width: 2, height: 2, chunkSize: 2 }), 42),
+    );
+    await base.commitSaveSlot('primary', 'Founding world', snapshot);
+    await base.commitSaveSlot('world-2', 'Second world', secondSnapshot);
+    await base.saveSettings({
+      ...DEFAULT_APP_SETTINGS,
+      activeSlotId: 'primary',
+      offlineProgressionEnabled: false,
+    });
+    let releaseSecondWorld!: () => void;
+    const secondWorldGate = new Promise<void>((resolve) => {
+      releaseSecondWorld = resolve;
+    });
+    let releaseTargetPreference!: () => void;
+    const targetPreferenceGate = new Promise<void>((resolve) => {
+      releaseTargetPreference = resolve;
+    });
+    let secondWorldLoadStarted = false;
+    let targetPreferenceStarted = false;
+    const exportedSlots: string[] = [];
+    const gateway: PersistenceGateway = {
+      ...base,
+      async exportSaveSlot(slotId) {
+        exportedSlots.push(slotId);
+        return base.exportSaveSlot(slotId);
+      },
+      async loadSaveSlot(slotId) {
+        if (slotId === 'world-2') {
+          secondWorldLoadStarted = true;
+          await secondWorldGate;
+        }
+        return base.loadSaveSlot(slotId);
+      },
+      async saveSettings(nextSettings) {
+        if (nextSettings.activeSlotId === 'world-2') {
+          targetPreferenceStarted = true;
+          await targetPreferenceGate;
+        }
+        return base.saveSettings(nextSettings);
+      },
+    };
+
+    render(
+      <FocusPersistencePanel
+        alerts={{ notifyCompletion: () => Promise.resolve() }}
+        clock={{ now: () => 1_000 }}
+        runtime={{ gateway, mode: 'browser-preview' }}
+        simulation={createStatefulSimulation().simulation}
+      />,
+    );
+
+    const slots = await screen.findByRole('combobox', { name: 'Load local slot' });
+    fireEvent.change(slots, { target: { value: 'world-2' } });
+    await waitFor(() => expect(secondWorldLoadStarted).toBe(true));
+    await user.click(screen.getByRole('button', { name: 'Export' }));
+    releaseSecondWorld();
+    await screen.findByText('Loaded Second world.');
+    await waitFor(() => expect(targetPreferenceStarted).toBe(true));
+    expect(exportedSlots).toStrictEqual([]);
+
+    releaseTargetPreference();
+    await screen.findByText('Export package refreshed from the current world.');
+    expect(exportedSlots).toStrictEqual(['world-2']);
+    await user.click(screen.getByText('Import or export package'));
+    const savePackage = screen.getByRole<HTMLTextAreaElement>('textbox', {
+      name: 'Export package',
+    }).value;
+    const exported = JSON.parse(savePackage) as { slotId: string; snapshot: string };
+    expect(exported.slotId).toBe('world-2');
+    expect(deserializeWorldSnapshot(exported.snapshot).tick).toBe(42);
   });
 
   it('keeps Save now behind rapid slot switches across keyed workspace replacements', async () => {
@@ -1101,6 +1283,62 @@ describe('FocusPersistencePanel offline progression', () => {
     expect(screen.getByRole('timer', { name: 'Focus time remaining' })).toHaveTextContent(
       timerBeforeFault ?? '',
     );
+  });
+
+  it('exports the last durable checkpoint without consulting a faulted Worker', async () => {
+    const user = userEvent.setup();
+    let nowMs = 1_000;
+    const gateway = createInMemoryPersistenceGateway(() => nowMs);
+    const stateful = createStatefulSimulation();
+    const alerts = { notifyCompletion: () => Promise.resolve() };
+    const clock = { now: () => nowMs };
+    const runtime = { gateway, mode: 'browser-preview' } as const;
+    const rendered = render(
+      <FocusPersistencePanel
+        alerts={alerts}
+        clock={clock}
+        runtime={runtime}
+        simulation={stateful.simulation}
+      />,
+    );
+
+    await user.click(await screen.findByRole('button', { name: 'Start focus' }));
+    nowMs += 1_000;
+    await user.click(screen.getByRole('button', { name: 'Save now' }));
+    await screen.findByText('World saved manually.');
+    const durable = await gateway.loadSaveSlot('primary');
+    expect(deserializeWorldSnapshot(durable!.snapshot).tick).toBe(10);
+    const saveRequestsBeforeFault = vi.mocked(stateful.simulation.requestSave).mock.calls.length;
+    const checkpointRequestsBeforeFault = vi.mocked(stateful.simulation.requestFocusCheckpoint).mock
+      .calls.length;
+
+    rendered.rerender(
+      <FocusPersistencePanel
+        alerts={alerts}
+        clock={clock}
+        runtime={runtime}
+        simulation={{
+          ...stateful.simulation,
+          error: 'Injected fatal Worker fault',
+          status: 'faulted',
+        }}
+      />,
+    );
+
+    await user.click(screen.getByRole('button', { name: 'Export' }));
+    await screen.findByText('Export package prepared from the last valid local checkpoint.');
+    expect(vi.mocked(stateful.simulation.requestSave)).toHaveBeenCalledTimes(
+      saveRequestsBeforeFault,
+    );
+    expect(vi.mocked(stateful.simulation.requestFocusCheckpoint)).toHaveBeenCalledTimes(
+      checkpointRequestsBeforeFault,
+    );
+    await user.click(screen.getByText('Import or export package'));
+    const savePackage = screen.getByRole<HTMLTextAreaElement>('textbox', {
+      name: 'Export package',
+    }).value;
+    const exported = JSON.parse(savePackage) as { snapshot: string };
+    expect(exported.snapshot).toBe(durable!.snapshot);
   });
 
   it('scopes statistics and recaps to the active world slot', async () => {
@@ -1327,7 +1565,9 @@ describe('FocusPersistencePanel offline progression', () => {
     await user.click(screen.getByText('Focus and accessibility settings'));
     await user.click(screen.getByRole('button', { name: 'Save settings' }));
 
-    expect(await screen.findByText('Archive fault: native settings write failed')).toBeVisible();
+    expect(await screen.findByRole('alert')).toHaveTextContent(
+      'Archive fault: native settings write failed',
+    );
   });
 
   it('keeps focus history distinct across remounts at the same clock value', async () => {

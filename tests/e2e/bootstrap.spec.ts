@@ -167,9 +167,10 @@ test('society controls remain readable with reduced motion and 200% text', async
   );
 });
 
-test('primary world controls remain keyboard operable and unclipped from 100% through 200%', async ({
+test('primary world, archive, and settings controls remain keyboard operable and unclipped from 100% through 200%', async ({
   page,
 }) => {
+  await page.emulateMedia({ reducedMotion: 'reduce' });
   await page.goto(origin);
   await expect(page.locator('.simulation-status')).toContainText('Worker projection ready');
 
@@ -198,6 +199,9 @@ test('primary world controls remain keyboard operable and unclipped from 100% th
   await expect(page.getByLabel('Camera position')).toContainText('X 60');
   await page.keyboard.press('Shift+=');
   await expect(page.getByLabel('Camera position')).toContainText('2.07×');
+  await page.getByRole('button', { name: 'Overview' }).focus();
+  await page.keyboard.press('Enter');
+  await interactiveMap.focus();
   await page.keyboard.press('Enter');
   await expect(page.getByRole('article', { name: 'Selected map object' })).toBeVisible();
 
@@ -227,6 +231,7 @@ test('primary world controls remain keyboard operable and unclipped from 100% th
   await expect(page.getByRole('heading', { name: 'Settlement and society' })).toBeVisible();
   await page.getByRole('button', { name: 'Close world inspection' }).focus();
   await page.keyboard.press('Enter');
+  await page.setViewportSize({ width: 375, height: 812 });
 
   const settings = page.getByText('Focus and accessibility settings', { exact: true });
   await settings.focus();
@@ -254,6 +259,23 @@ test('primary world controls remain keyboard operable and unclipped from 100% th
   await page.keyboard.press('Space');
   await expect(page.getByRole('button', { name: 'Preview audio' })).toBeEnabled();
 
+  const saveSettings = page.getByRole('button', { name: 'Save settings' });
+  await saveSettings.focus();
+  await page.keyboard.press('Enter');
+  await expect(page.getByText('Settings saved locally.')).toBeVisible();
+
+  const exportWorld = page.getByRole('button', { name: 'Export' });
+  await exportWorld.focus();
+  await page.keyboard.press('Enter');
+  await expect(page.getByText('Export package refreshed from the current world.')).toBeVisible();
+  const transferPackage = page.getByText('Import or export package', { exact: true });
+  await transferPackage.focus();
+  await expect(transferPackage).toHaveCSS('outline-style', 'solid');
+  await page.keyboard.press('Enter');
+  await expect(page.getByRole('textbox', { name: 'Export package' })).toHaveValue(
+    /"format":"chrono-forge-save-export"/,
+  );
+
   const calmMode = page.getByRole('checkbox', { name: 'Calm focus mode' });
   await calmMode.focus();
   await page.keyboard.press('Space');
@@ -269,6 +291,7 @@ test('primary world controls remain keyboard operable and unclipped from 100% th
     await expect(page.getByRole('button', { name: 'Close world inspection' })).toBeVisible();
     await expect(page.getByRole('combobox', { name: 'Inspect person' })).toBeVisible();
     await expect(page.getByRole('button', { name: 'Start focus' })).toBeVisible();
+    await expect(page.getByRole('textbox', { name: 'Export package' })).toBeVisible();
     expect(
       await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth),
     ).toBe(true);

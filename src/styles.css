@@ -44,6 +44,7 @@ button,
 a,
 input,
 select,
+summary,
 textarea {
   font: inherit;
 }
@@ -56,6 +57,7 @@ a:focus-visible,
 button:focus-visible,
 input:focus-visible,
 select:focus-visible,
+summary:focus-visible,
 textarea:focus-visible,
 [tabindex]:focus-visible {
   outline: 3px solid #f3c96d;

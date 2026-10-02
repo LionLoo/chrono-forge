@@ -56,8 +56,14 @@ type OperationEnqueuer = <Result>(operation: () => Promise<Result>) => Promise<R
 type WorkspaceRefUpdater = (update: (current: WorkspaceData) => WorkspaceData) => void;
 
 interface WorkspaceOperationError {
-  readonly kind: 'active-preference' | 'focus-session-blocked';
+  readonly kind:
+    'active-preference' | 'archive-operation' | 'focus-session-blocked' | 'settings-write';
   readonly message: string;
+  readonly slotId: string;
+}
+
+interface PublishedExport {
+  readonly savePackage: string;
   readonly slotId: string;
 }
 
@@ -211,6 +217,17 @@ function focusHasEnded(session: FocusSession): boolean {
   return rehydrateFocusState(JSON.parse(session.stateJson) as unknown).focusEndedAtEpochMs !== null;
 }
 
+function workspaceNotice(workspace: WorkspaceData): string {
+  return (
+    workspace.initialNotice ??
+    (workspace.offlineCatchUpApplied
+      ? 'Applied bounded offline progression.'
+      : workspace.activeSave.recoveredFromCorruption
+        ? `Recovered generation ${workspace.activeSave.recoveredGeneration} after rejecting a newer save.`
+        : `Loaded ${workspace.activeSave.name}.`)
+  );
+}
+
 export function FocusPersistencePanel({
   alerts,
   clock = systemFocusClock,
@@ -225,6 +242,8 @@ export function FocusPersistencePanel({
   const currentWorkspaceRef = useRef<WorkspaceData | null>(null);
   const operationQueueRef = useRef<Promise<void>>(Promise.resolve());
   const [workspace, setWorkspace] = useState<WorkspaceData | null>(null);
+  const [publishedExport, setPublishedExport] = useState<PublishedExport | null>(null);
+  const [notice, setNotice] = useState('');
   const [workspaceOperationErrors, setWorkspaceOperationErrors] = useState<
     readonly WorkspaceOperationError[]
   >([]);
@@ -258,12 +277,10 @@ export function FocusPersistencePanel({
     });
     void bootstrapPromiseRef.current.then(
       (loaded) => {
-        if (subscribed) {
-          setWorkspace((current) => {
-            if (current !== null) return current;
-            currentWorkspaceRef.current = loaded;
-            return loaded;
-          });
+        if (subscribed && currentWorkspaceRef.current === null) {
+          currentWorkspaceRef.current = loaded;
+          setNotice(workspaceNotice(loaded));
+          setWorkspace(loaded);
         }
       },
       (error: unknown) => {
@@ -290,6 +307,8 @@ export function FocusPersistencePanel({
 
   const replaceWorkspace = useCallback((next: WorkspaceData) => {
     currentWorkspaceRef.current = next;
+    setPublishedExport((current) => (current?.slotId === next.activeSave.slotId ? current : null));
+    setNotice(workspaceNotice(next));
     setWorkspaceOperationErrors([]);
     setWorkspace(next);
     setWorkspaceRevision((current) => current + 1);
@@ -334,6 +353,8 @@ export function FocusPersistencePanel({
       });
       bootstrapPromiseRef.current = Promise.resolve(recoveredWorkspace);
       currentWorkspaceRef.current = recoveredWorkspace;
+      setPublishedExport(null);
+      setNotice(workspaceNotice(recoveredWorkspace));
       setWorkspace(recoveredWorkspace);
       setBootstrapError(null);
       setWorkspaceRevision((current) => current + 1);
@@ -380,10 +401,16 @@ export function FocusPersistencePanel({
       clearWorkspaceOperationError={clearWorkspaceOperationError}
       clock={clock}
       enqueue={enqueue}
+      exportPackage={
+        publishedExport?.slotId === workspace.activeSave.slotId ? publishedExport.savePackage : ''
+      }
       externalOperationErrors={workspaceOperationErrors}
       getCurrentWorkspace={getCurrentWorkspace}
       initial={workspace}
       key={`${workspace.activeSave.slotId}-${workspaceRevision}`}
+      notice={notice}
+      onExportPackageChange={(slotId, savePackage) => setPublishedExport({ savePackage, slotId })}
+      onNoticeChange={setNotice}
       onReplaceWorkspace={replaceWorkspace}
       reportWorkspaceOperationError={reportWorkspaceOperationError}
       runtime={runtime}
@@ -405,9 +432,13 @@ interface FocusWorkspaceProps {
   ) => void;
   readonly clock: FocusClock;
   readonly enqueue: OperationEnqueuer;
+  readonly exportPackage: string;
   readonly externalOperationErrors: readonly WorkspaceOperationError[];
   readonly getCurrentWorkspace: () => WorkspaceData | null;
   readonly initial: WorkspaceData;
+  readonly notice: string;
+  readonly onExportPackageChange: (slotId: string, savePackage: string) => void;
+  readonly onNoticeChange: (notice: string) => void;
   readonly onReducedEffectsChange?: (reduced: boolean) => void;
   readonly onRevisitTarget?: (target: FocusRevisitTarget) => void;
   readonly onSettingsChange?: (settings: AppSettings) => void;
@@ -428,9 +459,13 @@ function FocusWorkspace({
   clearWorkspaceOperationError,
   clock,
   enqueue,
+  exportPackage,
   externalOperationErrors,
   getCurrentWorkspace,
   initial,
+  notice,
+  onExportPackageChange,
+  onNoticeChange: setNotice,
   onReducedEffectsChange,
   onRevisitTarget,
   onSettingsChange,
@@ -453,16 +488,7 @@ function FocusWorkspace({
   );
   const [slotIdDraft, setSlotIdDraft] = useState('world-2');
   const [slotNameDraft, setSlotNameDraft] = useState('Second world');
-  const [exportPackage, setExportPackage] = useState('');
   const [importPackage, setImportPackage] = useState('');
-  const [notice, setNotice] = useState(
-    initial.initialNotice ??
-      (initial.offlineCatchUpApplied
-        ? 'Applied bounded offline progression.'
-        : initial.activeSave.recoveredFromCorruption
-          ? `Recovered generation ${initial.activeSave.recoveredGeneration} after rejecting a newer save.`
-          : `Loaded ${initial.activeSave.name}.`),
-  );
   const [operationError, setOperationError] = useState<string | null>(
     initial.initialOperationError,
   );
@@ -661,7 +687,15 @@ function FocusWorkspace({
         throw error;
       }
     },
-    [alerts, getCurrentWorkspace, runtime.gateway, settings, simulation, updateArchiveState],
+    [
+      alerts,
+      getCurrentWorkspace,
+      runtime.gateway,
+      setNotice,
+      settings,
+      simulation,
+      updateArchiveState,
+    ],
   );
 
   const persistSession = useCallback(
@@ -823,13 +857,8 @@ function FocusWorkspace({
     [enqueue, getCurrentWorkspace, onReplaceWorkspace, runtime.gateway, simulation],
   );
 
-  const saveCurrentWorld = useCallback(async (): Promise<void> => {
-    focus.checkpoint();
-    if (autosaveTimerRef.current !== null) {
-      window.clearTimeout(autosaveTimerRef.current);
-      autosaveTimerRef.current = null;
-    }
-    await enqueue(async () => {
+  const persistCurrentWorld = useCallback(
+    async (reason: string): Promise<void> => {
       const currentWorkspace = getCurrentWorkspace();
       if (
         currentWorkspace !== null &&
@@ -839,25 +868,147 @@ function FocusWorkspace({
       }
       const latest = latestSessionRef.current;
       if (latest !== null) {
-        await persistSessionNow(latest, 'World saved manually.');
+        await persistSessionNow(latest, reason);
         return;
       }
       const slot = activeSaveRef.current;
       const snapshot = await simulation.requestSave();
       const committed = await runtime.gateway.commitSaveSlot(slot.slotId, slot.name, snapshot);
       await updateArchiveState(committed);
-      setNotice('World saved manually.');
+      setNotice(reason);
+    },
+    [
+      adoptWorkspaceRefs,
+      getCurrentWorkspace,
+      persistSessionNow,
+      runtime.gateway,
+      setNotice,
+      simulation,
+      updateArchiveState,
+    ],
+  );
+
+  const checkpointFocusForArchiveOperation = useCallback((): void => {
+    focus.checkpoint();
+    if (autosaveTimerRef.current !== null) {
+      window.clearTimeout(autosaveTimerRef.current);
+      autosaveTimerRef.current = null;
+    }
+  }, [focus]);
+
+  const saveCurrentWorld = useCallback(async (): Promise<void> => {
+    checkpointFocusForArchiveOperation();
+    await enqueue(() => persistCurrentWorld('World saved manually.'));
+  }, [checkpointFocusForArchiveOperation, enqueue, persistCurrentWorld]);
+
+  const exportCurrentWorld = useCallback(async (): Promise<void> => {
+    if (!focusFrozen) checkpointFocusForArchiveOperation();
+    await enqueue(async () => {
+      try {
+        if (!focusFrozen) {
+          await persistCurrentWorld('World saved before export.');
+        } else {
+          const currentWorkspace = getCurrentWorkspace();
+          if (
+            currentWorkspace !== null &&
+            currentWorkspace.activeSave.slotId !== activeSaveRef.current.slotId
+          ) {
+            adoptWorkspaceRefs(currentWorkspace);
+          }
+        }
+        const currentWorkspace = getCurrentWorkspace();
+        if (currentWorkspace === null) throw new Error('The active workspace is unavailable.');
+        const slotId = currentWorkspace.activeSave.slotId;
+        const savePackage = await runtime.gateway.exportSaveSlot(slotId);
+        onExportPackageChange(slotId, savePackage);
+        clearWorkspaceOperationError(slotId, 'archive-operation');
+        setNotice(
+          focusFrozen
+            ? 'Export package prepared from the last valid local checkpoint.'
+            : 'Export package refreshed from the current world.',
+        );
+      } catch (error) {
+        const currentWorkspace = getCurrentWorkspace();
+        if (currentWorkspace !== null) {
+          const message =
+            error instanceof Error
+              ? error.message
+              : typeof error === 'string' && error.length > 0
+                ? error
+                : 'The export could not be prepared.';
+          reportWorkspaceOperationError(
+            currentWorkspace.activeSave.slotId,
+            message,
+            'archive-operation',
+          );
+        }
+        throw error;
+      }
     });
   }, [
     adoptWorkspaceRefs,
+    checkpointFocusForArchiveOperation,
+    clearWorkspaceOperationError,
     enqueue,
-    focus,
+    focusFrozen,
     getCurrentWorkspace,
-    persistSessionNow,
+    onExportPackageChange,
+    persistCurrentWorld,
+    reportWorkspaceOperationError,
     runtime.gateway,
-    simulation,
-    updateArchiveState,
+    setNotice,
   ]);
+
+  const saveCurrentSettings = useCallback(
+    (draft: AppSettings, originatingSlotId: string): Promise<void> =>
+      enqueue(async () => {
+        const currentWorkspace = getCurrentWorkspace();
+        if (currentWorkspace === null) throw new Error('The active workspace is unavailable.');
+        const slotId = currentWorkspace.activeSave.slotId;
+        try {
+          const saved = await runtime.gateway.saveSettings({
+            ...draft,
+            activeSlotId: slotId,
+          });
+          const nextWorkspace = {
+            ...currentWorkspace,
+            initialNotice: 'Settings saved locally.',
+            initialOperationError: null,
+            settings: saved,
+          };
+          clearWorkspaceOperationError(slotId, 'active-preference');
+          clearWorkspaceOperationError(slotId, 'settings-write');
+          if (slotId !== originatingSlotId) {
+            onReplaceWorkspace(nextWorkspace);
+            return;
+          }
+          setSettings(saved);
+          updateCurrentWorkspaceRef((current) =>
+            current.activeSave.slotId === slotId ? nextWorkspace : current,
+          );
+          setNotice('Settings saved locally.');
+        } catch (error) {
+          const message =
+            error instanceof Error
+              ? error.message
+              : typeof error === 'string' && error.length > 0
+                ? error
+                : 'Settings could not be saved.';
+          reportWorkspaceOperationError(slotId, message, 'settings-write');
+          throw error;
+        }
+      }),
+    [
+      clearWorkspaceOperationError,
+      enqueue,
+      getCurrentWorkspace,
+      onReplaceWorkspace,
+      reportWorkspaceOperationError,
+      runtime.gateway,
+      setNotice,
+      updateCurrentWorkspaceRef,
+    ],
+  );
 
   const replaceWithSlot = useCallback(
     (slotId: string): Promise<void> =>
@@ -1239,15 +1390,7 @@ function FocusWorkspace({
             >
               Save now
             </button>
-            <button
-              onClick={() =>
-                void runOperation(async () => {
-                  setExportPackage(await runtime.gateway.exportSaveSlot(activeSave.slotId));
-                  setNotice('Export package ready to copy.');
-                })
-              }
-              type="button"
-            >
+            <button onClick={() => void runOperation(exportCurrentWorld)} type="button">
               Export
             </button>
           </div>
@@ -1447,22 +1590,7 @@ function FocusWorkspace({
           <button
             disabled={!settingsAreValid}
             onClick={() =>
-              void runOperation(async () => {
-                const saved = await runtime.gateway.saveSettings(settings);
-                setSettings(saved);
-                const slotId = activeSaveRef.current.slotId;
-                updateCurrentWorkspaceRef((current) =>
-                  current.activeSave.slotId === slotId
-                    ? {
-                        ...current,
-                        initialOperationError: null,
-                        settings: saved,
-                      }
-                    : current,
-                );
-                clearWorkspaceOperationError(slotId, 'active-preference');
-                setNotice('Settings saved locally.');
-              })
+              void runOperation(() => saveCurrentSettings(settings, activeSaveRef.current.slotId))
             }
             type="button"
           >
@@ -1552,7 +1680,11 @@ function FocusWorkspace({
         </section>
       </div>
 
-      <div className="persistence-status" aria-live="polite" role="status">
+      <div
+        className="persistence-status"
+        aria-live={visibleOperationError === null ? 'polite' : 'assertive'}
+        role={visibleOperationError === null ? 'status' : 'alert'}
+      >
         {visibleOperationError === null ? notice : `Archive fault: ${visibleOperationError}`}
       </div>
     </section>

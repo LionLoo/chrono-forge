@@ -442,6 +442,7 @@ describe('deterministic world lab', () => {
       />,
     );
     expect(await screen.findByRole('img', { name: 'Generated Chrono Forge world' })).toBeVisible();
+    expect(await screen.findByRole('button', { name: 'Start focus' })).toBeEnabled();
 
     act(() => controlledWorker.fail());
 
@@ -595,7 +596,7 @@ describe('deterministic world lab', () => {
     });
 
     await user.click(screen.getByRole('button', { name: 'Export' }));
-    await screen.findByText('Export package ready to copy.');
+    await screen.findByText('Export package refreshed from the current world.');
     await user.click(screen.getByText('Import or export package'));
     const exported = screen.getByRole('textbox', { name: 'Export package' });
     if (!(exported instanceof HTMLTextAreaElement)) throw new TypeError('Expected export textarea');
@@ -682,7 +683,7 @@ describe('deterministic world lab', () => {
     await user.click(screen.getByRole('button', { name: 'Save now' }));
     await screen.findByText('World saved manually.');
     await user.click(screen.getByRole('button', { name: 'Export' }));
-    await screen.findByText('Export package ready to copy.');
+    await screen.findByText('Export package refreshed from the current world.');
     await user.click(screen.getByText('Import or export package'));
     const exported = screen.getByRole('textbox', { name: 'Export package' });
     const imported = screen.getByRole('textbox', { name: 'Import package' });
