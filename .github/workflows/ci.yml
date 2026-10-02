@@ -46,7 +46,7 @@ jobs:
 
   windows-native:
     name: Windows native tests and installer
-    runs-on: windows-2022
+    runs-on: windows-latest
     timeout-minutes: 60
     steps:
       - name: Check out repository

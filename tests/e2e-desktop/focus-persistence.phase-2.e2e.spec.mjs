@@ -37,9 +37,13 @@ describe('native focus persistence phase 2', () => {
     await $('button=Resume').click();
     await advanceControlledClock(50_000);
     await $('button=Complete focus').click();
-    expect(await (await $('h4=Latest factual recap')).isDisplayed()).toBe(true);
-    expect(await (await $('.persistence-status')).getText()).toContain(
-      'Session recorded with a factual recap.',
+    await $('h4=Latest factual recap').waitForDisplayed();
+    await browser.waitUntil(
+      async () =>
+        (await $('.persistence-status').getText()).includes(
+          'Session recorded with a factual recap.',
+        ),
+      { timeoutMsg: 'completed focus session did not publish its factual recap' },
     );
 
     const allCompletedSessions = await browser.tauri.execute(({ core }) =>
