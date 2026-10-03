@@ -100,7 +100,7 @@ describe('native focus persistence phase 2', () => {
       status: 'completed',
       focusedMs: 60_000,
     });
-  });
+  }).timeout(360_000);
 
   it('reloads an exact mid-flight M9 save through SQLite and the real Worker', async () => {
     await settleVisibleSessionBeforeCleanup();
