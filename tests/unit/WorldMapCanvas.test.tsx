@@ -68,6 +68,9 @@ const pixiMocks = vi.hoisted(() => {
     rejectInitialization(message: string) {
       initialize = () => Promise.reject(new Error(message));
     },
+    allowInitialization() {
+      initialize = () => Promise.resolve();
+    },
     deferInitialization() {
       let resolve!: () => void;
       initialize = () =>
@@ -130,7 +133,7 @@ describe('Pixi world projection', () => {
     );
 
     await waitFor(() => {
-      expect(view.getByRole('img', { name: /founding world map/ })).toBeVisible();
+      expect(view.getByRole('application', { name: /founding world map/ })).toBeVisible();
     });
     const graphics = pixiMocks.graphics[0];
     const worldLayer = pixiMocks.containers[0];
@@ -251,7 +254,7 @@ describe('Pixi world projection', () => {
       />,
     );
 
-    await view.findByRole('img', { name: /founding world map/ });
+    await view.findByRole('application', { name: /founding world map/ });
     const host = view.container.querySelector<HTMLElement>('.world-map-canvas');
     if (host === null || notifyResize === null) throw new Error('Resize observer was not ready.');
     Object.defineProperty(host, 'clientWidth', { configurable: true, value: 720 });
@@ -300,7 +303,7 @@ describe('Pixi world projection', () => {
       />,
     );
 
-    await waitFor(() => expect(view.getByRole('img')).toBeVisible());
+    await waitFor(() => expect(view.getByRole('application')).toBeVisible());
     const agentGraphics = pixiMocks.graphics[5]!;
     const agentCount = initial.agentIds.length;
     const before = agentGraphics.circle.mock.calls[movedAgentIndex]!;
@@ -350,7 +353,7 @@ describe('Pixi world projection', () => {
       />,
     );
 
-    await waitFor(() => expect(view.getByRole('img')).toBeVisible());
+    await waitFor(() => expect(view.getByRole('application')).toBeVisible());
     const agentGraphics = pixiMocks.graphics[5]!;
     view.rerender(
       <WorldMapCanvas
@@ -386,8 +389,23 @@ describe('Pixi world projection', () => {
         'data-render-error',
         'WebGL unavailable',
       );
+      expect(view.getByRole('alert')).toHaveTextContent(
+        'The world map could not start. WebGL unavailable',
+      );
       expect(pixiMocks.applications[0]?.destroy).toHaveBeenCalledWith(true, { children: true });
     });
+
+    pixiMocks.allowInitialization();
+    fireEvent.click(view.getByRole('button', { name: 'Retry world map' }));
+
+    await waitFor(() => {
+      expect(view.queryByRole('alert')).not.toBeInTheDocument();
+      expect(view.getByRole('application', { name: /world map/ })).toBeVisible();
+      expect(view.container.querySelector('.world-map-canvas')).not.toHaveAttribute(
+        'data-render-error',
+      );
+    });
+    expect(pixiMocks.applications).toHaveLength(2);
   });
 
   it('draws separate agent and construction layers with progress, condition outlines, and redundant condition marks', async () => {
@@ -414,7 +432,9 @@ describe('Pixi world projection', () => {
     );
 
     await waitFor(() => {
-      expect(view.getByRole('img', { name: /1 visible agents, 1 structures/ })).toBeVisible();
+      expect(
+        view.getByRole('application', { name: /1 visible agents, 1 structures/ }),
+      ).toBeVisible();
     });
     expect(pixiMocks.graphics[3]?.rect).toHaveBeenCalled();
     expect(pixiMocks.graphics[3]?.stroke).toHaveBeenCalled();
@@ -533,7 +553,7 @@ describe('Pixi world projection', () => {
       />,
     );
 
-    await view.findByRole('img', { name: /space world map/ });
+    await view.findByRole('application', { name: /space world map/ });
     const spaceGraphics = pixiMocks.graphics[4];
     expect(spaceGraphics?.clear).toHaveBeenCalled();
     expect(spaceGraphics?.moveTo).toHaveBeenCalled();
@@ -559,7 +579,13 @@ describe('Pixi world projection', () => {
       />,
     );
 
-    const canvas = await view.findByRole('img', { name: /founding world map/ });
+    const map = await view.findByRole('application', { name: /founding world map/ });
+    const keyboardHelp = view.getByText(
+      'Use arrow keys to pan. Use plus and minus to zoom. Press Enter to inspect the first visible map object.',
+    );
+    expect(map).toHaveAttribute('aria-roledescription', 'interactive world map');
+    expect(map).toHaveAttribute('aria-describedby', keyboardHelp.id);
+    expect(map).toHaveAttribute('tabindex', '0');
     const host = view.container.querySelector<HTMLElement>('.world-map-canvas');
     expect(host).not.toBeNull();
     if (host === null) return;
@@ -567,13 +593,13 @@ describe('Pixi world projection', () => {
     host.hasPointerCapture = vi.fn(() => true);
     host.releasePointerCapture = vi.fn();
 
-    fireEvent.keyDown(canvas, { key: 'ArrowLeft' });
+    fireEvent.keyDown(map, { key: 'ArrowLeft' });
     expect(onCameraChange).toHaveBeenCalledWith({ x: -12, y: 24, zoom: 1.5 });
-    fireEvent.keyDown(canvas, { key: '+' });
+    fireEvent.keyDown(map, { key: '+' });
     const zoomedCamera = onCameraChange.mock.calls.at(-1)?.[0] as WorldCamera;
     expect(zoomedCamera).toMatchObject({ x: -12, y: 24 });
     expect(zoomedCamera.zoom).toBeCloseTo(1.725);
-    fireEvent.keyDown(canvas, { key: 'Enter' });
+    fireEvent.keyDown(map, { key: 'Enter' });
     expect(onSelectionChange).toHaveBeenCalledWith({
       id: projection.agentIds[0],
       kind: 'agent',
@@ -586,6 +612,7 @@ describe('Pixi world projection', () => {
       INITIAL_WORLD_CAMERA.y +
       (Math.floor(tile / projection.width) * 6 + 3) * INITIAL_WORLD_CAMERA.zoom;
     fireEvent.pointerDown(host, { clientX: pointerX, clientY: pointerY, pointerId: 4 });
+    expect(host).toHaveFocus();
     fireEvent.pointerUp(host, { clientX: pointerX, clientY: pointerY, pointerId: 4 });
     expect(onSelectionChange).toHaveBeenLastCalledWith({
       id: projection.agentIds[0],
@@ -655,7 +682,7 @@ describe('Pixi world projection', () => {
         reducedEffects
       />,
     );
-    await view.findByRole('img', { name: /founding world map/ });
+    await view.findByRole('application', { name: /founding world map/ });
     const host = view.container.querySelector<HTMLElement>('.world-map-canvas');
     if (host === null) throw new Error('World map host is missing.');
     host.setPointerCapture = vi.fn();
@@ -733,8 +760,8 @@ describe('Pixi world projection', () => {
       />,
     );
 
-    const canvas = await view.findByRole('img', { name: /founding world map/ });
-    fireEvent.keyDown(canvas, { key: 'Enter' });
+    const map = await view.findByRole('application', { name: /founding world map/ });
+    fireEvent.keyDown(map, { key: 'Enter' });
 
     expect(onSelectionChange).toHaveBeenCalledOnce();
     expect(onSelectionChange).toHaveBeenCalledWith(null);

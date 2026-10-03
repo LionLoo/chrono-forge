@@ -8,11 +8,31 @@ import {
   settleVisibleSessionBeforeCleanup,
 } from './focus-persistence.helpers.mjs';
 
-/* global CSSMediaRule, HTMLSelectElement, describe, document, it, window */
+/* global CSSMediaRule, HTMLElement, HTMLSelectElement, PointerEvent, WheelEvent, describe, document, it, window */
+
+function parseCameraReadout(readout) {
+  const match = /^X (-?\d+) · Y (-?\d+) · ([\d.]+)×$/.exec(readout);
+  if (match === null) throw new Error(`unexpected camera readout: ${readout}`);
+  return { x: Number(match[1]), y: Number(match[2]), zoom: Number(match[3]) };
+}
+
+async function setMapSelectionValue(value) {
+  await browser.execute((nextValue) => {
+    const select = document.querySelector('#map-inspector select');
+    if (!(select instanceof HTMLSelectElement)) throw new Error('map selection is unavailable');
+    Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, 'value').set.call(
+      select,
+      nextValue,
+    );
+    select.dispatchEvent(new Event('change', { bubbles: true }));
+  }, value);
+  await browser.waitUntil(async () => (await $('#map-inspector select').getValue()) === value, {
+    timeoutMsg: `map selection did not settle to ${JSON.stringify(value)}`,
+  });
+}
 
 describe('native focus persistence phase 1', () => {
   it('validates the initial native UI and persists a paused ten-second focus session through SQLite', async function () {
-    this.timeout(360_000);
     await $('#focus-title').waitForDisplayed();
     await $('span=SQLite archive').waitForDisplayed();
     for (const scale of [100, 150, 200]) {
@@ -56,6 +76,128 @@ describe('native focus persistence phase 1', () => {
     await frameSelection.click();
     const expectedFrameZoom = worldDimensions === '12 × 8' ? '8.00×' : '3.50×';
     expect(await (await $('.camera-readout')).getText()).toContain(expectedFrameZoom);
+    if (selectedMapValue === null) throw new Error('native map has no selectable object');
+    const firstMapSelection = selectedMapValue;
+
+    const mapHost = await $('.world-map-canvas');
+    await mapHost.waitForDisplayed();
+    await mapHost.scrollIntoView({ block: 'center', inline: 'center' });
+    await setMapSelectionValue('');
+    const pointerDispatched = await browser.execute(() => {
+      const host = document.querySelector('.world-map-canvas');
+      const canvas = host?.querySelector('canvas');
+      if (!(host instanceof HTMLElement) || !(canvas instanceof HTMLElement)) {
+        throw new Error('world map canvas is unavailable');
+      }
+      const bounds = host.getBoundingClientRect();
+      const clientX = bounds.left + bounds.width / 2;
+      const clientY = bounds.top + bounds.height / 2;
+      const originalSetPointerCapture = host.setPointerCapture;
+      const originalHasPointerCapture = host.hasPointerCapture;
+      const originalReleasePointerCapture = host.releasePointerCapture;
+      host.setPointerCapture = () => undefined;
+      host.hasPointerCapture = () => true;
+      host.releasePointerCapture = () => undefined;
+      try {
+        const options = { bubbles: true, clientX, clientY, pointerId: 1 };
+        canvas.dispatchEvent(new PointerEvent('pointerdown', options));
+        canvas.dispatchEvent(new PointerEvent('pointerup', options));
+      } finally {
+        host.setPointerCapture = originalSetPointerCapture;
+        host.hasPointerCapture = originalHasPointerCapture;
+        host.releasePointerCapture = originalReleasePointerCapture;
+      }
+      return true;
+    });
+    expect(pointerDispatched).toBe(true);
+    let pointerSelection = '';
+    try {
+      await browser.waitUntil(
+        async () => {
+          pointerSelection = await $('#map-inspector select').getValue();
+          return pointerSelection === firstMapSelection;
+        },
+        { timeoutMsg: 'native pointer input did not select the centered factual map object' },
+      );
+    } catch (error) {
+      throw new Error(
+        `native pointer input missed the centered object; expected=${firstMapSelection} actual=${pointerSelection} camera=${JSON.stringify(parseCameraReadout(await $('.camera-readout').getText()))}`,
+        { cause: error },
+      );
+    }
+
+    const cameraReadout = await $('.camera-readout');
+    const beforeWheel = parseCameraReadout(await cameraReadout.getText());
+    const mapViewport = await browser.execute(() => {
+      const host = document.querySelector('.world-map-canvas');
+      if (!(host instanceof HTMLElement)) throw new Error('world map host is unavailable');
+      return {
+        anchorX: host.clientWidth / 2,
+        anchorY: host.clientHeight / 2,
+        scrollY: window.scrollY,
+      };
+    });
+    const wheelPrevented = await browser.execute(() => {
+      const host = document.querySelector('.world-map-canvas');
+      if (!(host instanceof HTMLElement)) throw new Error('world map host is unavailable');
+      const bounds = host.getBoundingClientRect();
+      const wheel = new WheelEvent('wheel', {
+        bubbles: true,
+        cancelable: true,
+        clientX: bounds.left + bounds.width / 2,
+        clientY: bounds.top + bounds.height / 2,
+        deltaY: 120,
+      });
+      host.dispatchEvent(wheel);
+      return wheel.defaultPrevented;
+    });
+    expect(wheelPrevented).toBe(true);
+    await browser.waitUntil(
+      async () =>
+        (await cameraReadout.getText()) !==
+        `X ${beforeWheel.x} · Y ${beforeWheel.y} · ${beforeWheel.zoom.toFixed(2)}×`,
+      { timeoutMsg: 'native wheel input did not change the map camera' },
+    );
+    const afterWheel = parseCameraReadout(await cameraReadout.getText());
+    expect(afterWheel.zoom).toBeLessThan(beforeWheel.zoom);
+    expect(
+      Math.abs(
+        (mapViewport.anchorX - beforeWheel.x) / beforeWheel.zoom -
+          (mapViewport.anchorX - afterWheel.x) / afterWheel.zoom,
+      ),
+    ).toBeLessThan(1);
+    expect(
+      Math.abs(
+        (mapViewport.anchorY - beforeWheel.y) / beforeWheel.zoom -
+          (mapViewport.anchorY - afterWheel.y) / afterWheel.zoom,
+      ),
+    ).toBeLessThan(1);
+    expect(await browser.execute(() => window.scrollY)).toBe(mapViewport.scrollY);
+
+    await mapHost.click();
+    expect(
+      await browser.execute(() =>
+        document.activeElement?.matches('.world-map-canvas[role="application"]'),
+      ),
+    ).toBe(true);
+    await browser.keys(['ArrowRight']);
+    await browser.waitUntil(
+      async () => parseCameraReadout(await cameraReadout.getText()).x === afterWheel.x + 36,
+      { timeoutMsg: 'native canvas keyboard input did not pan the map camera' },
+    );
+    const afterKeyboardPan = parseCameraReadout(await cameraReadout.getText());
+    expect(afterKeyboardPan).toEqual({
+      x: afterWheel.x + 36,
+      y: afterWheel.y,
+      zoom: afterWheel.zoom,
+    });
+    await setMapSelectionValue('');
+    await browser.keys(['Enter']);
+    await browser.waitUntil(
+      async () => (await $('#map-inspector select').getValue()) === firstMapSelection,
+      { timeoutMsg: 'native canvas keyboard input did not select the first factual map object' },
+    );
+
     await openWorldInspection();
     expect(await (await $('h2=Settlement and society')).isDisplayed()).toBe(true);
     expect(await (await $('select[aria-label="Inspect person"]')).isDisplayed()).toBe(true);
@@ -130,7 +272,7 @@ describe('native focus persistence phase 1', () => {
     await browser.waitUntil(
       async () => {
         const status = await $('.persistence-status').getText();
-        if (status.startsWith('Save fault:')) throw new Error(status);
+        if (status.startsWith('Archive fault:')) throw new Error(status);
         return status.includes('Settings saved locally.');
       },
       { timeoutMsg: 'reduced-effects setting did not persist' },
@@ -165,7 +307,7 @@ describe('native focus persistence phase 1', () => {
       await browser.waitUntil(
         async () => {
           lastSaveStatus = await $('.persistence-status').getText();
-          if (lastSaveStatus.startsWith('Save fault:')) throw new Error(lastSaveStatus);
+          if (lastSaveStatus.startsWith('Archive fault:')) throw new Error(lastSaveStatus);
           lastSessions = await browser.tauri.execute(({ core }) =>
             core.invoke('list_focus_sessions'),
           );
@@ -203,5 +345,5 @@ describe('native focus persistence phase 1', () => {
       status: 'paused',
       focusedMs: 10_000,
     });
-  });
+  }).timeout(360_000);
 });

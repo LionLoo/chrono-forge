@@ -43,11 +43,28 @@ interface WorkspaceData {
   readonly activeSave: LoadedSave;
   readonly history: readonly FocusSession[];
   readonly initialSession: FocusSession | null;
+  readonly initialNotice?: string;
+  readonly initialOperationError: string | null;
   readonly offlineCatchUpApplied: boolean;
   /** Latest event in the exact generation that restored the focus session. */
   readonly recapBaselineEventId: number;
   readonly settings: AppSettings;
   readonly slots: readonly SaveSlotSummary[];
+}
+
+type OperationEnqueuer = <Result>(operation: () => Promise<Result>) => Promise<Result>;
+type WorkspaceRefUpdater = (update: (current: WorkspaceData) => WorkspaceData) => void;
+
+interface WorkspaceOperationError {
+  readonly kind:
+    'active-preference' | 'archive-operation' | 'focus-session-blocked' | 'settings-write';
+  readonly message: string;
+  readonly slotId: string;
+}
+
+interface PublishedExport {
+  readonly savePackage: string;
+  readonly slotId: string;
 }
 
 function freshRecoverySlot(slots: readonly SaveSlotSummary[]): {
@@ -141,6 +158,7 @@ async function loadWorkspace(
     activeSave,
     history,
     initialSession: selectRestorableSession(activeSave),
+    initialOperationError: null,
     offlineCatchUpApplied,
     recapBaselineEventId: deserializeWorldSnapshot(activeSave.snapshot).eventLog.at(-1)?.id ?? 0,
     settings,
@@ -191,8 +209,23 @@ function isTerminalSession(session: FocusSession): boolean {
   return session.status === 'completed' || session.status === 'cancelled';
 }
 
+function canLeaveFocusSession(session: FocusSession | null): boolean {
+  return session === null || isTerminalSession(session);
+}
+
 function focusHasEnded(session: FocusSession): boolean {
   return rehydrateFocusState(JSON.parse(session.stateJson) as unknown).focusEndedAtEpochMs !== null;
+}
+
+function workspaceNotice(workspace: WorkspaceData): string {
+  return (
+    workspace.initialNotice ??
+    (workspace.offlineCatchUpApplied
+      ? 'Applied bounded offline progression.'
+      : workspace.activeSave.recoveredFromCorruption
+        ? `Recovered generation ${workspace.activeSave.recoveredGeneration} after rejecting a newer save.`
+        : `Loaded ${workspace.activeSave.name}.`)
+  );
 }
 
 export function FocusPersistencePanel({
@@ -206,11 +239,32 @@ export function FocusPersistencePanel({
   soundscape = getGameSoundscape(),
 }: FocusPersistencePanelProps) {
   const bootstrapPromiseRef = useRef<Promise<WorkspaceData> | null>(null);
+  const currentWorkspaceRef = useRef<WorkspaceData | null>(null);
+  const operationQueueRef = useRef<Promise<void>>(Promise.resolve());
   const [workspace, setWorkspace] = useState<WorkspaceData | null>(null);
+  const [publishedExport, setPublishedExport] = useState<PublishedExport | null>(null);
+  const [notice, setNotice] = useState('');
+  const [workspaceOperationErrors, setWorkspaceOperationErrors] = useState<
+    readonly WorkspaceOperationError[]
+  >([]);
   const [bootstrapError, setBootstrapError] = useState<string | null>(null);
   const [recoveryError, setRecoveryError] = useState<string | null>(null);
   const [recoveringFreshWorld, setRecoveringFreshWorld] = useState(false);
   const [workspaceRevision, setWorkspaceRevision] = useState(0);
+  const enqueue = useCallback<OperationEnqueuer>((operation) => {
+    const result = operationQueueRef.current.then(operation, operation);
+    operationQueueRef.current = result.then(
+      () => undefined,
+      () => undefined,
+    );
+    return result;
+  }, []);
+  const getCurrentWorkspace = useCallback(() => currentWorkspaceRef.current, []);
+  const updateCurrentWorkspaceRef = useCallback<WorkspaceRefUpdater>((update) => {
+    if (currentWorkspaceRef.current !== null) {
+      currentWorkspaceRef.current = update(currentWorkspaceRef.current);
+    }
+  }, []);
 
   useEffect(() => {
     if (simulation.status !== 'ready') return;
@@ -223,7 +277,11 @@ export function FocusPersistencePanel({
     });
     void bootstrapPromiseRef.current.then(
       (loaded) => {
-        if (subscribed) setWorkspace((current) => current ?? loaded);
+        if (subscribed && currentWorkspaceRef.current === null) {
+          currentWorkspaceRef.current = loaded;
+          setNotice(workspaceNotice(loaded));
+          setWorkspace(loaded);
+        }
       },
       (error: unknown) => {
         if (subscribed) {
@@ -248,9 +306,32 @@ export function FocusPersistencePanel({
   ]);
 
   const replaceWorkspace = useCallback((next: WorkspaceData) => {
+    currentWorkspaceRef.current = next;
+    setPublishedExport((current) => (current?.slotId === next.activeSave.slotId ? current : null));
+    setNotice(workspaceNotice(next));
+    setWorkspaceOperationErrors([]);
     setWorkspace(next);
     setWorkspaceRevision((current) => current + 1);
   }, []);
+  const reportWorkspaceOperationError = useCallback(
+    (slotId: string, message: string, kind: WorkspaceOperationError['kind']) => {
+      if (currentWorkspaceRef.current?.activeSave.slotId === slotId) {
+        setWorkspaceOperationErrors((current) => [
+          ...current.filter((error) => error.slotId !== slotId || error.kind !== kind),
+          { kind, message, slotId },
+        ]);
+      }
+    },
+    [],
+  );
+  const clearWorkspaceOperationError = useCallback(
+    (slotId: string, kind: WorkspaceOperationError['kind']) => {
+      setWorkspaceOperationErrors((current) =>
+        current.filter((error) => error.slotId !== slotId || error.kind !== kind),
+      );
+    },
+    [],
+  );
 
   const startFreshWorld = useCallback(async () => {
     setRecoveringFreshWorld(true);
@@ -271,6 +352,9 @@ export function FocusPersistencePanel({
         requestSave: simulation.requestSave,
       });
       bootstrapPromiseRef.current = Promise.resolve(recoveredWorkspace);
+      currentWorkspaceRef.current = recoveredWorkspace;
+      setPublishedExport(null);
+      setNotice(workspaceNotice(recoveredWorkspace));
       setWorkspace(recoveredWorkspace);
       setBootstrapError(null);
       setWorkspaceRevision((current) => current + 1);
@@ -314,13 +398,25 @@ export function FocusPersistencePanel({
   return (
     <FocusWorkspace
       alerts={alerts}
+      clearWorkspaceOperationError={clearWorkspaceOperationError}
       clock={clock}
+      enqueue={enqueue}
+      exportPackage={
+        publishedExport?.slotId === workspace.activeSave.slotId ? publishedExport.savePackage : ''
+      }
+      externalOperationErrors={workspaceOperationErrors}
+      getCurrentWorkspace={getCurrentWorkspace}
       initial={workspace}
       key={`${workspace.activeSave.slotId}-${workspaceRevision}`}
+      notice={notice}
+      onExportPackageChange={(slotId, savePackage) => setPublishedExport({ savePackage, slotId })}
+      onNoticeChange={setNotice}
       onReplaceWorkspace={replaceWorkspace}
+      reportWorkspaceOperationError={reportWorkspaceOperationError}
       runtime={runtime}
       simulation={simulation}
       soundscape={soundscape}
+      updateCurrentWorkspaceRef={updateCurrentWorkspaceRef}
       {...(onReducedEffectsChange === undefined ? {} : { onReducedEffectsChange })}
       {...(onRevisitTarget === undefined ? {} : { onRevisitTarget })}
       {...(onSettingsChange === undefined ? {} : { onSettingsChange })}
@@ -330,28 +426,55 @@ export function FocusPersistencePanel({
 
 interface FocusWorkspaceProps {
   readonly alerts: FocusAlerts;
+  readonly clearWorkspaceOperationError: (
+    slotId: string,
+    kind: WorkspaceOperationError['kind'],
+  ) => void;
   readonly clock: FocusClock;
+  readonly enqueue: OperationEnqueuer;
+  readonly exportPackage: string;
+  readonly externalOperationErrors: readonly WorkspaceOperationError[];
+  readonly getCurrentWorkspace: () => WorkspaceData | null;
   readonly initial: WorkspaceData;
+  readonly notice: string;
+  readonly onExportPackageChange: (slotId: string, savePackage: string) => void;
+  readonly onNoticeChange: (notice: string) => void;
   readonly onReducedEffectsChange?: (reduced: boolean) => void;
   readonly onRevisitTarget?: (target: FocusRevisitTarget) => void;
   readonly onSettingsChange?: (settings: AppSettings) => void;
   readonly onReplaceWorkspace: (workspace: WorkspaceData) => void;
+  readonly reportWorkspaceOperationError: (
+    slotId: string,
+    message: string,
+    kind: WorkspaceOperationError['kind'],
+  ) => void;
   readonly runtime: RuntimePersistence;
   readonly simulation: WorldSimulationView;
   readonly soundscape: GameSoundscape;
+  readonly updateCurrentWorkspaceRef: WorkspaceRefUpdater;
 }
 
 function FocusWorkspace({
   alerts,
+  clearWorkspaceOperationError,
   clock,
+  enqueue,
+  exportPackage,
+  externalOperationErrors,
+  getCurrentWorkspace,
   initial,
+  notice,
+  onExportPackageChange,
+  onNoticeChange: setNotice,
   onReducedEffectsChange,
   onRevisitTarget,
   onSettingsChange,
   onReplaceWorkspace,
+  reportWorkspaceOperationError,
   runtime,
   simulation,
   soundscape,
+  updateCurrentWorkspaceRef,
 }: FocusWorkspaceProps) {
   const [activeSave, setActiveSave] = useState(initial.activeSave);
   const [slots, setSlots] = useState(initial.slots);
@@ -365,17 +488,13 @@ function FocusWorkspace({
   );
   const [slotIdDraft, setSlotIdDraft] = useState('world-2');
   const [slotNameDraft, setSlotNameDraft] = useState('Second world');
-  const [exportPackage, setExportPackage] = useState('');
   const [importPackage, setImportPackage] = useState('');
-  const [notice, setNotice] = useState(
-    initial.offlineCatchUpApplied
-      ? 'Applied bounded offline progression.'
-      : initial.activeSave.recoveredFromCorruption
-        ? `Recovered generation ${initial.activeSave.recoveredGeneration} after rejecting a newer save.`
-        : `Loaded ${initial.activeSave.name}.`,
+  const [operationError, setOperationError] = useState<string | null>(
+    initial.initialOperationError,
   );
-  const [operationError, setOperationError] = useState<string | null>(null);
-  const operationQueueRef = useRef<Promise<void>>(Promise.resolve());
+  const visibleOperationError =
+    externalOperationErrors.filter((error) => error.slotId === activeSave.slotId).at(-1)?.message ??
+    operationError;
   const activeSaveRef = useRef(activeSave);
   const latestSessionRef = useRef<FocusSession | null>(initial.initialSession);
   const recapSessionIdRef = useRef(initial.initialSession?.sessionId ?? null);
@@ -396,13 +515,20 @@ function FocusWorkspace({
     ),
   );
 
-  const enqueue = useCallback(<Result,>(operation: () => Promise<Result>): Promise<Result> => {
-    const result = operationQueueRef.current.then(operation, operation);
-    operationQueueRef.current = result.then(
-      () => undefined,
-      () => undefined,
+  const adoptWorkspaceRefs = useCallback((next: WorkspaceData): void => {
+    activeSaveRef.current = next.activeSave;
+    latestSessionRef.current = next.initialSession;
+    recapSessionIdRef.current = next.initialSession?.sessionId ?? null;
+    recapBaselineEventIdRef.current =
+      next.initialSession === null ? null : next.recapBaselineEventId;
+    recapEventIdsRef.current = next.initialSession?.recapEventIds ?? [];
+    recapEntriesRef.current = next.initialSession?.recapEntries ?? [];
+    reviewRef.current = next.initialSession?.review ?? null;
+    alertedSessionIdsRef.current = new Set(
+      next.initialSession !== null && focusHasEnded(next.initialSession)
+        ? [next.initialSession.sessionId]
+        : [],
     );
-    return result;
   }, []);
 
   const updateArchiveState = useCallback(
@@ -413,126 +539,74 @@ function FocusWorkspace({
       ]);
       setSlots(nextSlots);
       setHistory(nextHistory);
+      const nextActiveSave = loadedSave ?? activeSaveRef.current;
       if (loadedSave !== undefined) {
         activeSaveRef.current = loadedSave;
         setActiveSave(loadedSave);
       }
+      updateCurrentWorkspaceRef((current) => ({
+        ...current,
+        activeSave: nextActiveSave,
+        history: nextHistory,
+        initialSession: latestSessionRef.current,
+        recapBaselineEventId: recapBaselineEventIdRef.current ?? current.recapBaselineEventId,
+        slots: nextSlots,
+      }));
     },
-    [runtime.gateway],
+    [runtime.gateway, updateCurrentWorkspaceRef],
   );
 
-  const persistSession = useCallback(
-    (session: FocusSession, reason: string): Promise<void> =>
-      enqueue(async () => {
-        try {
-          const existingReview = reviewRef.current;
-          const isNewSession = recapSessionIdRef.current !== session.sessionId;
-          if (isNewSession) {
-            recapSessionIdRef.current = session.sessionId;
-            reviewRef.current = null;
-          }
-          if (existingReview !== null || isNewSession || session.issuedSimulationTicks === 0) {
-            const baselineEventId = isNewSession ? null : (existingReview?.baselineEventId ?? null);
-            const { checkpoint, snapshot } =
-              await simulation.requestFocusCheckpoint(baselineEventId);
-            const review = validateFocusSessionReview(
-              existingReview === null || isNewSession
-                ? {
-                    version: FOCUS_SESSION_REVIEW_VERSION,
-                    baselineEventId: checkpoint.latestEventId,
-                    before: checkpoint.moment,
-                    after: checkpoint.moment,
-                    revisitTarget: checkpoint.revisitTarget,
-                  }
-                : {
-                    ...existingReview,
-                    after: checkpoint.moment,
-                    revisitTarget: checkpoint.revisitTarget,
-                  },
-            );
-            const recapEntries = checkpoint.recapEntries;
-            const recapEventIds = recapEntries.map((entry) => entry.id);
-            const persistedSession: FocusSession = {
-              ...session,
-              recapEventIds,
-              recapEntries,
-              review,
-            };
-            reviewRef.current = review;
-            recapBaselineEventIdRef.current = review.baselineEventId;
-            recapEventIdsRef.current = recapEventIds;
-            recapEntriesRef.current = recapEntries;
-            latestSessionRef.current = persistedSession;
-            const slot = activeSaveRef.current;
-            const committed = await runtime.gateway.commitFocusCheckpoint(
-              slot.slotId,
-              slot.name,
-              snapshot,
-              persistedSession,
-              recapEventIds,
-            );
-            await updateArchiveState(committed);
-            setNotice(reason);
-            setOperationError(null);
-            if (
-              persistedSession.status !== 'cancelled' &&
-              focusHasEnded(persistedSession) &&
-              !alertedSessionIdsRef.current.has(persistedSession.sessionId)
-            ) {
-              alertedSessionIdsRef.current.add(persistedSession.sessionId);
-              await alerts.notifyCompletion(settings).catch(() => undefined);
-            }
-            return;
-          }
-
-          // Conservative compatibility path for an in-progress pre-M10.1 session: preserve its
-          // existing recap contract without manufacturing a historical before-state.
-          const visibleEventsById = new Map(simulation.events.map((event) => [event.id, event]));
-          const visibleEventIds = [...visibleEventsById.keys()];
-          const latestEventId = visibleEventIds.at(-1) ?? 0;
-          if (recapSessionIdRef.current !== session.sessionId) {
-            recapSessionIdRef.current = session.sessionId;
-            recapBaselineEventIdRef.current = latestEventId;
-            recapEventIdsRef.current = [];
-            recapEntriesRef.current = [];
-          }
-          recapBaselineEventIdRef.current ??= latestEventId;
-          const newEventIds = visibleEventIds.filter(
-            (eventId) => eventId > (recapBaselineEventIdRef.current ?? latestEventId),
+  const persistSessionNow = useCallback(
+    async (session: FocusSession, reason: string): Promise<void> => {
+      const currentWorkspace = getCurrentWorkspace();
+      if (currentWorkspace !== null && currentWorkspace.activeSave.slotId !== session.slotId) {
+        return;
+      }
+      try {
+        const existingReview = reviewRef.current;
+        const isNewSession = recapSessionIdRef.current !== session.sessionId;
+        if (isNewSession) {
+          recapSessionIdRef.current = session.sessionId;
+          reviewRef.current = null;
+        }
+        if (existingReview !== null || isNewSession || session.issuedSimulationTicks === 0) {
+          const baselineEventId = isNewSession ? null : (existingReview?.baselineEventId ?? null);
+          const { checkpoint, snapshot } = await simulation.requestFocusCheckpoint(baselineEventId);
+          const review = validateFocusSessionReview(
+            existingReview === null || isNewSession
+              ? {
+                  version: FOCUS_SESSION_REVIEW_VERSION,
+                  baselineEventId: checkpoint.latestEventId,
+                  before: checkpoint.moment,
+                  after: checkpoint.moment,
+                  revisitTarget: checkpoint.revisitTarget,
+                }
+              : {
+                  ...existingReview,
+                  after: checkpoint.moment,
+                  revisitTarget: checkpoint.revisitTarget,
+                },
           );
-          recapBaselineEventIdRef.current = latestEventId;
-          recapEventIdsRef.current = [...new Set([...recapEventIdsRef.current, ...newEventIds])]
-            .sort((left, right) => left - right)
-            .slice(-MAX_FOCUS_RECAP_EVENTS);
-          const storedEntriesById = new Map(
-            recapEntriesRef.current.map((entry) => [entry.id, entry]),
-          );
-          const candidateEntries = recapEventIdsRef.current.flatMap((eventId) => {
-            const visible = visibleEventsById.get(eventId);
-            if (visible !== undefined) return [recapEntry(visible)];
-            const stored = storedEntriesById.get(eventId);
-            return stored === undefined ? [] : [stored];
-          });
-          // A legacy session may have IDs without durable text. Keep that migration marker empty
-          // rather than inventing a partial recap; all new recap copies are paired one-for-one.
-          recapEntriesRef.current =
-            candidateEntries.length === recapEventIdsRef.current.length ? candidateEntries : [];
-          const persistedSession = {
+          const recapEntries = checkpoint.recapEntries;
+          const recapEventIds = recapEntries.map((entry) => entry.id);
+          const persistedSession: FocusSession = {
             ...session,
-            recapEventIds: recapEventIdsRef.current,
-            recapEntries: recapEntriesRef.current,
+            recapEventIds,
+            recapEntries,
+            review,
           };
-          const sourceEventIds = [
-            ...new Set([...visibleEventIds, ...recapEventIdsRef.current]),
-          ].sort((left, right) => left - right);
-          const snapshot = await simulation.requestSave();
+          reviewRef.current = review;
+          recapBaselineEventIdRef.current = review.baselineEventId;
+          recapEventIdsRef.current = recapEventIds;
+          recapEntriesRef.current = recapEntries;
+          latestSessionRef.current = persistedSession;
           const slot = activeSaveRef.current;
           const committed = await runtime.gateway.commitFocusCheckpoint(
             slot.slotId,
             slot.name,
             snapshot,
             persistedSession,
-            sourceEventIds,
+            recapEventIds,
           );
           await updateArchiveState(committed);
           setNotice(reason);
@@ -545,18 +619,103 @@ function FocusWorkspace({
             alertedSessionIdsRef.current.add(persistedSession.sessionId);
             await alerts.notifyCompletion(settings).catch(() => undefined);
           }
-        } catch (error) {
-          setOperationError(error instanceof Error ? error.message : 'Autosave failed.');
-          throw error;
+          return;
         }
-      }),
-    [alerts, enqueue, runtime.gateway, settings, simulation, updateArchiveState],
+
+        // Conservative compatibility path for an in-progress pre-M10.1 session: preserve its
+        // existing recap contract without manufacturing a historical before-state.
+        const visibleEventsById = new Map(simulation.events.map((event) => [event.id, event]));
+        const visibleEventIds = [...visibleEventsById.keys()];
+        const latestEventId = visibleEventIds.at(-1) ?? 0;
+        if (recapSessionIdRef.current !== session.sessionId) {
+          recapSessionIdRef.current = session.sessionId;
+          recapBaselineEventIdRef.current = latestEventId;
+          recapEventIdsRef.current = [];
+          recapEntriesRef.current = [];
+        }
+        recapBaselineEventIdRef.current ??= latestEventId;
+        const newEventIds = visibleEventIds.filter(
+          (eventId) => eventId > (recapBaselineEventIdRef.current ?? latestEventId),
+        );
+        recapBaselineEventIdRef.current = latestEventId;
+        recapEventIdsRef.current = [...new Set([...recapEventIdsRef.current, ...newEventIds])]
+          .sort((left, right) => left - right)
+          .slice(-MAX_FOCUS_RECAP_EVENTS);
+        const storedEntriesById = new Map(
+          recapEntriesRef.current.map((entry) => [entry.id, entry]),
+        );
+        const candidateEntries = recapEventIdsRef.current.flatMap((eventId) => {
+          const visible = visibleEventsById.get(eventId);
+          if (visible !== undefined) return [recapEntry(visible)];
+          const stored = storedEntriesById.get(eventId);
+          return stored === undefined ? [] : [stored];
+        });
+        // A legacy session may have IDs without durable text. Keep that migration marker empty
+        // rather than inventing a partial recap; all new recap copies are paired one-for-one.
+        recapEntriesRef.current =
+          candidateEntries.length === recapEventIdsRef.current.length ? candidateEntries : [];
+        const persistedSession = {
+          ...session,
+          recapEventIds: recapEventIdsRef.current,
+          recapEntries: recapEntriesRef.current,
+        };
+        const sourceEventIds = [...new Set([...visibleEventIds, ...recapEventIdsRef.current])].sort(
+          (left, right) => left - right,
+        );
+        const snapshot = await simulation.requestSave();
+        const slot = activeSaveRef.current;
+        const committed = await runtime.gateway.commitFocusCheckpoint(
+          slot.slotId,
+          slot.name,
+          snapshot,
+          persistedSession,
+          sourceEventIds,
+        );
+        await updateArchiveState(committed);
+        setNotice(reason);
+        setOperationError(null);
+        if (
+          persistedSession.status !== 'cancelled' &&
+          focusHasEnded(persistedSession) &&
+          !alertedSessionIdsRef.current.has(persistedSession.sessionId)
+        ) {
+          alertedSessionIdsRef.current.add(persistedSession.sessionId);
+          await alerts.notifyCompletion(settings).catch(() => undefined);
+        }
+      } catch (error) {
+        setOperationError(error instanceof Error ? error.message : 'Autosave failed.');
+        throw error;
+      }
+    },
+    [
+      alerts,
+      getCurrentWorkspace,
+      runtime.gateway,
+      setNotice,
+      settings,
+      simulation,
+      updateArchiveState,
+    ],
+  );
+
+  const persistSession = useCallback(
+    (session: FocusSession, reason: string): Promise<void> =>
+      enqueue(() => persistSessionNow(session, reason)),
+    [enqueue, persistSessionNow],
   );
 
   const onSessionState = useCallback(
     (session: FocusSession): void => {
       const previous = latestSessionRef.current;
       latestSessionRef.current = session;
+      updateCurrentWorkspaceRef((current) =>
+        current.activeSave.slotId === session.slotId
+          ? { ...current, initialSession: session }
+          : current,
+      );
+      if (session.slotId !== null && canLeaveFocusSession(session)) {
+        clearWorkspaceOperationError(session.slotId, 'focus-session-blocked');
+      }
       const mustPersistNow =
         previous?.sessionId !== session.sessionId ||
         session.status !== 'active' ||
@@ -580,16 +739,32 @@ function FocusWorkspace({
         }
       }, AUTOSAVE_INTERVAL_MS);
     },
-    [persistSession],
+    [clearWorkspaceOperationError, persistSession, updateCurrentWorkspaceRef],
   );
 
+  const advanceFocusTicks = useCallback(
+    (ticks: number): void => {
+      const currentWorkspace = getCurrentWorkspace();
+      if (
+        currentWorkspace !== null &&
+        currentWorkspace.activeSave.slotId !== activeSaveRef.current.slotId
+      ) {
+        return;
+      }
+      simulation.advanceTicks(ticks);
+    },
+    [getCurrentWorkspace, simulation],
+  );
+
+  const focusFrozen = simulation.status === 'faulted';
   const focus = useFocusController({
     clock,
     initialSession: initial.initialSession,
     slotId: activeSave.slotId,
-    onSimulationTicks: simulation.advanceTicks,
+    onSimulationTicks: advanceFocusTicks,
     onSessionState,
     createSessionId: () => `focus-${globalThis.crypto.randomUUID()}`,
+    suspended: focusFrozen,
   });
 
   useEffect(() => {
@@ -608,6 +783,13 @@ function FocusWorkspace({
   }, [onSettingsChange, settings]);
 
   useEffect(() => {
+    if (focusFrozen) {
+      if (autosaveTimerRef.current !== null) {
+        window.clearTimeout(autosaveTimerRef.current);
+        autosaveTimerRef.current = null;
+      }
+      return undefined;
+    }
     const checkpointBeforeSuspension = () => {
       if (document.visibilityState !== 'hidden') return;
       queueMicrotask(() => {
@@ -624,7 +806,7 @@ function FocusWorkspace({
       document.removeEventListener('visibilitychange', checkpointBeforeSuspension);
       if (autosaveTimerRef.current !== null) window.clearTimeout(autosaveTimerRef.current);
     };
-  }, [persistSession]);
+  }, [focusFrozen, persistSession]);
 
   const runOperation = useCallback(async (operation: () => Promise<void>): Promise<void> => {
     try {
@@ -641,66 +823,265 @@ function FocusWorkspace({
     }
   }, []);
 
-  const saveWorld = useCallback(
-    (slotId: string, name: string, message: string): Promise<void> =>
+  const saveAsNewWorld = useCallback(
+    (slotId: string, name: string): Promise<void> =>
       enqueue(async () => {
+        const currentWorkspace = getCurrentWorkspace();
+        if (currentWorkspace === null) throw new Error('The active workspace is unavailable.');
+        if (!canLeaveFocusSession(currentWorkspace.initialSession)) {
+          throw new Error('Finish or cancel the active focus session before creating a new slot.');
+        }
         const snapshot = await simulation.requestSave();
         const committed = await runtime.gateway.commitSaveSlot(slotId, name, snapshot);
-        if (settings.activeSlotId !== slotId) {
-          const savedSettings = await runtime.gateway.saveSettings({
-            ...settings,
-            activeSlotId: slotId,
-          });
-          setSettings(savedSettings);
-        }
-        await updateArchiveState(committed);
-        setNotice(message);
+        const recapBaselineEventId = deserializeWorldSnapshot(snapshot).eventLog.at(-1)?.id ?? 0;
+        const [nextSlots, nextHistory] = await Promise.all([
+          runtime.gateway.listSaveSlots(),
+          runtime.gateway.listFocusSessions(committed),
+        ]);
+        const nextSettings = await runtime.gateway.saveSettings({
+          ...currentWorkspace.settings,
+          activeSlotId: slotId,
+        });
+        onReplaceWorkspace({
+          activeSave: committed,
+          history: nextHistory,
+          initialSession: selectRestorableSession(committed),
+          initialNotice: 'New save slot created.',
+          initialOperationError: null,
+          offlineCatchUpApplied: false,
+          recapBaselineEventId,
+          settings: nextSettings,
+          slots: nextSlots,
+        });
       }),
-    [enqueue, runtime.gateway, settings, simulation, updateArchiveState],
+    [enqueue, getCurrentWorkspace, onReplaceWorkspace, runtime.gateway, simulation],
   );
 
-  const saveCurrentWorld = useCallback(async (): Promise<void> => {
+  const persistCurrentWorld = useCallback(
+    async (reason: string): Promise<void> => {
+      const currentWorkspace = getCurrentWorkspace();
+      if (
+        currentWorkspace !== null &&
+        currentWorkspace.activeSave.slotId !== activeSaveRef.current.slotId
+      ) {
+        adoptWorkspaceRefs(currentWorkspace);
+      }
+      const latest = latestSessionRef.current;
+      if (latest !== null) {
+        await persistSessionNow(latest, reason);
+        return;
+      }
+      const slot = activeSaveRef.current;
+      const snapshot = await simulation.requestSave();
+      const committed = await runtime.gateway.commitSaveSlot(slot.slotId, slot.name, snapshot);
+      await updateArchiveState(committed);
+      setNotice(reason);
+    },
+    [
+      adoptWorkspaceRefs,
+      getCurrentWorkspace,
+      persistSessionNow,
+      runtime.gateway,
+      setNotice,
+      simulation,
+      updateArchiveState,
+    ],
+  );
+
+  const checkpointFocusForArchiveOperation = useCallback((): void => {
     focus.checkpoint();
     if (autosaveTimerRef.current !== null) {
       window.clearTimeout(autosaveTimerRef.current);
       autosaveTimerRef.current = null;
     }
-    const latest = latestSessionRef.current;
-    if (latest !== null) {
-      await persistSession(latest, 'World saved manually.');
-      return;
-    }
-    await saveWorld(activeSave.slotId, activeSave.name, 'World saved manually.');
-  }, [activeSave.name, activeSave.slotId, focus, persistSession, saveWorld]);
+  }, [focus]);
+
+  const saveCurrentWorld = useCallback(async (): Promise<void> => {
+    checkpointFocusForArchiveOperation();
+    await enqueue(() => persistCurrentWorld('World saved manually.'));
+  }, [checkpointFocusForArchiveOperation, enqueue, persistCurrentWorld]);
+
+  const exportCurrentWorld = useCallback(async (): Promise<void> => {
+    if (!focusFrozen) checkpointFocusForArchiveOperation();
+    await enqueue(async () => {
+      try {
+        if (!focusFrozen) {
+          await persistCurrentWorld('World saved before export.');
+        } else {
+          const currentWorkspace = getCurrentWorkspace();
+          if (
+            currentWorkspace !== null &&
+            currentWorkspace.activeSave.slotId !== activeSaveRef.current.slotId
+          ) {
+            adoptWorkspaceRefs(currentWorkspace);
+          }
+        }
+        const currentWorkspace = getCurrentWorkspace();
+        if (currentWorkspace === null) throw new Error('The active workspace is unavailable.');
+        const slotId = currentWorkspace.activeSave.slotId;
+        const savePackage = await runtime.gateway.exportSaveSlot(slotId);
+        onExportPackageChange(slotId, savePackage);
+        clearWorkspaceOperationError(slotId, 'archive-operation');
+        setNotice(
+          focusFrozen
+            ? 'Export package prepared from the last valid local checkpoint.'
+            : 'Export package refreshed from the current world.',
+        );
+      } catch (error) {
+        const currentWorkspace = getCurrentWorkspace();
+        if (currentWorkspace !== null) {
+          const message =
+            error instanceof Error
+              ? error.message
+              : typeof error === 'string' && error.length > 0
+                ? error
+                : 'The export could not be prepared.';
+          reportWorkspaceOperationError(
+            currentWorkspace.activeSave.slotId,
+            message,
+            'archive-operation',
+          );
+        }
+        throw error;
+      }
+    });
+  }, [
+    adoptWorkspaceRefs,
+    checkpointFocusForArchiveOperation,
+    clearWorkspaceOperationError,
+    enqueue,
+    focusFrozen,
+    getCurrentWorkspace,
+    onExportPackageChange,
+    persistCurrentWorld,
+    reportWorkspaceOperationError,
+    runtime.gateway,
+    setNotice,
+  ]);
+
+  const saveCurrentSettings = useCallback(
+    (draft: AppSettings, originatingSlotId: string): Promise<void> =>
+      enqueue(async () => {
+        const currentWorkspace = getCurrentWorkspace();
+        if (currentWorkspace === null) throw new Error('The active workspace is unavailable.');
+        const slotId = currentWorkspace.activeSave.slotId;
+        try {
+          const saved = await runtime.gateway.saveSettings({
+            ...draft,
+            activeSlotId: slotId,
+          });
+          const nextWorkspace = {
+            ...currentWorkspace,
+            initialNotice: 'Settings saved locally.',
+            initialOperationError: null,
+            settings: saved,
+          };
+          clearWorkspaceOperationError(slotId, 'active-preference');
+          clearWorkspaceOperationError(slotId, 'settings-write');
+          if (slotId !== originatingSlotId) {
+            onReplaceWorkspace(nextWorkspace);
+            return;
+          }
+          setSettings(saved);
+          updateCurrentWorkspaceRef((current) =>
+            current.activeSave.slotId === slotId ? nextWorkspace : current,
+          );
+          setNotice('Settings saved locally.');
+        } catch (error) {
+          const message =
+            error instanceof Error
+              ? error.message
+              : typeof error === 'string' && error.length > 0
+                ? error
+                : 'Settings could not be saved.';
+          reportWorkspaceOperationError(slotId, message, 'settings-write');
+          throw error;
+        }
+      }),
+    [
+      clearWorkspaceOperationError,
+      enqueue,
+      getCurrentWorkspace,
+      onReplaceWorkspace,
+      reportWorkspaceOperationError,
+      runtime.gateway,
+      setNotice,
+      updateCurrentWorkspaceRef,
+    ],
+  );
 
   const replaceWithSlot = useCallback(
-    async (slotId: string): Promise<void> => {
-      const loaded = await runtime.gateway.loadSaveSlot(slotId);
-      if (loaded === null) throw new Error('The selected slot has no valid save.');
-      await simulation.loadSnapshot(loaded.snapshot);
-      const [loadedSettings, nextSlots, nextHistory] = await Promise.all([
-        runtime.gateway.loadSettings(),
-        runtime.gateway.listSaveSlots(),
-        runtime.gateway.listFocusSessions(loaded),
-      ]);
-      const nextSettings =
-        loadedSettings.activeSlotId === loaded.slotId
-          ? loadedSettings
-          : await runtime.gateway.saveSettings({
-              ...loadedSettings,
-              activeSlotId: loaded.slotId,
-            });
-      onReplaceWorkspace({
-        activeSave: loaded,
-        history: nextHistory,
-        initialSession: selectRestorableSession(loaded),
-        offlineCatchUpApplied: false,
-        recapBaselineEventId: deserializeWorldSnapshot(loaded.snapshot).eventLog.at(-1)?.id ?? 0,
-        settings: nextSettings,
-        slots: nextSlots,
-      });
-    },
-    [onReplaceWorkspace, runtime.gateway, simulation],
+    (slotId: string): Promise<void> =>
+      enqueue(async () => {
+        const currentWorkspace = getCurrentWorkspace();
+        if (currentWorkspace !== null && !canLeaveFocusSession(currentWorkspace.initialSession)) {
+          const message = 'Finish or cancel the active focus session before switching worlds.';
+          reportWorkspaceOperationError(
+            currentWorkspace.activeSave.slotId,
+            message,
+            'focus-session-blocked',
+          );
+          throw new Error(message);
+        }
+        const loaded = await runtime.gateway.loadSaveSlot(slotId);
+        if (loaded === null) throw new Error('The selected slot has no valid save.');
+        const recapBaselineEventId =
+          deserializeWorldSnapshot(loaded.snapshot).eventLog.at(-1)?.id ?? 0;
+        const [loadedSettings, nextSlots, nextHistory] = await Promise.all([
+          runtime.gateway.loadSettings(),
+          runtime.gateway.listSaveSlots(),
+          runtime.gateway.listFocusSessions(loaded),
+        ]);
+
+        const selectedSettings =
+          loadedSettings.activeSlotId === loaded.slotId
+            ? loadedSettings
+            : { ...loadedSettings, activeSlotId: loaded.slotId };
+
+        // No persistence read remains after this boundary. Once the Worker accepts the target,
+        // synchronously transfer authority before any other awaited work can let an outgoing
+        // focus controller issue ticks against the newly loaded world.
+        await simulation.loadSnapshot(loaded.snapshot);
+        const nextWorkspace: WorkspaceData = {
+          activeSave: loaded,
+          history: nextHistory,
+          initialSession: selectRestorableSession(loaded),
+          initialOperationError: null,
+          offlineCatchUpApplied: false,
+          recapBaselineEventId,
+          settings: selectedSettings,
+          slots: nextSlots,
+        };
+        onReplaceWorkspace(nextWorkspace);
+
+        if (loadedSettings.activeSlotId !== loaded.slotId) {
+          try {
+            await runtime.gateway.saveSettings(selectedSettings);
+          } catch (error) {
+            const message =
+              error instanceof Error
+                ? error.message
+                : typeof error === 'string' && error.length > 0
+                  ? error
+                  : 'The active slot preference could not be saved.';
+            updateCurrentWorkspaceRef((current) =>
+              current.activeSave.slotId === loaded.slotId
+                ? { ...current, initialOperationError: message }
+                : current,
+            );
+            reportWorkspaceOperationError(loaded.slotId, message, 'active-preference');
+          }
+        }
+      }),
+    [
+      enqueue,
+      getCurrentWorkspace,
+      onReplaceWorkspace,
+      reportWorkspaceOperationError,
+      runtime.gateway,
+      simulation,
+      updateCurrentWorkspaceRef,
+    ],
   );
 
   const canSwitchWorld =
@@ -711,6 +1092,8 @@ function FocusWorkspace({
   const startNewSession = (): void => {
     focus.reset();
     latestSessionRef.current = null;
+    updateCurrentWorkspaceRef((current) => ({ ...current, initialSession: null }));
+    clearWorkspaceOperationError(activeSaveRef.current.slotId, 'focus-session-blocked');
   };
   const phaseLabel = focus.state.phase.replaceAll('-', ' ');
   const focusMinutes = Number(focusMinutesInput);
@@ -853,6 +1236,14 @@ function FocusWorkspace({
             are non-punitive
           </p>
 
+          {focusFrozen ? (
+            <p className="focus-runtime-fault" role="alert">
+              Focus controls are frozen because the simulation Worker stopped. No additional focus
+              time or world ticks will be issued. Reopen Chrono Forge to recover the last saved
+              session state.
+            </p>
+          ) : null}
+
           {focus.state.phase === 'idle' ? (
             <div className="focus-setup">
               <p className="focus-world-context">
@@ -922,6 +1313,7 @@ function FocusWorkspace({
             <div className="session-actions">
               {(focus.state.phase === 'focus-running' || focus.state.phase === 'break-running') && (
                 <button
+                  disabled={focusFrozen}
                   onClick={() => {
                     void soundscape.playCue('focus-pause', settings);
                     focus.pause();
@@ -934,6 +1326,7 @@ function FocusWorkspace({
               {(focus.state.phase === 'focus-paused' || focus.state.phase === 'break-paused') && (
                 <button
                   className="primary-action"
+                  disabled={focusFrozen}
                   onClick={() => {
                     void soundscape.playCue('focus-resume', settings);
                     focus.resume();
@@ -945,21 +1338,21 @@ function FocusWorkspace({
               )}
               {(focus.state.phase === 'focus-running' || focus.state.phase === 'focus-paused') && (
                 <>
-                  <button onClick={() => focus.complete()} type="button">
+                  <button disabled={focusFrozen} onClick={() => focus.complete()} type="button">
                     Complete focus
                   </button>
-                  <button onClick={() => focus.cancel()} type="button">
+                  <button disabled={focusFrozen} onClick={() => focus.cancel()} type="button">
                     Cancel
                   </button>
                 </>
               )}
               {(focus.state.phase === 'break-running' || focus.state.phase === 'break-paused') && (
-                <button onClick={() => focus.skipBreak()} type="button">
+                <button disabled={focusFrozen} onClick={() => focus.skipBreak()} type="button">
                   End break
                 </button>
               )}
               {canSwitchWorld && (
-                <button onClick={startNewSession} type="button">
+                <button disabled={focusFrozen} onClick={startNewSession} type="button">
                   New session
                 </button>
               )}
@@ -976,7 +1369,7 @@ function FocusWorkspace({
           <label>
             Load local slot
             <select
-              disabled={!canSwitchWorld}
+              disabled={focusFrozen || !canSwitchWorld}
               onChange={(event) => {
                 void runOperation(() => replaceWithSlot(event.currentTarget.value));
               }}
@@ -990,18 +1383,14 @@ function FocusWorkspace({
             </select>
           </label>
           <div className="archive-actions">
-            <button onClick={() => void runOperation(saveCurrentWorld)} type="button">
-              Save now
-            </button>
             <button
-              onClick={() =>
-                void runOperation(async () => {
-                  setExportPackage(await runtime.gateway.exportSaveSlot(activeSave.slotId));
-                  setNotice('Export package ready to copy.');
-                })
-              }
+              disabled={focusFrozen}
+              onClick={() => void runOperation(saveCurrentWorld)}
               type="button"
             >
+              Save now
+            </button>
+            <button onClick={() => void runOperation(exportCurrentWorld)} type="button">
               Export
             </button>
           </div>
@@ -1022,13 +1411,8 @@ function FocusWorkspace({
               />
             </label>
             <button
-              disabled={!canSwitchWorld}
-              onClick={() =>
-                void runOperation(async () => {
-                  if (focus.state.phase !== 'idle') startNewSession();
-                  await saveWorld(slotIdDraft, slotNameDraft, 'New save slot created.');
-                })
-              }
+              disabled={focusFrozen || !canSwitchWorld}
+              onClick={() => void runOperation(() => saveAsNewWorld(slotIdDraft, slotNameDraft))}
               type="button"
             >
               Save as new slot
@@ -1049,7 +1433,7 @@ function FocusWorkspace({
               />
             </label>
             <button
-              disabled={!canSwitchWorld || importPackage.trim().length === 0}
+              disabled={focusFrozen || !canSwitchWorld || importPackage.trim().length === 0}
               onClick={() =>
                 void runOperation(async () => {
                   const imported = await runtime.gateway.importSaveSlot(importPackage);
@@ -1206,11 +1590,7 @@ function FocusWorkspace({
           <button
             disabled={!settingsAreValid}
             onClick={() =>
-              void runOperation(async () => {
-                const saved = await runtime.gateway.saveSettings(settings);
-                setSettings(saved);
-                setNotice('Settings saved locally.');
-              })
+              void runOperation(() => saveCurrentSettings(settings, activeSaveRef.current.slotId))
             }
             type="button"
           >
@@ -1300,8 +1680,12 @@ function FocusWorkspace({
         </section>
       </div>
 
-      <div className="persistence-status" aria-live="polite" role="status">
-        {operationError === null ? notice : `Save fault: ${operationError}`}
+      <div
+        className="persistence-status"
+        aria-live={visibleOperationError === null ? 'polite' : 'assertive'}
+        role={visibleOperationError === null ? 'status' : 'alert'}
+      >
+        {visibleOperationError === null ? notice : `Archive fault: ${visibleOperationError}`}
       </div>
     </section>
   );

@@ -12,7 +12,12 @@ import type { RuntimePersistence } from '../../src/adapters/runtime-persistence'
 import type { GameSoundscape } from '../../src/adapters/soundscape';
 import { projectFocusCheckpoint } from '../../src/focus/session-review';
 import { PROJECT_META } from '../../src/project-meta';
-import type { UiToWorkerMessage, WorkerToUiMessage } from '../../src/protocol';
+import {
+  WORKER_PROTOCOL_VERSION,
+  type UiToWorkerMessage,
+  type WorkerToUiMessage,
+  type WorldFrameProjection,
+} from '../../src/protocol';
 import type { WorldCamera } from '../../src/rendering/camera';
 import type { WorldOverlay } from '../../src/rendering/world-palette';
 import { deserializeWorldSnapshot } from '../../src/simulation/persistence';
@@ -25,11 +30,13 @@ vi.mock('../../src/rendering/WorldMapCanvas', () => ({
     onViewportResize,
     overlay,
     reducedEffects,
+    selection,
   }: {
     readonly camera: WorldCamera;
     readonly onViewportResize?: (width: number, height: number) => void;
     readonly overlay: WorldOverlay;
     readonly reducedEffects?: boolean;
+    readonly selection?: { readonly id: number; readonly kind: string } | null;
   }) => (
     <>
       <div
@@ -37,6 +44,11 @@ vi.mock('../../src/rendering/WorldMapCanvas', () => ({
         data-camera={`${camera.x}:${camera.y}:${camera.zoom}`}
         data-effects={reducedEffects ? 'reduced' : 'full'}
         data-overlay={overlay}
+        data-selection={
+          selection === undefined || selection === null
+            ? 'none'
+            : `${selection.kind}:${selection.id}`
+        }
         role="img"
       />
       <button
@@ -74,6 +86,90 @@ function createRuntimeWorker(): SimulationWorkerPort {
   return port;
 }
 
+function createFrameRemovalWorker(): {
+  readonly removeFirstAgent: () => void;
+  readonly workerFactory: () => SimulationWorkerPort;
+} {
+  let removeFirstAgent: (() => void) | null = null;
+  const workerFactory = () => {
+    let active = true;
+    const runtime = createSimulationRuntime((message: WorkerToUiMessage) => {
+      if (message.type === 'ready' && removeFirstAgent === null) {
+        const initialFrame = message.frame;
+        removeFirstAgent = () => {
+          const removedId = initialFrame.agentIds[0];
+          if (removedId === undefined) throw new Error('test frame has no removable agent');
+          const frame: WorldFrameProjection = {
+            ...initialFrame,
+            agentActions: initialFrame.agentActions.slice(1),
+            agentHealth: initialFrame.agentHealth.slice(1),
+            agentIds: initialFrame.agentIds.slice(1),
+            agentTiles: initialFrame.agentTiles.slice(1),
+            society: {
+              ...initialFrame.society,
+              people: initialFrame.society.people.filter((person) => person.id !== removedId),
+            },
+            stateHash: `${initialFrame.stateHash}-without-${removedId}`,
+            tick: initialFrame.tick + 1,
+          };
+          port.onmessage?.(
+            new MessageEvent('message', {
+              data: {
+                frame,
+                protocolVersion: WORKER_PROTOCOL_VERSION,
+                requestId: 'frame-removal-test',
+                type: 'ready',
+              } satisfies WorkerToUiMessage,
+            }),
+          );
+        };
+      }
+      queueMicrotask(() => {
+        if (active) port.onmessage?.(new MessageEvent('message', { data: message }));
+      });
+    });
+
+    const port: SimulationWorkerPort = {
+      onerror: null,
+      onmessage: null,
+      postMessage(message: UiToWorkerMessage) {
+        runtime.handleMessage(message);
+      },
+      terminate() {
+        active = false;
+      },
+    };
+    return port;
+  };
+  return {
+    removeFirstAgent() {
+      if (removeFirstAgent === null) throw new Error('test worker is not ready');
+      removeFirstAgent();
+    },
+    workerFactory,
+  };
+}
+
+function createRuntimeErrorWorker(): {
+  readonly fail: () => void;
+  readonly workerFactory: () => SimulationWorkerPort;
+} {
+  let fail: (() => void) | null = null;
+  return {
+    fail() {
+      if (fail === null) throw new Error('test worker is not ready');
+      fail();
+    },
+    workerFactory() {
+      const port = createRuntimeWorker();
+      fail = () => {
+        port.onerror?.(new ErrorEvent('error', { message: 'Injected runtime failure' }));
+      };
+      return port;
+    },
+  };
+}
+
 function createPreviewPersistence(): RuntimePersistence {
   return { gateway: createInMemoryPersistenceGateway(), mode: 'browser-preview' };
 }
@@ -106,6 +202,69 @@ describe('deterministic world lab', () => {
     expect(within(society!).getByRole('combobox', { name: 'Inspect person' })).toBeVisible();
     expect(within(society!).getByRole('heading', { name: 'Cultures' })).toBeVisible();
     expect(within(society!).getByText('The founding world formed.')).toBeVisible();
+  });
+
+  it('reduces map motion when the operating system requests reduced motion', async () => {
+    const preference = {
+      addEventListener: vi.fn(),
+      addListener: vi.fn(),
+      dispatchEvent: vi.fn(() => true),
+      matches: true,
+      media: '(prefers-reduced-motion: reduce)',
+      onchange: null,
+      removeEventListener: vi.fn(),
+      removeListener: vi.fn(),
+    } satisfies MediaQueryList;
+    vi.stubGlobal(
+      'matchMedia',
+      vi.fn(() => preference),
+    );
+    try {
+      render(<App persistence={createPreviewPersistence()} workerFactory={createRuntimeWorker} />);
+
+      expect(
+        await screen.findByText('Worker projection ready · autonomous world active'),
+      ).toBeVisible();
+      expect(screen.getByRole('img', { name: 'Generated Chrono Forge world' })).toHaveAttribute(
+        'data-effects',
+        'reduced',
+      );
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it('updates map motion when the operating system preference changes', async () => {
+    const preference = Object.assign(new EventTarget(), {
+      addListener: vi.fn(),
+      matches: false,
+      media: '(prefers-reduced-motion: reduce)',
+      onchange: null,
+      removeListener: vi.fn(),
+    }) satisfies MediaQueryList;
+    vi.stubGlobal(
+      'matchMedia',
+      vi.fn(() => preference),
+    );
+    try {
+      render(<App persistence={createPreviewPersistence()} workerFactory={createRuntimeWorker} />);
+
+      expect(
+        await screen.findByText('Worker projection ready · autonomous world active'),
+      ).toBeVisible();
+      const map = screen.getByRole('img', { name: 'Generated Chrono Forge world' });
+      expect(map).toHaveAttribute('data-effects', 'full');
+
+      act(() => {
+        const change = new Event('change');
+        Object.defineProperty(change, 'matches', { value: true });
+        preference.dispatchEvent(change);
+      });
+
+      expect(map).toHaveAttribute('data-effects', 'reduced');
+    } finally {
+      vi.unstubAllGlobals();
+    }
   });
 
   it('changes overlays and camera without exposing a direct world-advance control', async () => {
@@ -170,6 +329,42 @@ describe('deterministic world lab', () => {
     ).toBeVisible();
   });
 
+  it('clears a map selection when the next valid Worker frame removes that object', async () => {
+    const user = userEvent.setup();
+    const controlledWorker = createFrameRemovalWorker();
+    render(
+      <App
+        persistence={createPreviewPersistence()}
+        workerFactory={controlledWorker.workerFactory}
+      />,
+    );
+    await screen.findByText('Worker projection ready · autonomous world active');
+
+    const inspector = screen.getByRole('combobox', { name: 'Inspect map object' });
+    await user.selectOptions(inspector, 'agent:1');
+    expect(inspector).toHaveValue('agent:1');
+    expect(screen.getByRole('article', { name: 'Selected map object' })).toBeVisible();
+    expect(screen.getByRole('img', { name: 'Generated Chrono Forge world' })).toHaveAttribute(
+      'data-selection',
+      'agent:1',
+    );
+
+    act(() => {
+      controlledWorker.removeFirstAgent();
+    });
+
+    await waitFor(() => {
+      expect(inspector).toHaveValue('');
+      expect(
+        screen.queryByRole('article', { name: 'Selected map object' }),
+      ).not.toBeInTheDocument();
+      expect(screen.getByRole('img', { name: 'Generated Chrono Forge world' })).toHaveAttribute(
+        'data-selection',
+        'none',
+      );
+    });
+  });
+
   it('refits overview framing on resize without discarding deliberate exploration', async () => {
     const user = userEvent.setup();
     render(<App persistence={createPreviewPersistence()} workerFactory={createRuntimeWorker} />);
@@ -209,18 +404,54 @@ describe('deterministic world lab', () => {
     ).toBeVisible();
   });
 
-  it('reports a worker bootstrap fault without hiding the map controls', async () => {
+  it('replaces an indefinite map bootstrap spinner with a recoverable worker fault', async () => {
+    const user = userEvent.setup();
+    let attempts = 0;
     render(
       <App
         persistence={createPreviewPersistence()}
         workerFactory={() => {
-          throw new Error('Worker blocked for test');
+          attempts += 1;
+          if (attempts === 1) throw new Error('Worker blocked for test');
+          return createRuntimeWorker();
         }}
       />,
     );
 
     expect(await screen.findByText('Simulation fault: Worker blocked for test')).toBeVisible();
+    const mapFault = screen.getByRole('alert');
+    expect(within(mapFault).getByText('World simulation unavailable.')).toBeVisible();
+    expect(within(mapFault).getByText('Worker blocked for test')).toBeVisible();
+    expect(screen.queryByText('Forging the first landscape')).not.toBeInTheDocument();
     expect(screen.getByRole('group', { name: 'Map overlay' })).toBeVisible();
+
+    await user.click(within(mapFault).getByRole('button', { name: 'Retry world simulation' }));
+
+    expect(await screen.findByRole('img', { name: 'Generated Chrono Forge world' })).toBeVisible();
+    expect(screen.getByText('Worker projection ready · autonomous world active')).toBeVisible();
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument();
+    expect(attempts).toBe(2);
+  });
+
+  it('keeps the last verified frame visible while making a fatal Worker error prominent', async () => {
+    const controlledWorker = createRuntimeErrorWorker();
+    render(
+      <App
+        persistence={createPreviewPersistence()}
+        workerFactory={controlledWorker.workerFactory}
+      />,
+    );
+    expect(await screen.findByRole('img', { name: 'Generated Chrono Forge world' })).toBeVisible();
+    expect(await screen.findByRole('button', { name: 'Start focus' })).toBeEnabled();
+
+    act(() => controlledWorker.fail());
+
+    const faultHeading = await screen.findByText('World simulation paused.');
+    const mapFault = faultHeading.closest<HTMLElement>('[role="alert"]');
+    expect(mapFault).not.toBeNull();
+    expect(within(mapFault!).getByText(/Injected runtime failure/)).toBeVisible();
+    expect(screen.getByRole('img', { name: 'Generated Chrono Forge world' })).toBeVisible();
+    expect(screen.getByRole('button', { name: 'Start focus' })).toBeDisabled();
   });
 
   it('runs a controlled-clock focus session and durably records its factual recap', async () => {
@@ -365,7 +596,7 @@ describe('deterministic world lab', () => {
     });
 
     await user.click(screen.getByRole('button', { name: 'Export' }));
-    await screen.findByText('Export package ready to copy.');
+    await screen.findByText('Export package refreshed from the current world.');
     await user.click(screen.getByText('Import or export package'));
     const exported = screen.getByRole('textbox', { name: 'Export package' });
     if (!(exported instanceof HTMLTextAreaElement)) throw new TypeError('Expected export textarea');
@@ -452,7 +683,7 @@ describe('deterministic world lab', () => {
     await user.click(screen.getByRole('button', { name: 'Save now' }));
     await screen.findByText('World saved manually.');
     await user.click(screen.getByRole('button', { name: 'Export' }));
-    await screen.findByText('Export package ready to copy.');
+    await screen.findByText('Export package refreshed from the current world.');
     await user.click(screen.getByText('Import or export package'));
     const exported = screen.getByRole('textbox', { name: 'Export package' });
     const imported = screen.getByRole('textbox', { name: 'Import package' });

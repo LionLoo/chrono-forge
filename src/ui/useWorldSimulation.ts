@@ -85,6 +85,7 @@ export interface WorldSimulationView {
     relationshipId: string,
     offset: number,
   ) => void;
+  readonly retryInitialization: () => void;
   readonly relationshipPage: {
     readonly personId: number | null;
     readonly offset: number;
@@ -135,6 +136,7 @@ export function useWorldSimulation(
     WorldSimulationView['relationshipEventPage']
   >({ personId: null, relationshipId: null, offset: 0, total: 0, events: [] });
   const [error, setError] = useState<string | null>(null);
+  const [workerAttempt, setWorkerAttempt] = useState(0);
   const frameRef = useRef<WorldFrameProjection | null>(null);
   const workerRef = useRef<SimulationWorkerPort | null>(null);
   const requestSequenceRef = useRef(0);
@@ -150,6 +152,7 @@ export function useWorldSimulation(
   }, []);
 
   useEffect(() => {
+    let disposed = false;
     let worker: SimulationWorkerPort;
     try {
       worker = workerFactory();
@@ -157,9 +160,11 @@ export function useWorldSimulation(
       const reason =
         workerError instanceof Error ? workerError.message : 'Simulation worker unavailable.';
       queueMicrotask(() => {
-        setError(reason);
+        if (!disposed) setError(reason);
       });
-      return;
+      return () => {
+        disposed = true;
+      };
     }
 
     workerRef.current = worker;
@@ -169,32 +174,42 @@ export function useWorldSimulation(
     const pendingOffline = pendingOfflineRef.current;
     const pendingCommands = pendingCommandsRef.current;
     const historicalEventRequestIds = new Set<string>();
-    const rejectRequest = (requestId: string, reason: Error) => {
+    const rejectRequest = (
+      requestId: string,
+      reason: Error,
+    ): 'command' | 'focus-checkpoint' | 'load' | 'offline' | 'save' | null => {
+      let rejected: 'command' | 'focus-checkpoint' | 'load' | 'offline' | 'save' | null = null;
       const pendingSave = pendingSaves.get(requestId);
       if (pendingSave !== undefined) {
         pendingSaves.delete(requestId);
         pendingSave.reject(reason);
+        rejected = 'save';
       }
       const pendingFocusCheckpoint = pendingFocusCheckpoints.get(requestId);
       if (pendingFocusCheckpoint !== undefined) {
         pendingFocusCheckpoints.delete(requestId);
         pendingFocusCheckpoint.reject(reason);
+        rejected = 'focus-checkpoint';
       }
       const pendingLoad = pendingLoads.get(requestId);
       if (pendingLoad !== undefined) {
         pendingLoads.delete(requestId);
         pendingLoad.reject(reason);
+        rejected = 'load';
       }
       const offlineRequest = pendingOffline.get(requestId);
       if (offlineRequest !== undefined) {
         pendingOffline.delete(requestId);
         offlineRequest.reject(reason);
+        rejected = 'offline';
       }
       const pendingCommand = pendingCommands.get(requestId);
       if (pendingCommand !== undefined) {
         pendingCommands.delete(requestId);
         pendingCommand.reject(reason);
+        rejected = 'command';
       }
+      return rejected;
     };
     const rejectAll = (reason: Error) => {
       for (const pending of pendingSaves.values()) pending.reject(reason);
@@ -207,6 +222,14 @@ export function useWorldSimulation(
       pendingLoads.clear();
       pendingOffline.clear();
       pendingCommands.clear();
+    };
+    const failWorker = (reason: Error) => {
+      rejectAll(reason);
+      if (workerRef.current === worker) workerRef.current = null;
+      worker.onmessage = null;
+      worker.onerror = null;
+      worker.terminate();
+      setError(reason.message);
     };
     const applyFrame = (nextFrame: WorldFrameProjection, replaceEvents: boolean) => {
       frameRef.current = nextFrame;
@@ -233,8 +256,7 @@ export function useWorldSimulation(
       const message = event.data;
       if (message.protocolVersion !== WORKER_PROTOCOL_VERSION) {
         const reason = new Error('The simulation worker protocol version is not supported.');
-        rejectAll(reason);
-        setError(reason.message);
+        failWorker(reason);
         return;
       }
 
@@ -260,8 +282,7 @@ export function useWorldSimulation(
               deltaError instanceof Error
                 ? deltaError
                 : new Error('The simulation worker sent an invalid frame delta.');
-            rejectAll(reason);
-            setError(reason.message);
+            failWorker(reason);
           }
           return;
         }
@@ -339,9 +360,12 @@ export function useWorldSimulation(
         }
         case 'fault': {
           const reason = new Error(message.message);
-          rejectRequest(message.requestId, reason);
-          rejectAll(reason);
-          setError(message.message);
+          const requestKind = rejectRequest(message.requestId, reason);
+          const isRecoverableRequestFault =
+            message.code === 'world-error' && (requestKind === 'load' || requestKind === 'command');
+          if (!isRecoverableRequestFault) {
+            failWorker(reason);
+          }
           return;
         }
         case 'commandAccepted': {
@@ -356,8 +380,7 @@ export function useWorldSimulation(
     };
     worker.onerror = (event) => {
       const reason = new Error(event.message || 'The simulation worker stopped unexpectedly.');
-      rejectAll(reason);
-      setError(reason.message);
+      failWorker(reason);
     };
 
     const requestId = nextRequestId('initialize');
@@ -370,6 +393,7 @@ export function useWorldSimulation(
     });
 
     return () => {
+      disposed = true;
       const reason = new Error('The simulation worker was closed before the request completed.');
       rejectAll(reason);
       workerRef.current = null;
@@ -377,7 +401,15 @@ export function useWorldSimulation(
       worker.onerror = null;
       worker.terminate();
     };
-  }, [nextRequestId, workerFactory]);
+  }, [nextRequestId, workerAttempt, workerFactory]);
+
+  const retryInitialization = useCallback(() => {
+    // A retry is only safe before an authoritative frame exists. Once ready, persistence and
+    // focus flows own any deliberate world replacement through the Worker load protocol.
+    if (frameRef.current !== null) return;
+    setError(null);
+    setWorkerAttempt((attempt) => attempt + 1);
+  }, []);
 
   const advanceTicks = useCallback(
     (ticks: number) => {
@@ -568,6 +600,7 @@ export function useWorldSimulation(
       requestRelationshipEventPage,
       requestRelationshipPage,
       requestTimelinePage,
+      retryInitialization,
       status: error === null ? (frame === null ? 'booting' : 'ready') : 'faulted',
       timeline,
     }),
@@ -587,6 +620,7 @@ export function useWorldSimulation(
       requestRelationshipEventPage,
       requestRelationshipPage,
       requestTimelinePage,
+      retryInitialization,
       timeline,
     ],
   );

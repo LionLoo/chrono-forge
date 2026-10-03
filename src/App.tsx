@@ -140,6 +140,14 @@ function tileForSelection(
   return null;
 }
 
+function systemPrefersReducedMotion(): boolean {
+  return (
+    typeof window !== 'undefined' &&
+    typeof window.matchMedia === 'function' &&
+    window.matchMedia('(prefers-reduced-motion: reduce)').matches
+  );
+}
+
 export function App({ focusAlerts, focusClock, persistence, soundscape, workerFactory }: AppProps) {
   const simulation = useWorldSimulation(workerFactory);
   const completionAlerts = focusAlerts ?? getFocusAlerts();
@@ -152,7 +160,9 @@ export function App({ focusAlerts, focusClock, persistence, soundscape, workerFa
   const [overlay, setOverlay] = useState<WorldOverlay>('terrain');
   const [inspectionOpen, setInspectionOpen] = useState(false);
   const [mapSelection, setMapSelection] = useState<SelectableId | null>(null);
-  const [reducedEffects, setReducedEffects] = useState(false);
+  const [userReducedEffects, setUserReducedEffects] = useState(false);
+  const [systemReducedMotion, setSystemReducedMotion] = useState(systemPrefersReducedMotion);
+  const reducedEffects = userReducedEffects || systemReducedMotion;
   const [audioSettings, setAudioSettings] = useState<AppSettings>(DEFAULT_APP_SETTINGS);
   const [interventionPending, setInterventionPending] = useState(false);
   const [interventionStatus, setInterventionStatus] = useState<string | null>(null);
@@ -160,6 +170,16 @@ export function App({ focusAlerts, focusClock, persistence, soundscape, workerFa
     () => (simulation.frame === null ? null : deriveAtmosphereScene(simulation.frame)),
     [simulation.frame],
   );
+
+  useEffect(() => {
+    if (typeof window.matchMedia !== 'function') return;
+    const preference = window.matchMedia('(prefers-reduced-motion: reduce)');
+    const updatePreference = (event: MediaQueryListEvent) => {
+      setSystemReducedMotion(event.matches);
+    };
+    preference.addEventListener('change', updatePreference);
+    return () => preference.removeEventListener('change', updatePreference);
+  }, []);
 
   useEffect(() => {
     if (atmosphereScene === null) return;
@@ -325,28 +345,45 @@ export function App({ focusAlerts, focusClock, persistence, soundscape, workerFa
     }
     return choices;
   }, [simulation.frame]);
+  const activeMapSelection = useMemo(
+    () =>
+      mapSelection !== null &&
+      selectableObjects.some(
+        (choice) =>
+          choice.selection.kind === mapSelection.kind && choice.selection.id === mapSelection.id,
+      )
+        ? mapSelection
+        : null,
+    [mapSelection, selectableObjects],
+  );
+  // React permits a guarded same-component adjustment during render. Clearing here keeps every
+  // committed child on the current authoritative frame and prevents an absent stable ID from
+  // resurfacing as a selection if a later frame contains that key again.
+  if (mapSelection !== null && activeMapSelection === null) setMapSelection(null);
   const selectedMapDetail = useMemo(() => {
     const frame = simulation.frame;
-    if (frame === null || mapSelection === null) return null;
-    if (mapSelection.kind === 'agent') {
-      const index = frame.agentIds.indexOf(mapSelection.id);
-      const person = frame.society.people.find((candidate) => candidate.id === mapSelection.id);
+    if (frame === null || activeMapSelection === null) return null;
+    if (activeMapSelection.kind === 'agent') {
+      const index = frame.agentIds.indexOf(activeMapSelection.id);
+      const person = frame.society.people.find(
+        (candidate) => candidate.id === activeMapSelection.id,
+      );
       if (index < 0) return null;
       return {
-        heading: person?.name ?? `Agent ${mapSelection.id}`,
+        heading: person?.name ?? `Agent ${activeMapSelection.id}`,
         lines: [
-          `Person ${mapSelection.id}`,
+          `Person ${activeMapSelection.id}`,
           `Tile ${frame.agentTiles[index] ?? 0}`,
           `Health ${Math.round((frame.agentHealth[index] ?? 0) / 10)}%`,
           `Current activity: ${AGENT_ACTION_LABELS[frame.agentActions[index] ?? 0] ?? 'unknown'}`,
         ],
       };
     }
-    if (mapSelection.kind === 'structure') {
-      const index = frame.structureIds.indexOf(mapSelection.id);
+    if (activeMapSelection.kind === 'structure') {
+      const index = frame.structureIds.indexOf(activeMapSelection.id);
       if (index < 0) return null;
       return {
-        heading: `${STRUCTURE_KIND_LABELS[frame.structureKinds[index] ?? 0] ?? 'Structure'} ${mapSelection.id}`,
+        heading: `${STRUCTURE_KIND_LABELS[frame.structureKinds[index] ?? 0] ?? 'Structure'} ${activeMapSelection.id}`,
         lines: [
           `Tile ${frame.structureTiles[index] ?? 0}`,
           `Status: ${STRUCTURE_STATUS_LABELS[frame.structureStates[index] ?? 0] ?? 'unknown'}`,
@@ -355,9 +392,9 @@ export function App({ focusAlerts, focusClock, persistence, soundscape, workerFa
         ],
       };
     }
-    if (mapSelection.kind === 'settlement') {
+    if (activeMapSelection.kind === 'settlement') {
       const settlement = frame.civilizations.settlements.find(
-        (candidate) => candidate.id === mapSelection.id,
+        (candidate) => candidate.id === activeMapSelection.id,
       );
       if (settlement === undefined) return null;
       return {
@@ -371,9 +408,9 @@ export function App({ focusAlerts, focusClock, persistence, soundscape, workerFa
         ],
       };
     }
-    if (mapSelection.kind === 'route') {
+    if (activeMapSelection.kind === 'route') {
       const route = frame.civilizations.routes.find(
-        (candidate) => candidate.id === mapSelection.id,
+        (candidate) => candidate.id === activeMapSelection.id,
       );
       if (route === undefined) return null;
       return {
@@ -386,8 +423,10 @@ export function App({ focusAlerts, focusClock, persistence, soundscape, workerFa
         ],
       };
     }
-    if (mapSelection.kind === 'ruin') {
-      const ruin = frame.civilizations.ruins.find((candidate) => candidate.id === mapSelection.id);
+    if (activeMapSelection.kind === 'ruin') {
+      const ruin = frame.civilizations.ruins.find(
+        (candidate) => candidate.id === activeMapSelection.id,
+      );
       if (ruin === undefined) return null;
       return {
         heading: `Ruin ${ruin.id}`,
@@ -399,7 +438,7 @@ export function App({ focusAlerts, focusClock, persistence, soundscape, workerFa
       };
     }
     const crisis = frame.development.activeCrises.find(
-      (candidate) => candidate.id === mapSelection.id,
+      (candidate) => candidate.id === activeMapSelection.id,
     );
     if (crisis === undefined) return null;
     return {
@@ -410,10 +449,11 @@ export function App({ focusAlerts, focusClock, persistence, soundscape, workerFa
         `Triggered at tick ${crisis.startedTick}`,
       ],
     };
-  }, [mapSelection, simulation.frame]);
+  }, [activeMapSelection, simulation.frame]);
   const selectedMapTile = useMemo(
-    () => (simulation.frame === null ? null : tileForSelection(simulation.frame, mapSelection)),
-    [mapSelection, simulation.frame],
+    () =>
+      simulation.frame === null ? null : tileForSelection(simulation.frame, activeMapSelection),
+    [activeMapSelection, simulation.frame],
   );
   const frameMapObject = useCallback(
     (selection: SelectableId | null) => {
@@ -507,7 +547,7 @@ export function App({ focusAlerts, focusClock, persistence, soundscape, workerFa
 
         <FocusPersistencePanel
           alerts={completionAlerts}
-          onReducedEffectsChange={setReducedEffects}
+          onReducedEffectsChange={setUserReducedEffects}
           onRevisitTarget={revisitFocusTarget}
           onSettingsChange={setAudioSettings}
           runtime={runtimePersistence}
@@ -558,16 +598,37 @@ export function App({ focusAlerts, focusClock, persistence, soundscape, workerFa
             <div className="map-stage">
               <div className="map-frame" ref={mapFrameRef}>
                 {simulation.frame ? (
-                  <WorldMapCanvas
-                    camera={camera}
-                    onCameraChange={setExploredCamera}
-                    onSelectionChange={selectMapObject}
-                    onViewportResize={refitOverviewOnResize}
-                    overlay={overlay}
-                    projection={simulation.frame}
-                    reducedEffects={reducedEffects}
-                    selection={mapSelection}
-                  />
+                  <>
+                    <WorldMapCanvas
+                      camera={camera}
+                      onCameraChange={setExploredCamera}
+                      onSelectionChange={selectMapObject}
+                      onViewportResize={refitOverviewOnResize}
+                      overlay={overlay}
+                      projection={simulation.frame}
+                      reducedEffects={reducedEffects}
+                      selection={activeMapSelection}
+                    />
+                    {simulation.status === 'faulted' ? (
+                      <div className="map-render-error" role="alert">
+                        <p>
+                          <strong>World simulation paused.</strong> The last verified frame remains
+                          visible. {simulation.error ?? 'The simulation Worker stopped.'} Reopen
+                          Chrono Forge to recover the saved world before continuing focus.
+                        </p>
+                      </div>
+                    ) : null}
+                  </>
+                ) : simulation.status === 'faulted' ? (
+                  <div className="map-render-error" role="alert">
+                    <p>
+                      <strong>World simulation unavailable.</strong>{' '}
+                      {simulation.error ?? 'The simulation Worker could not start.'}
+                    </p>
+                    <button onClick={simulation.retryInitialization} type="button">
+                      Retry world simulation
+                    </button>
+                  </div>
                 ) : (
                   <div className="map-loading" aria-live="polite">
                     <span />
@@ -693,7 +754,7 @@ export function App({ focusAlerts, focusClock, persistence, soundscape, workerFa
                   onChange={(event) => {
                     selectMapObject(parseSelectionKey(event.currentTarget.value));
                   }}
-                  value={mapSelection === null ? '' : selectionKey(mapSelection)}
+                  value={activeMapSelection === null ? '' : selectionKey(activeMapSelection)}
                 >
                   <option value="">No object selected</option>
                   {selectableObjects.map((choice) => (
@@ -721,7 +782,7 @@ export function App({ focusAlerts, focusClock, persistence, soundscape, workerFa
                   {selectedMapTile === null ? null : (
                     <button
                       onClick={() => {
-                        frameMapObject(mapSelection);
+                        frameMapObject(activeMapSelection);
                       }}
                       type="button"
                     >

@@ -91,7 +91,7 @@ test('production frontend renders a Worker-owned autonomous settlement', async (
     }),
   ).toBeVisible();
   await expect(page.locator('.simulation-status')).toContainText('Worker projection ready');
-  await expect(page.getByRole('img', { name: /world map/ })).toBeVisible();
+  await expect(page.getByRole('application', { name: /world map/ })).toBeVisible();
   await expect(page.getByText('Living people')).toBeVisible();
   await expect(page.getByLabel('Settlement stores')).toBeVisible();
   await expect(page.getByRole('heading', { name: 'Settlement and society' })).toHaveCount(0);
@@ -149,6 +149,7 @@ test('society controls remain readable with reduced motion and 200% text', async
   await page.emulateMedia({ reducedMotion: 'reduce' });
   await page.goto(origin);
   await expect(page.locator('.simulation-status')).toContainText('Worker projection ready');
+  await expect(page.locator('.world-map-canvas')).toHaveAttribute('data-effects', 'reduced');
   await page.evaluate(() => {
     document.documentElement.style.fontSize = '200%';
   });
@@ -166,9 +167,10 @@ test('society controls remain readable with reduced motion and 200% text', async
   );
 });
 
-test('primary world controls remain keyboard operable and unclipped from 100% through 200%', async ({
+test('primary world, archive, and settings controls remain keyboard operable and unclipped from 100% through 200%', async ({
   page,
 }) => {
+  await page.emulateMedia({ reducedMotion: 'reduce' });
   await page.goto(origin);
   await expect(page.locator('.simulation-status')).toContainText('Worker projection ready');
 
@@ -182,6 +184,26 @@ test('primary world controls remain keyboard operable and unclipped from 100% th
   await zoom.focus();
   await page.keyboard.press('Enter');
   await expect(page.getByLabel('Camera position')).toContainText('1.80×');
+
+  const interactiveMap = page.getByRole('application', { name: /world map/ });
+  await expect(interactiveMap).toHaveAttribute('aria-roledescription', 'interactive world map');
+  const mapInstructions = await interactiveMap.evaluate((element) => {
+    const descriptionId = element.getAttribute('aria-describedby');
+    return descriptionId === null ? null : document.getElementById(descriptionId)?.textContent;
+  });
+  expect(mapInstructions?.replace(/\s+/g, ' ').trim()).toBe(
+    'Use arrow keys to pan. Use plus and minus to zoom. Press Enter to inspect the first visible map object.',
+  );
+  await interactiveMap.focus();
+  await page.keyboard.press('ArrowRight');
+  await expect(page.getByLabel('Camera position')).toContainText('X 60');
+  await page.keyboard.press('Shift+=');
+  await expect(page.getByLabel('Camera position')).toContainText('2.07×');
+  await page.getByRole('button', { name: 'Overview' }).focus();
+  await page.keyboard.press('Enter');
+  await interactiveMap.focus();
+  await page.keyboard.press('Enter');
+  await expect(page.getByRole('article', { name: 'Selected map object' })).toBeVisible();
 
   const mapObject = page.getByRole('combobox', { name: 'Inspect map object' });
   await mapObject.focus();
@@ -209,6 +231,7 @@ test('primary world controls remain keyboard operable and unclipped from 100% th
   await expect(page.getByRole('heading', { name: 'Settlement and society' })).toBeVisible();
   await page.getByRole('button', { name: 'Close world inspection' }).focus();
   await page.keyboard.press('Enter');
+  await page.setViewportSize({ width: 375, height: 812 });
 
   const settings = page.getByText('Focus and accessibility settings', { exact: true });
   await settings.focus();
@@ -236,6 +259,23 @@ test('primary world controls remain keyboard operable and unclipped from 100% th
   await page.keyboard.press('Space');
   await expect(page.getByRole('button', { name: 'Preview audio' })).toBeEnabled();
 
+  const saveSettings = page.getByRole('button', { name: 'Save settings' });
+  await saveSettings.focus();
+  await page.keyboard.press('Enter');
+  await expect(page.getByText('Settings saved locally.')).toBeVisible();
+
+  const exportWorld = page.getByRole('button', { name: 'Export' });
+  await exportWorld.focus();
+  await page.keyboard.press('Enter');
+  await expect(page.getByText('Export package refreshed from the current world.')).toBeVisible();
+  const transferPackage = page.getByText('Import or export package', { exact: true });
+  await transferPackage.focus();
+  await expect(transferPackage).toHaveCSS('outline-style', 'solid');
+  await page.keyboard.press('Enter');
+  await expect(page.getByRole('textbox', { name: 'Export package' })).toHaveValue(
+    /"format":"chrono-forge-save-export"/,
+  );
+
   const calmMode = page.getByRole('checkbox', { name: 'Calm focus mode' });
   await calmMode.focus();
   await page.keyboard.press('Space');
@@ -251,6 +291,7 @@ test('primary world controls remain keyboard operable and unclipped from 100% th
     await expect(page.getByRole('button', { name: 'Close world inspection' })).toBeVisible();
     await expect(page.getByRole('combobox', { name: 'Inspect person' })).toBeVisible();
     await expect(page.getByRole('button', { name: 'Start focus' })).toBeVisible();
+    await expect(page.getByRole('textbox', { name: 'Export package' })).toBeVisible();
     expect(
       await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth),
     ).toBe(true);
@@ -342,12 +383,32 @@ test('inspects and persists a Worker-owned mid-flight space world', async ({ pag
   ).toContainText('active');
 });
 
-test('inspects contacted space facts at 100-200% with reduced effects', async ({ page }) => {
+test('inspects contacted civilization, development, and space facts at 100-200%', async ({
+  page,
+}) => {
   test.setTimeout(120_000);
   await page.emulateMedia({ reducedMotion: 'reduce' });
+  await page.setViewportSize({ width: 375, height: 812 });
   await page.goto(origin);
   await importSavePackage(page, M9_E2E_ARCHIVES.contactedPackage, 'M9 contacted world');
   await page.getByRole('button', { name: 'Open world inspection' }).click();
+  const settlementInspector = page.getByRole('combobox', { name: 'Inspect settlement' });
+  const civilizationInspector = page.getByRole('combobox', { name: 'Inspect civilization' });
+  await expect(page.getByRole('heading', { name: 'Civilizations and settlements' })).toBeVisible();
+  await expect(settlementInspector).toBeVisible();
+  await expect(civilizationInspector).toBeVisible();
+  await expect(page.getByRole('heading', { name: 'Residency and migration' })).toBeVisible();
+  await expect(page.getByRole('heading', { name: 'Trade routes' })).toBeVisible();
+  await expect(page.getByRole('heading', { name: 'Diplomacy' })).toBeVisible();
+  await expect(page.getByRole('heading', { name: 'Conflicts' })).toBeVisible();
+  await expect(page.getByRole('heading', { name: 'Ruins' })).toBeVisible();
+  await expect(page.getByRole('heading', { name: 'Research and conditions' })).toBeVisible();
+  await expect(page.getByRole('heading', { name: 'Research', exact: true })).toBeVisible();
+  await expect(page.getByRole('heading', { name: 'Active conditions' })).toBeVisible();
+  await page.getByText('Optional intervention', { exact: true }).click();
+  await expect(page.getByRole('combobox', { name: 'Intervention kind' })).toBeVisible();
+  await expect(page.getByRole('spinbutton', { name: 'Intensity' })).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Queue intervention' })).toBeVisible();
   await expect(page.locator('.space-body-list')).not.toContainText(/Body-\d+/);
   await expect(page.getByRole('list', { name: 'Alien civilizations' })).toContainText(
     /allied|cooperative|competitive|hostile/,
@@ -364,10 +425,37 @@ test('inspects contacted space facts at 100-200% with reduced effects', async ({
     }, scale);
     await expect(page.getByRole('heading', { name: 'The wider system' })).toBeVisible();
     await expect(page.getByRole('list', { name: 'Alien civilizations' })).toBeVisible();
+    await expect(
+      page.getByRole('heading', { name: 'Civilizations and settlements' }),
+    ).toBeVisible();
+    await expect(settlementInspector).toBeVisible();
+    await expect(civilizationInspector).toBeVisible();
+    await expect(page.getByRole('heading', { name: 'Research and conditions' })).toBeVisible();
+    await expect(page.getByRole('combobox', { name: 'Intervention kind' })).toBeVisible();
+    await expect(page.getByRole('button', { name: 'Queue intervention' })).toBeVisible();
     expect(
       await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth),
     ).toBe(true);
   }
+
+  await settlementInspector.selectOption({ label: 'Far Harbor' });
+  const farHarborFacts = page.getByRole('article', { name: 'Far Harbor settlement facts' });
+  await expect(farHarborFacts).toContainText('Population');
+  await expect(farHarborFacts).toContainText('12');
+
+  await civilizationInspector.selectOption({ label: 'Dawn folk Community 2' });
+  const communityFacts = page.getByLabel('Dawn folk Community 2 civilization facts');
+  await expect(communityFacts).toContainText('federated');
+  await expect(communityFacts).toContainText('Dawn folk Hearth 3');
+
+  await page.getByRole('combobox', { name: 'Intervention kind' }).selectOption('protection');
+  await page.getByRole('radio', { name: 'Challenging' }).check();
+  await page.getByRole('spinbutton', { name: 'Intensity' }).fill('64');
+  await page.getByRole('button', { name: 'Queue intervention' }).click();
+  await expect(
+    page.getByText('Intervention queued for the next civil-year development pulse.'),
+  ).toBeVisible();
+
   await page.getByText('Focus and accessibility settings', { exact: true }).click();
   const reducedEffects = page.getByRole('checkbox', { name: 'Reduce visual effects' });
   if (!(await reducedEffects.isChecked())) await reducedEffects.check();

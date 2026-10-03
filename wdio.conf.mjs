@@ -48,4 +48,8 @@ export const config = {
     ui: 'bdd',
     timeout: 120_000,
   },
+  before: async (_capabilities, _specs, session) => {
+    const activeWindow = await session.getWindowHandle();
+    await session.switchToWindow(activeWindow);
+  },
 };
