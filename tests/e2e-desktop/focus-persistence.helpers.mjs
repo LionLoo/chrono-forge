@@ -5,8 +5,23 @@ export const M9_E2E_ARCHIVES = JSON.parse(
   readFileSync(new URL('../fixtures/saves/m9-e2e-archives.json', import.meta.url), 'utf8'),
 );
 
+export async function executeTauri(script, ...args) {
+  try {
+    return await browser.tauri.execute(script, ...args);
+  } catch (error) {
+    if (
+      error instanceof Error &&
+      error.name === 'TimeoutError' &&
+      error.message === 'The operation was aborted due to timeout'
+    ) {
+      console.error('[native-e2e-infrastructure] tauri-direct-eval-timeout');
+    }
+    throw error;
+  }
+}
+
 export async function clearIsolatedNativeArchive() {
-  await browser.tauri.execute(async ({ core }) => {
+  await executeTauri(async ({ core }) => {
     const slots = await core.invoke('list_save_slots');
     await Promise.all(slots.map(({ slotId }) => core.invoke('delete_save_slot', { slotId })));
   });
@@ -85,7 +100,7 @@ export async function waitForLoadedWorld(name) {
 }
 
 export async function installActiveM9Archive(savePackage) {
-  return browser.tauri.execute(async ({ core }, packageText) => {
+  return executeTauri(async ({ core }, packageText) => {
     const imported = await core.invoke('import_save_slot', { package: packageText });
     const settings = await core.invoke('load_settings');
     await core.invoke('save_settings', {

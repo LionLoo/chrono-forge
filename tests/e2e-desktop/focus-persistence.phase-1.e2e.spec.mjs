@@ -2,6 +2,7 @@ import { $, browser, expect } from '@wdio/globals';
 import {
   advanceControlledClock,
   clearIsolatedNativeArchive,
+  executeTauri,
   openWorldInspection,
   reloadFrontendAfterArchiveChange,
   setControlledClock,
@@ -277,9 +278,7 @@ describe('native focus persistence phase 1', () => {
       },
       { timeoutMsg: 'reduced-effects setting did not persist' },
     );
-    const persistedSettings = await browser.tauri.execute(({ core }) =>
-      core.invoke('load_settings'),
-    );
+    const persistedSettings = await executeTauri(({ core }) => core.invoke('load_settings'));
     expect(persistedSettings).toMatchObject({
       reducedEffects: true,
       audioMuted: false,
@@ -308,9 +307,7 @@ describe('native focus persistence phase 1', () => {
         async () => {
           lastSaveStatus = await $('.persistence-status').getText();
           if (lastSaveStatus.startsWith('Archive fault:')) throw new Error(lastSaveStatus);
-          lastSessions = await browser.tauri.execute(({ core }) =>
-            core.invoke('list_focus_sessions'),
-          );
+          lastSessions = await executeTauri(({ core }) => core.invoke('list_focus_sessions'));
           return lastSessions.some(
             ({ session }) => session.slotId === 'primary' && session.status === 'paused',
           );
@@ -329,15 +326,13 @@ describe('native focus persistence phase 1', () => {
       );
     }
 
-    const allPausedSessions = await browser.tauri.execute(({ core }) =>
-      core.invoke('list_focus_sessions'),
-    );
+    const allPausedSessions = await executeTauri(({ core }) => core.invoke('list_focus_sessions'));
     const pausedSessions = allPausedSessions
       .map(({ session }) => session)
       .filter((session) => session.slotId === 'primary');
     expect(pausedSessions).toHaveLength(1);
     expect(pausedSessions[0]).toMatchObject({ status: 'paused', focusedMs: 10_000 });
-    const pausedCandidates = await browser.tauri.execute(({ core }) =>
+    const pausedCandidates = await executeTauri(({ core }) =>
       core.invoke('load_save_slot_candidates', { slotId: 'primary' }),
     );
     expect(pausedCandidates[0]?.focusSession).toMatchObject({

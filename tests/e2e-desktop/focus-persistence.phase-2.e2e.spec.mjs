@@ -1,6 +1,7 @@
 import { $, browser, expect } from '@wdio/globals';
 import {
   advanceControlledClock,
+  executeTauri,
   expectM10Migration,
   installActiveM9Archive,
   M9_E2E_ARCHIVES,
@@ -46,7 +47,7 @@ describe('native focus persistence phase 2', () => {
       { timeoutMsg: 'completed focus session did not publish its factual recap' },
     );
 
-    const allCompletedSessions = await browser.tauri.execute(({ core }) =>
+    const allCompletedSessions = await executeTauri(({ core }) =>
       core.invoke('list_focus_sessions'),
     );
     const completedSessions = allCompletedSessions
@@ -65,7 +66,7 @@ describe('native focus persistence phase 2', () => {
     expect(completedRecord?.checkpointGeneration).toBeGreaterThan(0);
     expect(completedRecord?.authoritySession).toEqual(completedSession);
     expect(completedSession.review.after.tick - completedSession.review.before.tick).toBe(600);
-    const completedCandidates = await browser.tauri.execute(({ core }) =>
+    const completedCandidates = await executeTauri(({ core }) =>
       core.invoke('load_save_slot_candidates', { slotId: 'primary' }),
     );
     const completedWorld = JSON.parse(completedCandidates[0]?.snapshot).payload;
@@ -121,7 +122,7 @@ describe('native focus persistence phase 2', () => {
       async () => (await $('.persistence-status').getText()).includes('World saved manually.'),
       { timeoutMsg: 'mid-flight M9 save did not commit' },
     );
-    const candidates = await browser.tauri.execute(({ core }) =>
+    const candidates = await executeTauri(({ core }) =>
       core.invoke('load_save_slot_candidates', { slotId: 'm9-mid-flight' }),
     );
     expectM10Migration(candidates[0]?.snapshot, expectedMidFlight);
@@ -147,7 +148,7 @@ describe('native focus persistence phase 2', () => {
       async () => (await $('.persistence-status').getText()).includes('World saved manually.'),
       { timeoutMsg: 'post-contact M9 save did not commit' },
     );
-    const candidates = await browser.tauri.execute(({ core }) =>
+    const candidates = await executeTauri(({ core }) =>
       core.invoke('load_save_slot_candidates', { slotId: 'm9-contacted' }),
     );
     expectM10Migration(candidates[0]?.snapshot, expectedContacted);
