@@ -41,6 +41,7 @@
     "test:rust": "cargo test --manifest-path src-tauri/Cargo.toml --all-targets",
     "test:e2e:web": "npm run build:web && playwright test",
     "test:e2e:desktop": "npm run build:e2e:desktop && wdio run wdio.conf.mjs",
+    "test:e2e:desktop:ci": "node scripts/run-native-e2e-ci.mjs",
     "verify:production-exclusion": "npm run build:desktop && node tests/e2e-desktop/verify-production-exclusion.mjs",
     "bench": "vitest bench --run",
     "generate:sbom": "node scripts/generate-sbom.mjs release-artifacts/chrono-forge.cdx.json",
