@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from 'vitest';
 
 import {
   confirmedNativeE2eInfrastructureFailures,
+  createNativeE2eCommandTracker,
   runNativeE2eCi,
   type NativeE2eCommandResult,
 } from '../../scripts/run-native-e2e-ci.mjs';
@@ -43,6 +44,7 @@ describe('native CI E2E infrastructure classification', () => {
     'Error: Script execution timed out',
     'TimeoutError: The operation was aborted due to timeout',
     'WebDriverError: Session f0c679fc-44c5-49fc-8618-5c3f3ad7d899 not found when running "execute/sync" with method "POST"',
+    '[native-e2e-diagnostics] command-active-at-test-timeout id=42 command="execute" elapsedMs=360000\nTimeout of 360000ms exceeded. The execution in the test "native focus persistence phase 1" took too long.',
   ])('rejects an ordinary product or assertion failure: %s', (output) => {
     expect(confirmedNativeE2eInfrastructureFailures(output)).toEqual([]);
   });
@@ -108,5 +110,48 @@ describe('native CI E2E infrastructure classification', () => {
     expect(run).toHaveBeenCalledTimes(3);
     expect(logger.warn).toHaveBeenCalledOnce();
     expect(logger.error).toHaveBeenCalledOnce();
+  });
+});
+
+describe('native CI E2E command timeout diagnostics', () => {
+  it('reports only commands that remain active when the test wrapper times out', () => {
+    const logger = { error: vi.fn() };
+    let nowMs = 10_000;
+    const tracker = createNativeE2eCommandTracker({ logger, now: () => nowMs });
+
+    tracker.beforeCommand('waitUntil');
+    nowMs = 20_000;
+    tracker.beforeCommand('getText');
+    tracker.afterCommand('getText');
+    nowMs = 370_000;
+    tracker.afterTest(
+      new Error(
+        'Timeout of 360000ms exceeded. The execution in the test "native focus persistence phase 1" took too long.',
+      ),
+    );
+
+    expect(logger.error).toHaveBeenCalledWith(
+      '[native-e2e-diagnostics] command-active-at-test-timeout id=1 command="waitUntil" elapsedMs=360000',
+    );
+    expect(logger.error).toHaveBeenCalledOnce();
+  });
+
+  it('does not report recovered commands or ordinary product failures', () => {
+    const logger = { error: vi.fn() };
+    let nowMs = 10_000;
+    const tracker = createNativeE2eCommandTracker({ logger, now: () => nowMs });
+
+    tracker.beforeCommand('waitUntil');
+    nowMs = 100_000;
+    tracker.afterCommand('waitUntil');
+    tracker.afterTest(
+      new Error(
+        'Timeout of 360000ms exceeded. The execution in the test "native focus persistence phase 1" took too long.',
+      ),
+    );
+    tracker.beforeCommand('execute');
+    tracker.afterTest(new Error('expected persisted focus session to exist'));
+
+    expect(logger.error).not.toHaveBeenCalled();
   });
 });

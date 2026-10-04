@@ -4,6 +4,7 @@ import path from 'node:path';
 
 const repositoryRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const npmCliPath = process.env.npm_execpath;
+const NATIVE_TEST_TIMEOUT_PATTERN = /Timeout of \d+ms exceeded\. The execution in the test /u;
 
 const CONFIRMED_INFRASTRUCTURE_FAILURES = Object.freeze([
   Object.freeze({
@@ -32,6 +33,35 @@ const CONFIRMED_INFRASTRUCTURE_FAILURES = Object.freeze([
       ),
   }),
 ]);
+
+export function createNativeE2eCommandTracker({ logger = console, now = Date.now } = {}) {
+  let nextCommandId = 0;
+  const activeCommands = [];
+
+  return Object.freeze({
+    beforeCommand(commandName) {
+      const commandId = ++nextCommandId;
+      activeCommands.push({ commandId, commandName, startedAtMs: now() });
+    },
+    afterCommand(commandName) {
+      const commandIndex = activeCommands.findLastIndex(
+        (activeCommand) => activeCommand.commandName === commandName,
+      );
+      if (commandIndex === -1) return;
+      activeCommands.splice(commandIndex, 1);
+    },
+    afterTest(error) {
+      const message = error instanceof Error ? error.message : '';
+      if (!NATIVE_TEST_TIMEOUT_PATTERN.test(message)) return;
+      const observedAtMs = now();
+      for (const { commandId, commandName, startedAtMs } of activeCommands) {
+        logger.error(
+          `[native-e2e-diagnostics] command-active-at-test-timeout id=${commandId} command=${JSON.stringify(commandName)} elapsedMs=${Math.max(0, observedAtMs - startedAtMs)}`,
+        );
+      }
+    },
+  });
+}
 
 export function confirmedNativeE2eInfrastructureFailures(output) {
   return CONFIRMED_INFRASTRUCTURE_FAILURES.filter(({ matches }) => matches(output)).map(

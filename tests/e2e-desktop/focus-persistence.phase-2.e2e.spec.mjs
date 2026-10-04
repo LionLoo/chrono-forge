@@ -56,7 +56,11 @@ describe('native focus persistence phase 2', () => {
     expect(completedSessions).toHaveLength(1);
     const completedSession = completedSessions[0];
     if (completedSession === undefined) throw new Error('completed focus session is unavailable');
-    expect(completedSession).toMatchObject({ status: 'completed', focusedMs: 60_000 });
+    expect(completedSession).toMatchObject({
+      status: 'completed',
+      plannedFocusMs: 120_000,
+      focusedMs: 60_000,
+    });
     expect(completedSession.review).toMatchObject({
       version: 1,
     });
@@ -99,6 +103,7 @@ describe('native focus persistence phase 2', () => {
     expect(completedCandidates[0]?.focusSession).toMatchObject({
       sessionId: completedSession.sessionId,
       status: 'completed',
+      plannedFocusMs: 120_000,
       focusedMs: 60_000,
     });
   }).timeout(360_000);

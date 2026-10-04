@@ -9,6 +9,17 @@ export interface NativeE2eLogger {
   warn(message: string): void;
 }
 
+export interface NativeE2eCommandTracker {
+  beforeCommand(commandName: string): void;
+  afterCommand(commandName: string): void;
+  afterTest(error?: unknown): void;
+}
+
+export declare function createNativeE2eCommandTracker(options?: {
+  readonly logger?: Pick<NativeE2eLogger, 'error'>;
+  readonly now?: () => number;
+}): NativeE2eCommandTracker;
+
 export declare function confirmedNativeE2eInfrastructureFailures(output: string): string[];
 
 export declare function runNativeE2eCi(
