@@ -5,6 +5,7 @@ import { INITIAL_WORLD_CAMERA, type WorldCamera } from '../../src/rendering/came
 import { STRUCTURE_KIND_CODES, STRUCTURE_STATE_CODES } from '../../src/protocol';
 import { WorldMapCanvas, type WorldMapProjection } from '../../src/rendering/WorldMapCanvas';
 import { createInitialWorld, stepWorld } from '../../src/simulation/world';
+import { createTestRuntimeActivityRecorder } from '../../src/testing/runtime-activity';
 import { projectWorldFrame } from '../../src/workers/simulation-runtime';
 
 const pixiMocks = vi.hoisted(() => {
@@ -36,6 +37,7 @@ const pixiMocks = vi.hoisted(() => {
     readonly destroy = vi.fn();
     readonly stage = new MockContainer();
     readonly init = vi.fn(() => initialize());
+    readonly render = vi.fn();
 
     constructor() {
       applications.push(this);
@@ -119,6 +121,83 @@ function initialAgentHead(
 describe('Pixi world projection', () => {
   beforeEach(() => {
     pixiMocks.reset();
+  });
+
+  it('renders on demand and remains silent while the static world is idle', async () => {
+    let nowMs = 0;
+    const activity = createTestRuntimeActivityRecorder(() => nowMs);
+    const view = render(
+      <WorldMapCanvas
+        activityRecorder={activity}
+        camera={INITIAL_WORLD_CAMERA}
+        onCameraChange={vi.fn()}
+        overlay="terrain"
+        projection={projection}
+      />,
+    );
+
+    await view.findByRole('application', { name: /founding world map/ });
+    const application = pixiMocks.applications[0];
+    expect(application?.init).toHaveBeenCalledWith(
+      expect.objectContaining({ autoStart: false, preference: 'webgl' }),
+    );
+    expect(application?.render).toHaveBeenCalledOnce();
+    expect(activity.count('render-applied')).toBe(1);
+
+    nowMs = 60_000;
+    await act(async () => Promise.resolve());
+    expect(application?.render).toHaveBeenCalledOnce();
+    expect(activity.count('render-applied')).toBe(1);
+
+    view.rerender(
+      <WorldMapCanvas
+        activityRecorder={activity}
+        camera={{ ...INITIAL_WORLD_CAMERA, x: INITIAL_WORLD_CAMERA.x + 6 }}
+        onCameraChange={vi.fn()}
+        overlay="terrain"
+        projection={projection}
+      />,
+    );
+    expect(application?.render).toHaveBeenCalledTimes(2);
+    expect(
+      activity
+        .samples()
+        .filter((sample) => sample.kind === 'render-applied')
+        .map((sample) => sample.reason),
+    ).toEqual(['initial', 'view']);
+  });
+
+  it('contains activity-recorder failures without changing successful renders', async () => {
+    const throwingRecorder = {
+      record() {
+        throw new Error('Injected activity-recorder failure');
+      },
+    };
+    const view = render(
+      <WorldMapCanvas
+        activityRecorder={throwingRecorder}
+        camera={INITIAL_WORLD_CAMERA}
+        onCameraChange={vi.fn()}
+        overlay="terrain"
+        projection={projection}
+      />,
+    );
+
+    await view.findByRole('application', { name: /founding world map/ });
+    expect(view.queryByRole('alert')).not.toBeInTheDocument();
+    expect(pixiMocks.applications[0]?.render).toHaveBeenCalledOnce();
+
+    view.rerender(
+      <WorldMapCanvas
+        activityRecorder={throwingRecorder}
+        camera={{ ...INITIAL_WORLD_CAMERA, x: INITIAL_WORLD_CAMERA.x + 6 }}
+        onCameraChange={vi.fn()}
+        overlay="terrain"
+        projection={projection}
+      />,
+    );
+    expect(view.queryByRole('alert')).not.toBeInTheDocument();
+    expect(pixiMocks.applications[0]?.render).toHaveBeenCalledTimes(2);
   });
 
   it('draws dense tiles and applies projection, camera, pointer, and wheel updates', async () => {
@@ -371,6 +450,66 @@ describe('Pixi world projection', () => {
     ).toEqual(initialAgentHead(advanced, movedAgentIndex, destinationTile));
     expect(requestAnimationFrame).not.toHaveBeenCalled();
     requestAnimationFrame.mockRestore();
+  });
+
+  it('cancels pending agent interpolation when reduced effects turn on', async () => {
+    let nextFrameId = 1;
+    const pendingFrames = new Map<number, FrameRequestCallback>();
+    const requestAnimationFrame = vi
+      .spyOn(window, 'requestAnimationFrame')
+      .mockImplementation((callback) => {
+        const frameId = nextFrameId;
+        nextFrameId += 1;
+        pendingFrames.set(frameId, callback);
+        return frameId;
+      });
+    const cancelAnimationFrame = vi
+      .spyOn(window, 'cancelAnimationFrame')
+      .mockImplementation((frameId) => {
+        pendingFrames.delete(frameId);
+      });
+    const world = createInitialWorld([1, 2, 3, 4]);
+    const initial = projectWorldFrame(world);
+    const advanced = projectWorldFrame(stepWorld(world, 200));
+    const view = render(
+      <WorldMapCanvas
+        camera={INITIAL_WORLD_CAMERA}
+        onCameraChange={vi.fn()}
+        overlay="terrain"
+        projection={initial}
+      />,
+    );
+
+    await view.findByRole('application');
+    view.rerender(
+      <WorldMapCanvas
+        camera={INITIAL_WORLD_CAMERA}
+        onCameraChange={vi.fn()}
+        overlay="terrain"
+        projection={advanced}
+      />,
+    );
+    expect(pendingFrames.size).toBe(1);
+    const renderCountBeforeReducedEffects =
+      pixiMocks.applications[0]?.render.mock.calls.length ?? 0;
+
+    view.rerender(
+      <WorldMapCanvas
+        camera={INITIAL_WORLD_CAMERA}
+        onCameraChange={vi.fn()}
+        overlay="terrain"
+        projection={advanced}
+        reducedEffects
+      />,
+    );
+
+    expect(cancelAnimationFrame).toHaveBeenCalledWith(1);
+    expect(pendingFrames.size).toBe(0);
+    expect(pixiMocks.applications[0]?.render).toHaveBeenCalledTimes(
+      renderCountBeforeReducedEffects + 1,
+    );
+    requestAnimationFrame.mockRestore();
+    cancelAnimationFrame.mockRestore();
   });
 
   it('surfaces renderer initialization errors', async () => {

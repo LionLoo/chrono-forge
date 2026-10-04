@@ -221,4 +221,33 @@ describe('focus controller', () => {
     });
     expect(ticks).toStrictEqual([]);
   });
+
+  it('schedules no periodic work while idle or paused', () => {
+    const controlled = createClock();
+    const ticks: number[] = [];
+    const { result } = renderHook(() =>
+      useFocusController({
+        clock: controlled.clock,
+        slotId: null,
+        createSessionId: () => 'idle-session',
+        onSimulationTicks: (count) => ticks.push(count),
+      }),
+    );
+
+    expect(vi.getTimerCount()).toBe(0);
+    act(() => result.current.start({ ...configuration, focusDurationMs: 60_000 }));
+    expect(vi.getTimerCount()).toBe(1);
+    controlled.set(1_000);
+    act(() => result.current.pause());
+    expect(ticks).toEqual([10]);
+    expect(vi.getTimerCount()).toBe(0);
+
+    controlled.set(61_000);
+    void act(() => vi.advanceTimersByTime(60_000));
+    expect(ticks).toEqual([10]);
+    expect(result.current.state).toMatchObject({
+      accumulatedFocusMs: 1_000,
+      phase: 'focus-paused',
+    });
+  });
 });
