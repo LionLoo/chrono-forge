@@ -1177,7 +1177,6 @@ export function createSimulationRuntime(post: RuntimePost): SimulationRuntime {
     lastEmittedFrame = undefined;
     emitReady(request.requestId);
     emitEvents(request.requestId, world.eventLog);
-    metrics(request.requestId);
   }
 
   function advance(request: AdvanceTicksRequest): void {
@@ -1190,7 +1189,6 @@ export function createSimulationRuntime(post: RuntimePost): SimulationRuntime {
     world = stepWorld(world, request.ticks);
     emitOrderedFrameDelta(request.requestId);
     emitEvents(request.requestId, world.eventLog.slice(priorEventCount));
-    metrics(request.requestId);
   }
 
   function load(request: LoadRequest): void {
@@ -1199,7 +1197,6 @@ export function createSimulationRuntime(post: RuntimePost): SimulationRuntime {
     lastEmittedFrame = undefined;
     emitReady(request.requestId);
     emitEvents(request.requestId, world.eventLog);
-    metrics(request.requestId);
   }
 
   function requestSave(request: RequestSaveRequest): void {
@@ -1376,7 +1373,6 @@ export function createSimulationRuntime(post: RuntimePost): SimulationRuntime {
                 (Math.floor(world.tick / world.config.societyYearTicks) + 1) *
                 world.config.societyYearTicks,
             });
-            metrics(message.requestId);
             return;
           case 'requestSave':
             requestSave(message);

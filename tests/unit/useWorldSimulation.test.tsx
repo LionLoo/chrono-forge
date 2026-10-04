@@ -146,27 +146,6 @@ function createRequestFaultWorker(
   return port;
 }
 
-function createLoadReadyOnlyWorker(): SimulationWorkerPort {
-  let active = true;
-  const runtime = createSimulationRuntime((message: WorkerToUiMessage) => {
-    if (message.type === 'metrics' && message.requestId.startsWith('load-')) return;
-    queueMicrotask(() => {
-      if (active) port.onmessage?.(new MessageEvent('message', { data: message }));
-    });
-  });
-  const port: SimulationWorkerPort = {
-    onerror: null,
-    onmessage: null,
-    postMessage(message: UiToWorkerMessage) {
-      runtime.handleMessage(message);
-    },
-    terminate() {
-      active = false;
-    },
-  };
-  return port;
-}
-
 function createStaleDeltaWorker(): SimulationWorkerPort {
   const initial = createInitialWorld([2, 3, 5, 7]);
   const initialFrame = projectWorldFrame(initial);
@@ -328,7 +307,7 @@ describe('world simulation UI gateway', () => {
             sample.kind === 'worker-response',
         )
         .map((sample) => sample.messageType),
-    ).toEqual(['ready', 'eventBatch', 'metrics', 'frameDelta', 'metrics']);
+    ).toEqual(['ready', 'eventBatch', 'frameDelta']);
     expect(activity.count('frame-applied')).toBe(2);
   });
 
@@ -482,7 +461,7 @@ describe('world simulation UI gateway', () => {
   });
 
   it('treats a ready frame as the authoritative completion acknowledgement for a load', async () => {
-    const { result } = renderHook(() => useWorldSimulation(createLoadReadyOnlyWorker));
+    const { result } = renderHook(() => useWorldSimulation(createRuntimeWorker));
     await waitFor(() => expect(result.current.status).toBe('ready'));
     const snapshot = serializeWorldSnapshot(stepWorld(createInitialWorld([5, 7, 11, 13]), 100));
 
