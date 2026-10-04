@@ -52,5 +52,5 @@
 
 ## Current checkpoint boundary
 
-- The deterministic measurement seam and first confirmed idle-render regression are implemented, independently reviewed with every finding closed, and locally verified. They are not yet committed, pushed, or hosted-verified.
+- The deterministic measurement seam and first confirmed idle-render regression are implemented, independently reviewed with every finding closed, locally verified, and committed at `56f9f03d42c9ff87cec4202bbd069f56b4cabe9e`. The checkpoint is not yet pushed or hosted-verified.
 - Large-world browser/desktop baselines, long-session memory slopes, installed save/reload and controlled-end evidence, normal-focus metrics-message audit, reduced-effects profile runs, and machine-specific power/thermal observations remain open.
