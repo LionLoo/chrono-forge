@@ -173,7 +173,7 @@ Close other Chrono Forge instances and retry. Do not copy, replace, or edit the 
 - Only Windows 10/11 x64 is a supported native target for v1.
 - Current installers are unsigned and use manual trusted distribution; there is no embedded private-repository token or anonymous auto-updater.
 - **Save as new slot** currently duplicates a world; fresh-world and reset semantics remain M10.9 work.
-- The M10.5 release-quality game-graphics/UI overhaul, dedicated frontend/backend/whole-product stabilization gates, clean release-candidate verification, signing/release packaging, tag, and private GitHub v1.0.0 release are not complete.
+- Long-session performance/power/responsiveness, backend and whole-product stabilization, world-lifecycle semantics, clean release-candidate verification, signing/release packaging, tag, and private GitHub v1.0.0 release are not complete.
 - macOS and Linux may be architecturally possible but are not supported or release-verified.
 
 For development and exact validation commands, see [README.md](README.md), [CONTRIBUTING.md](CONTRIBUTING.md), and [PLAN.md](PLAN.md). The current evidence and known blockers are in [PROGRESS.md](PROGRESS.md).

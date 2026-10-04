@@ -204,6 +204,16 @@ Run a dedicated frontend defect campaign across React, Pixi, Worker-frame applic
 
 Acceptance: no known critical or high-severity frontend defect remains; every discovered release-blocking UI defect has a regression test and verified fix. Browser E2E, visual baselines, keyboard-only flows, text-scale, reduced-effects, contrast, and desktop interaction checks pass on the exact candidate head. No UI path may fabricate history, mutate world authority, lose a user action silently, trap keyboard focus, or prevent a user from reaching focus/save/recovery controls.
 
+## M10.65 — Long-session performance, power, and responsiveness
+
+Branch: `release/v1-long-session-performance`
+
+Make the installed game feel light and reliable throughout the long work sessions it is designed to accompany. Exercise real browser and Windows desktop candidates with representative worlds, normal focus pacing, controlled multi-hour sessions, save/reload boundaries, paused/idle intervals, and growing factual history. Measure process memory, rendering/frame-application work, Worker responsiveness, interaction latency, and idle behavior against a recorded machine/profile baseline. The application must not cause needless background rendering or simulation work while focus is paused, steadily consume memory, make the machine uncomfortably busy, degrade map navigation or controls over time, or become less responsive as the world and history grow.
+
+Keep this performance work presentation- and runtime-only: elapsed wall time, machine speed, battery state, or camera detail may never change authoritative simulation outcomes. Use deterministic workload fixtures and fixed logical ticks for reproducible regression evidence; record machine-specific power/thermal observations separately rather than treating them as simulation evidence. Fix root causes while preserving Worker authority, factual rendering, calm focus behavior, accessibility, and every existing deterministic budget.
+
+Acceptance: on a documented reference desktop profile, idle/paused focus has no avoidable continuous simulation or render churn; representative long sessions retain bounded memory, responsive pointer/keyboard/camera interaction, timely Worker-frame application, and stable presentation without gradual slowdown or a timer/world stall. Browser and installed-desktop evidence covers a large saved world, normal focus, pause/resume, save/reload, reduced effects, and the end of a controlled long session. Any machine-specific battery, fan, thermal, or operating-system limitation is documented honestly and cannot hide an avoidable application regression. Independent review finds no release-relevant long-session performance or responsiveness defect; the full applicable gate remains green.
+
 ## M10.7 — Backend bug hunt and repair
 
 Branch: `release/v1-backend-bug-hunt`
