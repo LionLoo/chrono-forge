@@ -292,7 +292,9 @@ describe('native focus persistence phase 1', () => {
     const startAtMs = 1_700_000_000_000;
     await setControlledClock(startAtMs);
     const customMinutes = await $('//label[normalize-space() = "Custom focus minutes"]/input');
-    await customMinutes.setValue('1');
+    // Keep phase 2's manual 60-second completion below the planned boundary so
+    // the one-second checkpoint cannot auto-complete the session first.
+    await customMinutes.setValue('2');
     await $('button=Start focus').click();
     await $('button=Pause').waitForDisplayed();
 
@@ -331,13 +333,18 @@ describe('native focus persistence phase 1', () => {
       .map(({ session }) => session)
       .filter((session) => session.slotId === 'primary');
     expect(pausedSessions).toHaveLength(1);
-    expect(pausedSessions[0]).toMatchObject({ status: 'paused', focusedMs: 10_000 });
+    expect(pausedSessions[0]).toMatchObject({
+      status: 'paused',
+      plannedFocusMs: 120_000,
+      focusedMs: 10_000,
+    });
     const pausedCandidates = await executeTauri(({ core }) =>
       core.invoke('load_save_slot_candidates', { slotId: 'primary' }),
     );
     expect(pausedCandidates[0]?.focusSession).toMatchObject({
       sessionId: pausedSessions[0]?.sessionId,
       status: 'paused',
+      plannedFocusMs: 120_000,
       focusedMs: 10_000,
     });
   }).timeout(360_000);
