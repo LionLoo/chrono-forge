@@ -54,4 +54,4 @@
 ## Current checkpoint boundary
 
 - The deterministic measurement seam and first confirmed idle-render regression are implemented, independently reviewed with every finding closed, locally verified, committed at `56f9f03d42c9ff87cec4202bbd069f56b4cabe9e`, and pushed with durable handoff commit `5ded1a0`. Hosted exact-head verification remains a later milestone gate.
-- The normal-focus metrics-message audit and correction are independently reviewed and locally verified but not yet committed. Large-world browser/desktop baselines, long-session memory slopes, installed save/reload and controlled-end evidence, reduced-effects profile runs, and machine-specific power/thermal observations remain open.
+- The normal-focus metrics-message audit and correction are independently reviewed, locally verified, and committed at `9f26c44986018eacd6aa3f963708d495ecde8ec9`; this second checkpoint is not yet pushed. Large-world browser/desktop baselines, long-session memory slopes, installed save/reload and controlled-end evidence, reduced-effects profile runs, and machine-specific power/thermal observations remain open.
