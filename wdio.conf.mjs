@@ -1,6 +1,8 @@
 import { fileURLToPath } from 'node:url';
 import path from 'node:path';
 
+import { createNativeE2eCommandTracker } from './scripts/run-native-e2e-ci.mjs';
+
 const rootDirectory = path.dirname(fileURLToPath(import.meta.url));
 const appBinaryPath = path.join(
   rootDirectory,
@@ -9,6 +11,7 @@ const appBinaryPath = path.join(
   'release',
   process.platform === 'win32' ? 'chrono-forge.exe' : 'chrono-forge',
 );
+const commandTracker = createNativeE2eCommandTracker();
 
 export const config = {
   runner: 'local',
@@ -51,5 +54,14 @@ export const config = {
   before: async (_capabilities, _specs, session) => {
     const activeWindow = await session.getWindowHandle();
     await session.switchToWindow(activeWindow);
+  },
+  beforeCommand: (commandName) => {
+    commandTracker.beforeCommand(commandName);
+  },
+  afterCommand: (commandName) => {
+    commandTracker.afterCommand(commandName);
+  },
+  afterTest: (_test, _context, { error }) => {
+    commandTracker.afterTest(error);
   },
 };
