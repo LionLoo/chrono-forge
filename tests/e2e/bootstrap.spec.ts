@@ -92,6 +92,7 @@ test('production frontend renders a Worker-owned autonomous settlement', async (
   ).toBeVisible();
   await expect(page.locator('.simulation-status')).toContainText('Worker projection ready');
   await expect(page.getByRole('application', { name: /world map/ })).toBeVisible();
+  await expect(page.getByText('256 × 192')).toBeVisible();
   await expect(page.getByText('Living people')).toBeVisible();
   await expect(page.getByLabel('Settlement stores')).toBeVisible();
   await expect(page.getByRole('heading', { name: 'Settlement and society' })).toHaveCount(0);
@@ -194,9 +195,14 @@ test('primary world, archive, and settings controls remain keyboard operable and
   expect(mapInstructions?.replace(/\s+/g, ' ').trim()).toBe(
     'Use arrow keys to pan. Use plus and minus to zoom. Press Enter to inspect the first visible map object.',
   );
+  const cameraBeforeKeyboardPan = await page.getByLabel('Camera position').innerText();
+  const cameraBeforeKeyboardPanX = Number(/X (-?\d+)/u.exec(cameraBeforeKeyboardPan)?.[1]);
+  expect(Number.isFinite(cameraBeforeKeyboardPanX)).toBe(true);
   await interactiveMap.focus();
   await page.keyboard.press('ArrowRight');
-  await expect(page.getByLabel('Camera position')).toContainText('X 60');
+  await expect(page.getByLabel('Camera position')).toContainText(
+    `X ${cameraBeforeKeyboardPanX + 36}`,
+  );
   await page.keyboard.press('Shift+=');
   await expect(page.getByLabel('Camera position')).toContainText('2.07×');
   await page.getByRole('button', { name: 'Overview' }).focus();
@@ -371,6 +377,23 @@ test('inspects and persists a Worker-owned mid-flight space world', async ({ pag
   await expect(space.locator('.space-body-list')).not.toContainText(/Body-\d+/);
   await expect(space.getByText('Autonomous program active')).toBeVisible();
   await expect(space.getByRole('list', { name: 'Space missions' })).toContainText('active');
+  await page.getByRole('radio', { name: 'System' }).check();
+  const systemMap = page.getByRole('region', { name: 'Known celestial system map' });
+  await expect(systemMap).toBeVisible();
+  const systemInspector = page.getByRole('combobox', { name: 'Inspect system object' });
+  await expect(systemInspector).toBeVisible();
+  const missionValue = await systemInspector
+    .locator('option[value^="mission:"]')
+    .first()
+    .getAttribute('value');
+  if (missionValue === null) throw new Error('Expected the System map to expose a mission.');
+  await systemInspector.selectOption(missionValue);
+  await expect(page.getByRole('article', { name: 'Selected map object' })).toContainText('mission');
+  await systemMap.focus();
+  await page.keyboard.press('ArrowRight');
+  await expect(page.getByLabel('Camera position')).toContainText('X 36');
+  await page.getByRole('radio', { name: 'Surface' }).check();
+  await expect(page.getByRole('application', { name: /world map/ })).toBeVisible();
   await page.getByRole('button', { name: 'Save now' }).click();
   await expect(page.getByText('World saved manually.')).toBeVisible();
   const localSlots = page.getByRole('combobox', { name: 'Load local slot' });

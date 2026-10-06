@@ -116,6 +116,29 @@ describe('M8 deterministic population scale authority', () => {
     expect(state.backlog).toStrictEqual({ detailedDue: 5_000, cohortDue: 100, totalDue: 5_100 });
   });
 
+  it('allocates the full population without population-sized platform argument lists', () => {
+    const nativeMaximum = Math.max;
+    let widestCall = 0;
+    Math.max = (...values: number[]) => {
+      widestCall = nativeMaximum(widestCall, values.length);
+      return nativeMaximum(...values);
+    };
+
+    try {
+      const state = createPopulationScale(SEED, 0, {
+        detailedResidents: Array.from({ length: MAX_DETAILED_RESIDENTS }, (_, index) =>
+          resident(index + 1),
+        ),
+        cohorts: fullAggregateCohorts(),
+      });
+
+      expect(state.nextResidentId).toBe(FIRST_ORDINARY_RESIDENT_ID);
+      expect(widestCall).toBeLessThanOrEqual(16);
+    } finally {
+      Math.max = nativeMaximum;
+    }
+  });
+
   it('is partition-equivalent with deterministic fixed-quota schedule and isolated RNGs', () => {
     const initial = createPopulationScale(SEED, 0, {
       detailedResidents: Array.from({ length: 300 }, (_, index) => resident(index + 1)),

@@ -11,7 +11,11 @@ import {
   createTestRuntimeActivityRecorder,
   type RuntimeActivitySample,
 } from '../../src/testing/runtime-activity';
-import { useWorldSimulation, type SimulationWorkerPort } from '../../src/ui/useWorldSimulation';
+import {
+  DEMO_WORLD_CONFIG,
+  useWorldSimulation,
+  type SimulationWorkerPort,
+} from '../../src/ui/useWorldSimulation';
 import { createSimulationRuntime, projectWorldFrame } from '../../src/workers/simulation-runtime';
 
 function createRuntimeWorker(failingPostType?: UiToWorkerMessage['type']): SimulationWorkerPort {
@@ -261,6 +265,15 @@ function createFalseRecoveryWorker(): SimulationWorkerPort {
 }
 
 describe('world simulation UI gateway', () => {
+  it('locks the release shell to the 256 by 192 shared homeworld', () => {
+    expect(DEMO_WORLD_CONFIG).toStrictEqual({
+      chunkSize: 32,
+      height: 192,
+      societyYearTicks: 100_000,
+      width: 256,
+    });
+  });
+
   it('records deterministic Worker traffic, frame applications, idle silence, and control latency', async () => {
     let nowMs = 0;
     const activity = createTestRuntimeActivityRecorder(() => nowMs);
@@ -567,7 +580,7 @@ describe('world simulation UI gateway', () => {
         subjectId: 0,
         targetKind: 'world',
         targetId: 0,
-        tileIndex: 3120,
+        tileIndex: 24704,
         amount: 6,
       },
       {
@@ -610,7 +623,7 @@ describe('world simulation UI gateway', () => {
         subjectId: 0,
         targetKind: 'world',
         targetId: 0,
-        tileIndex: 3120,
+        tileIndex: 24704,
         amount: 6,
       },
     ]);

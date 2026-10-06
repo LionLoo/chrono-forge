@@ -52,6 +52,7 @@ interface PixiScene {
   readonly structureGraphics: Graphics;
   readonly terrainGraphics: Graphics;
   readonly worldLayer: Container;
+  readonly host: HTMLElement;
   activityRecorder: RuntimeActivityRecorder | undefined;
   lastModel: RenderModel | null;
   lastProjectionTick: number;
@@ -62,6 +63,10 @@ interface PixiScene {
 }
 
 const TILE_SIZE = 6;
+const VIEWPORT_CACHE_MARGIN_TILES = 32;
+const MIN_AGENT_MOTION_DURATION_MS = 120;
+const MAX_AGENT_MOTION_DURATION_MS = 480;
+const MAX_INTERPOLATED_AGENT_COUNT = 512;
 
 interface AgentMotion {
   readonly durationMs: number;
@@ -93,6 +98,28 @@ function viewportFor(
     widthTiles: Math.max(1, Math.ceil(widthPixels / (TILE_SIZE * camera.zoom))),
     heightTiles: Math.max(1, Math.ceil(heightPixels / (TILE_SIZE * camera.zoom))),
   };
+}
+
+function cachedViewport(viewport: RenderViewport): RenderViewport {
+  return {
+    leftTile: viewport.leftTile - VIEWPORT_CACHE_MARGIN_TILES,
+    topTile: viewport.topTile - VIEWPORT_CACHE_MARGIN_TILES,
+    widthTiles: viewport.widthTiles + VIEWPORT_CACHE_MARGIN_TILES * 2,
+    heightTiles: viewport.heightTiles + VIEWPORT_CACHE_MARGIN_TILES * 2,
+  };
+}
+
+function viewportContains(container: RenderViewport, candidate: RenderViewport): boolean {
+  return (
+    candidate.leftTile >= container.leftTile &&
+    candidate.topTile >= container.topTile &&
+    candidate.leftTile + candidate.widthTiles <= container.leftTile + container.widthTiles &&
+    candidate.topTile + candidate.heightTiles <= container.topTile + container.heightTiles
+  );
+}
+
+function sameSelection(left: SelectableId | null, right: SelectableId | null): boolean {
+  return left?.id === right?.id && left?.kind === right?.kind;
 }
 
 function tilePoint(tileIndex: number, width: number): readonly [number, number] {
@@ -827,9 +854,12 @@ function updateAgentMotions(
       } else {
         scene.agentMotions.set(id, {
           // One authoritative position is emitted per completed logical movement.
-          // Use that observed interval so normal focus pace glides between sparse
-          // action pulses, while accelerated pace remains responsive.
-          durationMs: Math.max(120, Math.min(10_000, Math.round((now - priorTargetAtMs) * 0.9))),
+          // Follow short observed intervals, but bound presentation-only work so
+          // accelerated or delayed projections cannot trigger prolonged redraws.
+          durationMs: Math.max(
+            MIN_AGENT_MOTION_DURATION_MS,
+            Math.min(MAX_AGENT_MOTION_DURATION_MS, Math.round((now - priorTargetAtMs) * 0.9)),
+          ),
           fromX,
           fromY,
           startedAtMs: now,
@@ -872,6 +902,9 @@ function scheduleAgentMotion(scene: PixiScene): void {
 
 function renderScene(scene: PixiScene, reason: 'initial' | 'motion' | 'projection' | 'view'): void {
   scene.application.render();
+  scene.host.dataset.renderSequence = String(
+    Number.parseInt(scene.host.dataset.renderSequence ?? '0', 10) + 1,
+  );
   recordRuntimeActivity(scene.activityRecorder, {
     kind: 'render-applied',
     reason,
@@ -979,8 +1012,11 @@ function applyProjection(
     drawEffects(scene.effectsGraphics, model);
   }
   const agentLayerChanged = previous?.layerSignatures.agents !== model.layerSignatures.agents;
-  const agentMotionChanged = updateAgentMotions(scene, model, reducedEffects);
-  if (reducedEffects && scene.animationFrame !== null) {
+  // Dense wide views keep every factual position but skip presentation-only interpolation.
+  // Close and ordinary views retain motion; camera density never changes Worker authority.
+  const suppressAgentMotion = reducedEffects || model.agents.length > MAX_INTERPOLATED_AGENT_COUNT;
+  const agentMotionChanged = updateAgentMotions(scene, model, suppressAgentMotion);
+  if (suppressAgentMotion && scene.animationFrame !== null) {
     window.cancelAnimationFrame(scene.animationFrame);
     scene.animationFrame = null;
   }
@@ -996,7 +1032,7 @@ function applyProjection(
   scene.reducedEffects = reducedEffects;
   scene.lastModel = model;
   scene.lastProjectionTick = projection.tick;
-  if (!reducedEffects && scene.agentMotions.size > 0) scheduleAgentMotion(scene);
+  if (!suppressAgentMotion && scene.agentMotions.size > 0) scheduleAgentMotion(scene);
   return model;
 }
 
@@ -1198,6 +1234,7 @@ export function WorldMapCanvas({
           structureGraphics,
           terrainGraphics,
           worldLayer,
+          host,
           lastModel: null,
           lastProjectionTick: projectionRef.current.tick,
           preparedProjection: null,
@@ -1210,7 +1247,7 @@ export function WorldMapCanvas({
           scene,
           projectionRef.current,
           overlayRef.current,
-          viewportFor(host, cameraRef.current, projectionRef.current),
+          cachedViewport(viewportFor(host, cameraRef.current, projectionRef.current)),
           selectionRef.current,
           reducedEffectsRef.current,
           cameraRef.current.zoom,
@@ -1249,15 +1286,28 @@ export function WorldMapCanvas({
     const host = hostRef.current;
     if (!scene || !host) return;
     const projectionChanged = scene.preparedSource !== projection;
-    const model = applyProjection(
-      scene,
-      projection,
-      overlay,
-      viewportFor(host, camera, projection),
-      selection,
-      reducedEffects,
-      camera.zoom,
-    );
+    const viewport = viewportFor(host, camera, projection);
+    const detailLevel = renderDetailForZoom(camera.zoom);
+    const previous = scene.lastModel;
+    const canReusePreparedView =
+      !projectionChanged &&
+      previous !== null &&
+      previous.overlay.value === overlay &&
+      previous.detailLevel === detailLevel &&
+      sameSelection(previous.selected, selection) &&
+      scene.reducedEffects === reducedEffects &&
+      viewportContains(previous.viewport, viewport);
+    const model = canReusePreparedView
+      ? previous
+      : applyProjection(
+          scene,
+          projection,
+          overlay,
+          cachedViewport(viewport),
+          selection,
+          reducedEffects,
+          camera.zoom,
+        );
     setAccessibleLabel(
       `${model.era} world map, ${projection.agentIds.length} visible agents, ${projection.structureIds.length} structures, ${model.overlay.legend} overlay`,
     );

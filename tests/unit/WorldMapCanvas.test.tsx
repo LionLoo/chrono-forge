@@ -355,7 +355,7 @@ describe('Pixi world projection', () => {
     vi.unstubAllGlobals();
   });
 
-  it('interpolates authoritative agent tile changes without changing the world projection', async () => {
+  it('bounds long-gap agent interpolation without changing the world projection', async () => {
     let now = 1_000;
     let animation: FrameRequestCallback | null = null;
     const performanceNow = vi.spyOn(performance, 'now').mockImplementation(() => now);
@@ -401,16 +401,65 @@ describe('Pixi world projection', () => {
     const scheduledAnimation = animation as FrameRequestCallback | null;
     expect(scheduledAnimation).not.toBeNull();
     if (scheduledAnimation === null) throw new Error('Agent animation was not scheduled.');
-    now = 15_500;
+    animation = null;
+    now = 11_300;
     scheduledAnimation(now);
-    const halfway = agentGraphics.circle.mock.calls.at(-agentCount + movedAgentIndex)!;
+    const inFlight = agentGraphics.circle.mock.calls.at(-agentCount + movedAgentIndex)!;
     const destinationTile = advanced.agentTiles[movedAgentIndex]!;
     const destination = initialAgentHead(advanced, movedAgentIndex, destinationTile);
-    expect(halfway.slice(0, 2)).not.toEqual(before.slice(0, 2));
-    expect(halfway.slice(0, 2)).not.toEqual(destination);
+    expect(inFlight.slice(0, 2)).not.toEqual(before.slice(0, 2));
+    expect(inFlight.slice(0, 2)).not.toEqual(destination);
+
+    const finalAnimation = animation as FrameRequestCallback | null;
+    expect(finalAnimation).not.toBeNull();
+    if (finalAnimation === null) throw new Error('Agent animation did not continue while active.');
+    animation = null;
+    now = 11_481;
+    finalAnimation(now);
+    const completed = agentGraphics.circle.mock.calls.at(-agentCount + movedAgentIndex)!;
+    expect(completed.slice(0, 2)).toEqual(destination);
+    expect(animation).toBeNull();
 
     requestAnimationFrame.mockRestore();
     performanceNow.mockRestore();
+  });
+
+  it('renders dense factual agent updates without scheduling continuous interpolation', async () => {
+    const requestAnimationFrame = vi.spyOn(window, 'requestAnimationFrame');
+    const agentCount = 513;
+    const initial = {
+      ...projection,
+      agentActions: new Uint8Array(agentCount),
+      agentHealth: new Uint16Array(agentCount).fill(1_000),
+      agentIds: Uint32Array.from({ length: agentCount }, (_, index) => index + 10_000),
+      agentTiles: new Uint32Array(agentCount),
+    } satisfies WorldMapProjection;
+    const advanced = {
+      ...initial,
+      agentTiles: new Uint32Array(agentCount).fill(1),
+      tick: initial.tick + 1,
+    } satisfies WorldMapProjection;
+    const view = render(
+      <WorldMapCanvas
+        camera={INITIAL_WORLD_CAMERA}
+        onCameraChange={vi.fn()}
+        overlay="terrain"
+        projection={initial}
+      />,
+    );
+
+    await waitFor(() => expect(view.getByRole('application')).toBeVisible());
+    view.rerender(
+      <WorldMapCanvas
+        camera={INITIAL_WORLD_CAMERA}
+        onCameraChange={vi.fn()}
+        overlay="terrain"
+        projection={advanced}
+      />,
+    );
+
+    expect(requestAnimationFrame).not.toHaveBeenCalled();
+    requestAnimationFrame.mockRestore();
   });
 
   it('keeps reduced-effects agent movement static', async () => {

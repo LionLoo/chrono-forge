@@ -414,6 +414,13 @@ describe('FocusPersistencePanel offline progression', () => {
         after: { tick: 100 },
       },
     });
+    const checkpointRequests = vi.mocked(first.simulation.requestFocusCheckpoint).mock.calls.length;
+    const durableGeneration = checkpoint!.headGeneration;
+    await user.click(screen.getByRole('button', { name: 'Save now' }));
+    await waitFor(() =>
+      expect(first.simulation.requestFocusCheckpoint).toHaveBeenCalledTimes(checkpointRequests + 1),
+    );
+    expect((await gateway.loadSaveSlot('primary'))?.headGeneration).toBe(durableGeneration);
     firstRender.unmount();
 
     const restored = createStatefulSimulation();

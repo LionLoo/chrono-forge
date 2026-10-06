@@ -34,6 +34,8 @@ When a session completes, its recap shows accepted duration, the exact before/af
 
 The map and every inspector are read-only views of Worker-owned simulation facts. Moving the camera, zooming, selecting an overlay, opening a panel, or inspecting a person cannot change history.
 
+New release worlds use one continuous 256×192 procedural homeworld. Civilizations and their territories are the countries or polities on that shared surface; they are not separate cloned maps. Use **Surface** for terrain, settlements, people, and territory, and **System** for the discovered celestial system. The two views keep independent cameras. System shows only recorded bodies, spacecraft, missions, colonies, transit, delayed messages, and contacted alien civilizations; selecting any visible system object opens its factual details. V1 abstracts off-world bodies rather than simulating a second tile-by-tile terrain map for each one.
+
 Pointer controls:
 
 - Drag the map to pan.
@@ -46,7 +48,7 @@ Keyboard controls:
 - With the map focused, use the arrow keys to pan, `+` or `=` to zoom in, and `-` or `_` to zoom out.
 - Press `Enter` on the focused map to select the first visible inspectable object.
 - The camera arrow, zoom, and **Reset** buttons provide the same movement without map shortcuts.
-- **Inspect map object** provides a keyboard-accessible list of visible people, structures, settlements, routes, ruins, and active effects.
+- **Inspect map object** provides a keyboard-accessible list of visible people, structures, settlements, routes, ruins, and active effects. In System view, **Inspect system object** lists known bodies, spacecraft, missions, colonies, cargo and communication routes, and contacted civilizations.
 
 Map overlays show terrain, resources, population, trade, technology, danger, and diagnostic world information. Each overlay includes a text legend and a pattern cue; color is not the only status signal.
 

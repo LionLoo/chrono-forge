@@ -24,8 +24,8 @@ export const DEMO_WORLD_SEED: WorldSeed = Object.freeze([
   0x4348_524f, 0x4e4f_464f, 0x5247_4531, 0x0000_0001,
 ]);
 export const DEMO_WORLD_CONFIG: WorldConfig = Object.freeze({
-  width: 96,
-  height: 64,
+  width: 256,
+  height: 192,
   chunkSize: 32,
   societyYearTicks: 100_000,
 });

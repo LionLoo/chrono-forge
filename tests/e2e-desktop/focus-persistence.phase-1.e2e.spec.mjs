@@ -58,7 +58,7 @@ describe('native focus persistence phase 1', () => {
       () =>
         document.querySelector('.world-heading-status span:last-child')?.textContent?.trim() ?? '',
     );
-    expect(['12 × 8', '96 × 64']).toContain(worldDimensions);
+    expect(['12 × 8', '96 × 64', '256 × 192']).toContain(worldDimensions);
     const selectedMapValue = await browser.execute(() => {
       const select = document.querySelector('#map-inspector select');
       if (!(select instanceof HTMLSelectElement)) return null;

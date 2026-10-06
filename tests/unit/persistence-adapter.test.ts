@@ -280,6 +280,77 @@ describe('persistence adapter', () => {
     ).resolves.toEqual([authoritativeSession]);
   });
 
+  it('accepts exact Worker checkpoint evidence and rejects a mismatched fast-path projection', async () => {
+    const beforeWorld = createInitialWorld([1, 2, 3, 4], {
+      width: 2,
+      height: 2,
+      chunkSize: 2,
+    });
+    const afterWorld = stepWorld(beforeWorld, 1);
+    const baseline = projectFocusCheckpoint(beforeWorld, null);
+    const checkpoint = projectFocusCheckpoint(afterWorld, baseline.latestEventId);
+    const completedState = completeFocus(
+      startFocus(
+        createIdleFocusState(),
+        { focusDurationMs: 100, breakDurationMs: 0, simulationTicksPerFocusSecond: 10 },
+        100,
+      ),
+      200,
+    );
+    const session: FocusSession = {
+      ...focusSessionFromState('worker-authority', 'alpha', completedState, []),
+      recapEntries: checkpoint.recapEntries,
+      review: {
+        version: 1,
+        baselineEventId: baseline.latestEventId,
+        before: baseline.moment,
+        after: checkpoint.moment,
+        revisitTarget: checkpoint.revisitTarget,
+      },
+    };
+    const sourceSnapshot = serializeWorldSnapshot(afterWorld);
+    const gateway = createInMemoryPersistenceGateway(() => 3_000);
+
+    const committed = await gateway.commitFocusCheckpoint(
+      'alpha',
+      'Alpha',
+      sourceSnapshot,
+      session,
+      [],
+      { baselineEventId: baseline.latestEventId, checkpoint },
+    );
+
+    await expect(gateway.listFocusSessions(committed)).resolves.toEqual([session]);
+    await expect(
+      gateway.commitFocusCheckpoint('alpha', 'Alpha', sourceSnapshot, session, [], {
+        baselineEventId: baseline.latestEventId,
+        checkpoint: {
+          ...checkpoint,
+          moment: { ...checkpoint.moment, food: checkpoint.moment.food + 1 },
+        },
+      }),
+    ).rejects.toThrow('authoritative Worker checkpoint');
+
+    const malformedEnvelope = JSON.parse(sourceSnapshot) as {
+      payload: { config: { width: number } };
+    };
+    malformedEnvelope.payload.config.width = 0;
+    await expect(
+      gateway.commitFocusCheckpoint(
+        'alpha',
+        'Alpha',
+        JSON.stringify(malformedEnvelope),
+        session,
+        [],
+        { baselineEventId: baseline.latestEventId, checkpoint },
+      ),
+    ).rejects.toThrow();
+    await expect(gateway.loadSaveSlot('alpha')).resolves.toMatchObject({
+      headGeneration: 1,
+      snapshot: sourceSnapshot,
+    });
+  });
+
   it('verifies recap prose against one supplied active save without loading historical slots', async () => {
     const calls: string[] = [];
     const alphaSessions = Array.from({ length: 64 }, (_, index): FocusSession => ({
@@ -337,11 +408,7 @@ describe('persistence adapter', () => {
           slotId: 'alpha',
           name: 'Alpha',
           headGeneration: 1,
-          recoveredGeneration: 1,
-          recoveredFromCorruption: false,
           savedAtMs: 1_000,
-          focusSession: null,
-          snapshot: snapshot('one'),
           checksum: snapshotOneChecksum,
         } as never;
       }
@@ -367,9 +434,47 @@ describe('persistence adapter', () => {
         command: 'commit_save_slot',
         arguments_: { slotId: 'alpha', name: 'Alpha', snapshot: snapshot('one') },
       },
+      {
+        command: 'confirm_semantically_valid_save_generation',
+        arguments_: { slotId: 'alpha', generation: 1, checksum: snapshotOneChecksum },
+      },
       { command: 'record_focus_session', arguments_: { session: completedSession } },
       { command: 'save_settings', arguments_: { settings: DEFAULT_APP_SETTINGS } },
     ]);
+  });
+
+  it('rejects a malformed native commit receipt without echoing the snapshot', async () => {
+    const gateway = createTauriPersistenceGateway(async () => {
+      await Promise.resolve();
+      return {
+        slotId: 'alpha',
+        name: 'Alpha',
+        headGeneration: 1,
+        savedAtMs: 1_000,
+        checksum: 'not-a-checksum',
+      } as never;
+    });
+
+    await expect(gateway.commitSaveSlot('alpha', 'Alpha', snapshot('one'))).rejects.toThrow(
+      'save checksum does not match its snapshot',
+    );
+  });
+
+  it('rejects a well-formed native commit receipt checksum for different material', async () => {
+    const gateway = createTauriPersistenceGateway(async () => {
+      await Promise.resolve();
+      return {
+        slotId: 'alpha',
+        name: 'Alpha',
+        headGeneration: 1,
+        savedAtMs: 1_000,
+        checksum: '0'.repeat(64),
+      } as never;
+    });
+
+    await expect(gateway.commitSaveSlot('alpha', 'Alpha', snapshot('one'))).rejects.toThrow(
+      'save checksum does not match its snapshot',
+    );
   });
 
   it('validates every successful native command result shape', async () => {
@@ -491,33 +596,41 @@ describe('persistence adapter', () => {
     expect(recoveredWorld.civilization.society.interpersonal.active.length).toBeGreaterThan(0);
     const recoveredSnapshot = serializeWorldSnapshot(recoveredWorld);
     const recoveredChecksum = checksumOf(recoveredSnapshot);
-    const gateway = createTauriPersistenceGateway(async (command) => {
+    const calls: { command: string; arguments_: Readonly<Record<string, unknown>> }[] = [];
+    const gateway = createTauriPersistenceGateway(async (command, arguments_ = {}) => {
       await Promise.resolve();
-      if (command !== 'load_save_slot_candidates') throw new Error('unexpected command');
-      return [
-        {
-          slotId: 'alpha',
-          name: 'Alpha',
-          headGeneration: 2,
-          recoveredGeneration: 2,
-          recoveredFromCorruption: false,
-          savedAtMs: 2_000,
-          focusSession: null,
-          snapshot: malformedSnapshot,
-          checksum: checksumOf(malformedSnapshot),
-        },
-        {
-          slotId: 'alpha',
-          name: 'Alpha',
-          headGeneration: 2,
-          recoveredGeneration: 1,
-          recoveredFromCorruption: true,
-          savedAtMs: 1_000,
-          focusSession: null,
-          snapshot: recoveredSnapshot,
-          checksum: recoveredChecksum,
-        },
-      ] as never;
+      calls.push({ command, arguments_ });
+      if (command === 'load_save_slot_candidates') {
+        return [
+          {
+            slotId: 'alpha',
+            name: 'Alpha',
+            headGeneration: 2,
+            recoveredGeneration: 2,
+            recoveredFromCorruption: false,
+            savedAtMs: 2_000,
+            focusSession: null,
+            snapshot: malformedSnapshot,
+            checksum: checksumOf(malformedSnapshot),
+          },
+        ] as never;
+      }
+      if (command === 'load_save_slot_fallback_candidates') {
+        return [
+          {
+            slotId: 'alpha',
+            name: 'Alpha',
+            headGeneration: 2,
+            recoveredGeneration: 1,
+            recoveredFromCorruption: true,
+            savedAtMs: 1_000,
+            focusSession: null,
+            snapshot: recoveredSnapshot,
+            checksum: recoveredChecksum,
+          },
+        ] as never;
+      }
+      throw new Error('unexpected command');
     });
 
     const recovered = await gateway.loadSaveSlot('alpha');
@@ -526,9 +639,68 @@ describe('persistence adapter', () => {
       recoveredFromCorruption: true,
       snapshot: recoveredSnapshot,
     });
+    expect(calls).toEqual([
+      { command: 'load_save_slot_candidates', arguments_: { slotId: 'alpha' } },
+      {
+        command: 'load_save_slot_fallback_candidates',
+        arguments_: { beforeGeneration: 2, slotId: 'alpha' },
+      },
+    ]);
     const reloaded = deserializeWorldSnapshot(recovered!.snapshot);
     expect(reloaded.civilization.society.interpersonal.active.length).toBeGreaterThan(0);
     expect(serializeWorldSnapshot(reloaded)).toBe(recoveredSnapshot);
+  });
+
+  it('recovers the oldest canonical generation through checksum-valid semantic failures', async () => {
+    const malformedTwo = '{"hello":"world-2"}';
+    const malformedThree = '{"hello":"world-3"}';
+    const recoveredSnapshot = snapshot('one');
+    const gateway = createTauriPersistenceGateway(async (command) => {
+      await Promise.resolve();
+      if (command !== 'load_save_slot_candidates') throw new Error(`unexpected ${command}`);
+      return [
+        {
+          slotId: 'alpha',
+          name: 'Alpha',
+          headGeneration: 4,
+          recoveredGeneration: 3,
+          recoveredFromCorruption: true,
+          savedAtMs: 3_000,
+          focusSession: null,
+          snapshot: malformedThree,
+          checksum: checksumOf(malformedThree),
+        },
+        {
+          slotId: 'alpha',
+          name: 'Alpha',
+          headGeneration: 4,
+          recoveredGeneration: 2,
+          recoveredFromCorruption: true,
+          savedAtMs: 2_000,
+          focusSession: null,
+          snapshot: malformedTwo,
+          checksum: checksumOf(malformedTwo),
+        },
+        {
+          slotId: 'alpha',
+          name: 'Alpha',
+          headGeneration: 4,
+          recoveredGeneration: 1,
+          recoveredFromCorruption: true,
+          savedAtMs: 1_000,
+          focusSession: null,
+          snapshot: recoveredSnapshot,
+          checksum: checksumOf(recoveredSnapshot),
+        },
+      ] as never;
+    });
+
+    await expect(gateway.loadSaveSlot('alpha')).resolves.toMatchObject({
+      headGeneration: 4,
+      recoveredGeneration: 1,
+      recoveredFromCorruption: true,
+      snapshot: recoveredSnapshot,
+    });
   });
 
   it('falls back when a checksum-valid head fabricates persisted review facts', async () => {
@@ -690,6 +862,15 @@ describe('persistence adapter', () => {
     const gateway = createTauriPersistenceGateway(async (command, arguments_) => {
       await Promise.resolve();
       calls.push(command);
+      if (command === 'confirm_semantically_valid_save_generation') {
+        expect(arguments_).toEqual({
+          slotId: 'alpha',
+          generation: 1,
+          checksum: snapshotOneChecksum,
+        });
+        return undefined as never;
+      }
+      expect(command).toBe('commit_focus_checkpoint');
       expect(arguments_).toEqual({
         slotId: 'alpha',
         name: 'Alpha',
@@ -700,11 +881,7 @@ describe('persistence adapter', () => {
         slotId: 'alpha',
         name: 'Alpha',
         headGeneration: 1,
-        recoveredGeneration: 1,
-        recoveredFromCorruption: false,
         savedAtMs: 1_000,
-        focusSession: completedSession,
-        snapshot: snapshot('one'),
         checksum: snapshotOneChecksum,
       } as never;
     });
@@ -749,7 +926,10 @@ describe('persistence adapter', () => {
         [1],
       ),
     ).rejects.toThrow('exactly match authoritative saved-world events');
-    expect(calls).toEqual(['commit_focus_checkpoint']);
+    expect(calls).toEqual([
+      'commit_focus_checkpoint',
+      'confirm_semantically_valid_save_generation',
+    ]);
   });
 
   it('rejects malformed native generation timestamps', async () => {
