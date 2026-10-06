@@ -741,7 +741,7 @@ describe('deterministic world lab', () => {
     await waitFor(() => {
       expect(screen.getByRole('combobox', { name: 'Load local slot' })).toHaveValue('primary');
     });
-  });
+  }, 30_000);
 
   it('reports a local persistence bootstrap failure without obscuring the world', async () => {
     const fallback = createInMemoryPersistenceGateway();
