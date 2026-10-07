@@ -3848,6 +3848,7 @@ function parseVersionSixWorldPayload(
   value: unknown,
   validate = true,
   includesSettlementDevelopment = false,
+  initializeScaleAuthority = true,
 ): WorldState {
   if (!isRecord(value)) throw new Error('Snapshot payload must be an object.');
   assertExactKeys(
@@ -3867,7 +3868,7 @@ function parseVersionSixWorldPayload(
   const current: WorldState = Object.freeze({
     ...world,
     civilizations,
-    ...initializeM8WorldAuthority({ ...world, civilizations }),
+    ...(initializeScaleAuthority ? initializeM8WorldAuthority({ ...world, civilizations }) : {}),
   });
   if (validate) assertWorldInvariants(current);
   return current;
@@ -4787,7 +4788,15 @@ function parseVersionEightOrNineWorldPayload(
   const legacyPayload = { ...value };
   delete legacyPayload.populationScale;
   delete legacyPayload.pathCache;
-  const base = parseVersionSixWorldPayload(legacyPayload, false, includesSettlementDevelopment);
+  // v8+ snapshots carry their own scale/cache authority. Do not synthesize an interim aggregate
+  // population from settlement totals: a valid max-detail plus max-aggregate world can exceed the
+  // aggregate-only cap before its persisted partition is restored below.
+  const base = parseVersionSixWorldPayload(
+    legacyPayload,
+    false,
+    includesSettlementDevelopment,
+    false,
+  );
   const current: WorldState = Object.freeze({
     ...base,
     populationScale: parsePopulationScale(

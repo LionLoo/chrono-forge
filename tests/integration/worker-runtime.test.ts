@@ -147,10 +147,15 @@ describe('simulation worker runtime', () => {
     expect(ready.frame.tick).toBe(0);
     expect(ready.frame.biome.length).toBe(ready.frame.width * ready.frame.height);
     expect(ready.frame.agentIds).toStrictEqual(new Uint32Array([1, 2, 3, 4, 5, 6]));
-    expect(responses.slice(0, 3).map((response) => response.type)).toStrictEqual([
+    expect(
+      createInitialWorld([10, 20, 30, 40]).space.aliens.some(
+        (alien) => alien.discoveredTick === null,
+      ),
+    ).toBe(true);
+    expect(ready.frame.space.aliens).toStrictEqual([]);
+    expect(responses.slice(0, 2).map((response) => response.type)).toStrictEqual([
       'ready',
       'eventBatch',
-      'metrics',
     ]);
     expect(messageOfType(responses, 'eventBatch').events).toEqual([
       expect.objectContaining({
@@ -179,7 +184,62 @@ describe('simulation worker runtime', () => {
     const delta = messageOfType(responses, 'frameDelta');
     expect(delta.delta).toMatchObject({ baseTick: 0, tick: 7 });
     expect(reconstructedFrame(responses).tick).toBe(7);
-    expect(lastMessageOfType(responses, 'metrics').metrics.tick).toBe(7);
+  });
+
+  it('emits only responses with UI consumers for ordinary interactive requests', () => {
+    const responses: WorkerToUiMessage[] = [];
+    const runtime = createSimulationRuntime((message) => responses.push(message));
+    const responseTypes = (requestId: string) =>
+      responses.filter((message) => message.requestId === requestId).map((message) => message.type);
+
+    runtime.handleMessage({
+      type: 'initialize',
+      protocolVersion: WORKER_PROTOCOL_VERSION,
+      requestId: 'traffic-initialize',
+      seed: [3, 5, 7, 11],
+    });
+    expect(responseTypes('traffic-initialize')).toStrictEqual(['ready', 'eventBatch']);
+
+    runtime.handleMessage({
+      type: 'setRunMode',
+      protocolVersion: WORKER_PROTOCOL_VERSION,
+      requestId: 'traffic-run-mode',
+      runMode: 'running',
+    });
+    expect(responseTypes('traffic-run-mode')).toStrictEqual(['metrics']);
+    expect(lastMessageOfType(responses, 'metrics').metrics.runMode).toBe('running');
+
+    runtime.handleMessage({
+      type: 'advanceTicks',
+      protocolVersion: WORKER_PROTOCOL_VERSION,
+      requestId: 'traffic-advance',
+      ticks: 0,
+    });
+    expect(responseTypes('traffic-advance')).toStrictEqual(['frameDelta']);
+
+    runtime.handleMessage({
+      type: 'queueCommand',
+      protocolVersion: WORKER_PROTOCOL_VERSION,
+      requestId: 'traffic-command',
+      command: {
+        kind: 'intervention',
+        payload: {
+          interventionKind: 'protection',
+          intensity: 25,
+          polarity: 'supportive',
+          targetTileIndex: 0,
+        },
+      },
+    });
+    expect(responseTypes('traffic-command')).toStrictEqual(['commandAccepted']);
+
+    runtime.handleMessage({
+      type: 'load',
+      protocolVersion: WORKER_PROTOCOL_VERSION,
+      requestId: 'traffic-load',
+      snapshot: serializeWorldSnapshot(createInitialWorld([13, 17, 19, 23])),
+    });
+    expect(responseTypes('traffic-load')).toStrictEqual(['ready', 'eventBatch']);
   });
 
   it('projects M4 society facts and serves every history page through the Worker', () => {
@@ -350,7 +410,6 @@ describe('simulation worker runtime', () => {
       sequence: 1,
       targetTick: 5_000,
     });
-    expect(lastMessageOfType(responses, 'metrics').metrics.queuedCommandCount).toBe(1);
 
     runtime.handleMessage({
       type: 'advanceTicks',
@@ -362,7 +421,6 @@ describe('simulation worker runtime', () => {
     expect(lastMessageOfType(responses, 'eventBatch').events).toContainEqual(
       expect.objectContaining({ type: 'protection-intervened', tick: 5_000 }),
     );
-    expect(lastMessageOfType(responses, 'metrics').metrics.queuedCommandCount).toBe(0);
   });
 
   it('restores the same authoritative M3 projection and factual events after a shelter becomes operational', () => {
@@ -441,6 +499,10 @@ describe('simulation worker runtime', () => {
       policyVersion: OFFLINE_CATCH_UP_POLICY_VERSION,
     });
 
+    expect(
+      responses.filter((message) => message.requestId === 'offline').map((message) => message.type),
+    ).toStrictEqual(['frameDelta', 'eventBatch', 'metrics']);
+    expect(lastMessageOfType(responses, 'metrics').metrics.tick).toBe(10);
     expect(reconstructedFrame(responses).tick).toBe(10);
     expect(lastMessageOfType(responses, 'eventBatch').events).toStrictEqual([
       {

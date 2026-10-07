@@ -214,7 +214,8 @@ textarea:focus-visible,
   font-weight: 500;
 }
 
-.overlay-picker {
+.overlay-picker,
+.view-picker {
   display: flex;
   flex-wrap: wrap;
   gap: 6px;
@@ -223,7 +224,8 @@ textarea:focus-visible,
   border: 0;
 }
 
-.overlay-picker legend {
+.overlay-picker legend,
+.view-picker legend {
   position: absolute;
   width: 1px;
   height: 1px;
@@ -232,12 +234,14 @@ textarea:focus-visible,
   white-space: nowrap;
 }
 
-.overlay-picker label {
+.overlay-picker label,
+.view-picker label {
   position: relative;
   cursor: pointer;
 }
 
-.overlay-picker input {
+.overlay-picker input,
+.view-picker input {
   position: absolute;
   width: 1px;
   height: 1px;
@@ -245,6 +249,7 @@ textarea:focus-visible,
 }
 
 .overlay-picker span,
+.view-picker span,
 .camera-toolbar button {
   display: inline-grid;
   min-height: 34px;
@@ -257,17 +262,20 @@ textarea:focus-visible,
   letter-spacing: 0.045em;
 }
 
-.overlay-picker span {
+.overlay-picker span,
+.view-picker span {
   padding: 0 13px;
 }
 
-.overlay-picker input:checked + span {
+.overlay-picker input:checked + span,
+.view-picker input:checked + span {
   border-color: #c89b50;
   background: #4b3a24;
   color: #ffe3a2;
 }
 
-.overlay-picker input:focus-visible + span {
+.overlay-picker input:focus-visible + span,
+.view-picker input:focus-visible + span {
   outline: 3px solid #f3c96d;
   outline-offset: 2px;
 }
@@ -302,6 +310,149 @@ textarea:focus-visible,
 
 .world-map-canvas canvas {
   display: block;
+}
+
+.system-map {
+  position: absolute;
+  inset: 0;
+  overflow: hidden;
+  background:
+    radial-gradient(circle at 50% 50%, rgba(73, 101, 86, 0.18), transparent 34%),
+    linear-gradient(150deg, #070d0c, #0b1515 58%, #090d12);
+  touch-action: none;
+}
+
+.system-map:focus-visible {
+  outline: 3px solid #f3c96d;
+  outline-offset: -5px;
+}
+
+.system-map svg {
+  width: 100%;
+  height: 100%;
+}
+
+.system-map-glow {
+  fill: url('#system-map-glow');
+}
+
+.system-orbit {
+  fill: none;
+  stroke: rgba(184, 211, 197, 0.18);
+  stroke-dasharray: 5 7;
+  stroke-width: 1;
+}
+
+.system-body,
+.system-colony,
+.system-alien,
+.system-spacecraft,
+.system-route {
+  cursor: pointer;
+}
+
+.system-body circle {
+  fill: #7c9c8b;
+  stroke: #d7e4da;
+  stroke-width: 2;
+}
+
+.system-body-home circle {
+  fill: #4d8c71;
+  stroke: #f4d494;
+  stroke-width: 3;
+}
+
+.system-body-moon circle {
+  fill: #aab4ac;
+}
+
+.system-body-asteroid circle {
+  fill: #8b755e;
+}
+
+.system-body text {
+  fill: #edf2e8;
+  font-family: Georgia, 'Times New Roman', serif;
+  font-size: 13px;
+  paint-order: stroke;
+  stroke: #07100c;
+  stroke-width: 3px;
+}
+
+.system-route line {
+  stroke: #d6a95d;
+  stroke-width: 2;
+}
+
+.system-route-cargo line {
+  stroke: #8fc7a5;
+  stroke-dasharray: 8 5;
+}
+
+.system-route-communication line {
+  stroke: #9eb8d7;
+  stroke-dasharray: 2 5;
+}
+
+.system-route-completed line,
+.system-route-delivered line,
+.system-route-lost line,
+.system-route-failed line {
+  opacity: 0.42;
+}
+
+.system-colony rect {
+  fill: #f3c96d;
+  stroke: #18261d;
+  stroke-width: 2;
+}
+
+.system-alien path {
+  fill: #c99ad8;
+  stroke: #f1d5fa;
+  stroke-width: 1.5;
+}
+
+.system-spacecraft path {
+  fill: #d5e5ef;
+  stroke: #426174;
+  stroke-width: 1.5;
+}
+
+.system-map .is-selected > circle,
+.system-map .is-selected > rect,
+.system-map .is-selected > path,
+.system-map .is-selected > line {
+  stroke: #fff0bd;
+  stroke-width: 5;
+}
+
+.system-map [role='button']:focus-visible {
+  outline: 3px solid #f3c96d;
+  outline-offset: 4px;
+}
+
+.system-map-summary {
+  position: absolute;
+  z-index: 2;
+  top: 14px;
+  left: 14px;
+  max-width: calc(100% - 28px);
+  margin: 0;
+  padding: 8px 11px;
+  border: 1px solid rgba(239, 221, 181, 0.2);
+  border-radius: 10px;
+  background: rgba(7, 13, 9, 0.84);
+  color: #d8e2d5;
+  font-size: 0.78rem;
+}
+
+.system-view-note {
+  min-height: 36px;
+  margin: 15px 0 11px;
+  color: #aebcae;
+  font-size: 0.82rem;
 }
 
 .map-render-error {
@@ -1896,6 +2047,7 @@ body {
 
 .card-heading,
 .overlay-picker,
+.view-picker,
 .map-stage,
 .map-inspector,
 .focus-card > * {
@@ -1922,12 +2074,14 @@ body {
   background: rgba(8, 14, 10, 0.54);
 }
 
-.overlay-picker {
+.overlay-picker,
+.view-picker {
   gap: 7px;
   margin: 15px 0 11px;
 }
 
 .overlay-picker span,
+.view-picker span,
 .camera-toolbar button {
   min-height: 36px;
   border-color: rgba(225, 210, 177, 0.18);
@@ -1936,7 +2090,8 @@ body {
   color: #c4d0c1;
 }
 
-.overlay-picker input:checked + span {
+.overlay-picker input:checked + span,
+.view-picker input:checked + span {
   border-color: rgba(226, 179, 93, 0.85);
   background: linear-gradient(135deg, #5b3e24, #3d3520);
   box-shadow: inset 0 0 0 1px rgba(255, 226, 159, 0.08);

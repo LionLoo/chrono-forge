@@ -7,15 +7,48 @@ import {
 } from '../../src/protocol/frame-delta';
 import { deserializeWorldSnapshot, serializeWorldSnapshot } from '../../src/simulation/persistence';
 import { createInitialWorld, stepWorld } from '../../src/simulation/world';
-import { useWorldSimulation, type SimulationWorkerPort } from '../../src/ui/useWorldSimulation';
+import {
+  createTestRuntimeActivityRecorder,
+  type RuntimeActivitySample,
+} from '../../src/testing/runtime-activity';
+import {
+  DEMO_WORLD_CONFIG,
+  useWorldSimulation,
+  type SimulationWorkerPort,
+} from '../../src/ui/useWorldSimulation';
 import { createSimulationRuntime, projectWorldFrame } from '../../src/workers/simulation-runtime';
 
-function createRuntimeWorker(): SimulationWorkerPort {
+function createRuntimeWorker(failingPostType?: UiToWorkerMessage['type']): SimulationWorkerPort {
   let active = true;
   const runtime = createSimulationRuntime((message: WorkerToUiMessage) => {
     queueMicrotask(() => {
       if (active) port.onmessage?.(new MessageEvent('message', { data: message }));
     });
+  });
+  const port: SimulationWorkerPort = {
+    onerror: null,
+    onmessage: null,
+    postMessage(message: UiToWorkerMessage) {
+      if (message.type === failingPostType) {
+        throw new Error(`Injected ${message.type} dispatch failure`);
+      }
+      runtime.handleMessage(message);
+    },
+    terminate() {
+      active = false;
+    },
+  };
+  return port;
+}
+
+function createControlledRuntimeWorker(): {
+  readonly flush: () => void;
+  readonly port: SimulationWorkerPort;
+} {
+  let active = true;
+  const delivered: WorkerToUiMessage[] = [];
+  const runtime = createSimulationRuntime((message: WorkerToUiMessage) => {
+    delivered.push(message);
   });
   const port: SimulationWorkerPort = {
     onerror: null,
@@ -27,7 +60,15 @@ function createRuntimeWorker(): SimulationWorkerPort {
       active = false;
     },
   };
-  return port;
+  return {
+    flush() {
+      while (active && delivered.length > 0) {
+        const message = delivered.shift();
+        if (message !== undefined) port.onmessage?.(new MessageEvent('message', { data: message }));
+      }
+    },
+    port,
+  };
 }
 
 function createLoadFaultWorker(
@@ -100,27 +141,6 @@ function createRequestFaultWorker(
         });
         return;
       }
-      runtime.handleMessage(message);
-    },
-    terminate() {
-      active = false;
-    },
-  };
-  return port;
-}
-
-function createLoadReadyOnlyWorker(): SimulationWorkerPort {
-  let active = true;
-  const runtime = createSimulationRuntime((message: WorkerToUiMessage) => {
-    if (message.type === 'metrics' && message.requestId.startsWith('load-')) return;
-    queueMicrotask(() => {
-      if (active) port.onmessage?.(new MessageEvent('message', { data: message }));
-    });
-  });
-  const port: SimulationWorkerPort = {
-    onerror: null,
-    onmessage: null,
-    postMessage(message: UiToWorkerMessage) {
       runtime.handleMessage(message);
     },
     terminate() {
@@ -245,6 +265,115 @@ function createFalseRecoveryWorker(): SimulationWorkerPort {
 }
 
 describe('world simulation UI gateway', () => {
+  it('locks the release shell to the 256 by 192 shared homeworld', () => {
+    expect(DEMO_WORLD_CONFIG).toStrictEqual({
+      chunkSize: 32,
+      height: 192,
+      societyYearTicks: 100_000,
+      width: 256,
+    });
+  });
+
+  it('records deterministic Worker traffic, frame applications, idle silence, and control latency', async () => {
+    let nowMs = 0;
+    const activity = createTestRuntimeActivityRecorder(() => nowMs);
+    const worker = createControlledRuntimeWorker();
+    const workerFactory = () => worker.port;
+    const { result } = renderHook(() => useWorldSimulation(workerFactory, activity));
+
+    expect(activity.samples()).toMatchObject([
+      { kind: 'worker-request', messageType: 'initialize', requestId: 'initialize-1' },
+    ]);
+    nowMs = 4;
+    act(() => worker.flush());
+    await waitFor(() => expect(result.current.status).toBe('ready'));
+    expect(activity.latencyMs('initialize-1', 'frame-applied')).toBe(4);
+    expect(activity.count('frame-applied')).toBe(1);
+
+    const idleSampleCount = activity.samples().length;
+    nowMs = 1_004;
+    await act(async () => Promise.resolve());
+    expect(activity.samples()).toHaveLength(idleSampleCount);
+
+    act(() => result.current.advanceTicks(1));
+    const advanceRequest = activity
+      .samples()
+      .find(
+        (sample): sample is Extract<RuntimeActivitySample, { readonly kind: 'worker-request' }> =>
+          sample.kind === 'worker-request' && sample.messageType === 'advanceTicks',
+      );
+    expect(advanceRequest).toBeDefined();
+    nowMs = 1_010;
+    act(() => worker.flush());
+    await waitFor(() => expect(result.current.frame?.tick).toBe(1));
+
+    expect(activity.latencyMs(advanceRequest!.requestId, 'worker-response')).toBe(6);
+    expect(activity.latencyMs(advanceRequest!.requestId, 'frame-applied')).toBe(6);
+    expect(activity.sequenceDistance(advanceRequest!.requestId, 'frame-applied')).toBe(2);
+    expect(
+      activity
+        .samples()
+        .filter(
+          (
+            sample,
+          ): sample is Extract<RuntimeActivitySample, { readonly kind: 'worker-response' }> =>
+            sample.kind === 'worker-response',
+        )
+        .map((sample) => sample.messageType),
+    ).toEqual(['ready', 'eventBatch', 'frameDelta']);
+    expect(activity.count('frame-applied')).toBe(2);
+  });
+
+  it('contains activity-recorder failures without altering Worker delivery or frame application', async () => {
+    let recordAttempts = 0;
+    const throwingRecorder = {
+      record() {
+        recordAttempts += 1;
+        throw new Error('Injected activity-recorder failure');
+      },
+    };
+    const worker = createControlledRuntimeWorker();
+    const workerFactory = () => worker.port;
+    const { result } = renderHook(() => useWorldSimulation(workerFactory, throwingRecorder));
+
+    expect(() => act(() => worker.flush())).not.toThrow();
+    await waitFor(() => expect(result.current.status).toBe('ready'));
+    expect(result.current.frame?.tick).toBe(0);
+
+    expect(() =>
+      act(() => {
+        result.current.advanceTicks(1);
+        worker.flush();
+      }),
+    ).not.toThrow();
+    await waitFor(() => expect(result.current.frame?.tick).toBe(1));
+    expect(result.current.status).toBe('ready');
+    expect(recordAttempts).toBeGreaterThan(0);
+  });
+
+  it('records outbound activity only after the Worker accepts the request', async () => {
+    const activity = createTestRuntimeActivityRecorder(() => 0);
+    const workerFactory = () => createRuntimeWorker('advanceTicks');
+    const { result } = renderHook(() => useWorldSimulation(workerFactory, activity));
+
+    await waitFor(() => expect(result.current.status).toBe('ready'));
+    const sampleCountBeforeFailure = activity.samples().length;
+
+    expect(() => act(() => result.current.advanceTicks(1))).toThrow(
+      'Injected advanceTicks dispatch failure',
+    );
+    expect(activity.samples()).toHaveLength(sampleCountBeforeFailure);
+    expect(
+      activity
+        .samples()
+        .some(
+          (sample) => sample.kind === 'worker-request' && sample.messageType === 'advanceTicks',
+        ),
+    ).toBe(false);
+    expect(result.current.status).toBe('ready');
+    expect(result.current.frame?.tick).toBe(0);
+  });
+
   it('retries a failed bootstrap but cannot replace an established authoritative frame', async () => {
     let attempts = 0;
     const workerFactory = () => {
@@ -270,14 +399,17 @@ describe('world simulation UI gateway', () => {
   });
 
   it('rejects a stale frame delta without replacing the authoritative UI projection', async () => {
-    const { result } = renderHook(() => useWorldSimulation(createStaleDeltaWorker));
+    const activity = createTestRuntimeActivityRecorder(() => 0);
+    const { result } = renderHook(() => useWorldSimulation(createStaleDeltaWorker, activity));
     await waitFor(() => expect(result.current.status).toBe('ready'));
     expect(result.current.frame?.tick).toBe(0);
+    expect(activity.count('frame-applied')).toBe(1);
 
     act(() => result.current.advanceTicks(1));
     await waitFor(() => expect(result.current.status).toBe('faulted'));
     expect(result.current.error).toMatch(/base tick/i);
     expect(result.current.frame?.tick).toBe(0);
+    expect(activity.count('frame-applied')).toBe(1);
   });
 
   it('fails closed after an invalid delta instead of accepting a later replacement frame', async () => {
@@ -342,7 +474,7 @@ describe('world simulation UI gateway', () => {
   });
 
   it('treats a ready frame as the authoritative completion acknowledgement for a load', async () => {
-    const { result } = renderHook(() => useWorldSimulation(createLoadReadyOnlyWorker));
+    const { result } = renderHook(() => useWorldSimulation(createRuntimeWorker));
     await waitFor(() => expect(result.current.status).toBe('ready'));
     const snapshot = serializeWorldSnapshot(stepWorld(createInitialWorld([5, 7, 11, 13]), 100));
 
@@ -448,7 +580,7 @@ describe('world simulation UI gateway', () => {
         subjectId: 0,
         targetKind: 'world',
         targetId: 0,
-        tileIndex: 3120,
+        tileIndex: 24704,
         amount: 6,
       },
       {
@@ -491,7 +623,7 @@ describe('world simulation UI gateway', () => {
         subjectId: 0,
         targetKind: 'world',
         targetId: 0,
-        tileIndex: 3120,
+        tileIndex: 24704,
         amount: 6,
       },
     ]);

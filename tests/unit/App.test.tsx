@@ -311,7 +311,7 @@ describe('deterministic world lab', () => {
     await user.click(screen.getByRole('button', { name: 'Pan world right' }));
     await user.click(screen.getByRole('button', { name: 'Zoom world out' }));
     await user.click(screen.getByRole('button', { name: 'Overview' }));
-    expect(screen.getByLabelText('Camera position')).toHaveTextContent('X 24 · Y 24 · 1.50×');
+    expect(screen.getByLabelText('Camera position')).toHaveTextContent('X -676 · Y -598 · 1.50×');
 
     await user.selectOptions(
       screen.getByRole('combobox', { name: 'Inspect map object' }),
@@ -327,6 +327,42 @@ describe('deterministic world lab', () => {
     expect(
       screen.getByText(/Only accepted focus time advances the live world directly/),
     ).toBeVisible();
+  });
+
+  it('switches between factual Surface and System views with independent cameras', async () => {
+    const user = userEvent.setup();
+    render(<App persistence={createPreviewPersistence()} workerFactory={createRuntimeWorker} />);
+    await screen.findByText(
+      'Worker projection ready · autonomous world active',
+      undefined,
+      UI_READY_TIMEOUT,
+    );
+
+    expect(screen.getByRole('radio', { name: 'Surface' })).toBeChecked();
+    await user.click(screen.getByRole('button', { name: 'Zoom world in' }));
+    expect(screen.getByLabelText('Camera position')).toHaveTextContent('1.80×');
+
+    await user.click(screen.getByRole('radio', { name: 'System' }));
+    expect(
+      screen.queryByRole('img', { name: 'Generated Chrono Forge world' }),
+    ).not.toBeInTheDocument();
+    expect(screen.getByRole('region', { name: 'Known celestial system map' })).toBeVisible();
+    expect(screen.getByLabelText('Camera position')).toHaveTextContent('X 0 · Y 0 · 1.00×');
+    expect(screen.queryByRole('group', { name: 'Map overlay' })).not.toBeInTheDocument();
+
+    await user.click(screen.getByRole('button', { name: 'Zoom system in' }));
+    expect(screen.getByLabelText('Camera position')).toHaveTextContent('1.20×');
+    await user.selectOptions(
+      screen.getByRole('combobox', { name: 'Inspect system object' }),
+      'body:1',
+    );
+    expect(screen.getByRole('article', { name: 'Selected map object' })).toHaveTextContent(
+      'home body 1',
+    );
+
+    await user.click(screen.getByRole('radio', { name: 'Surface' }));
+    expect(screen.getByRole('img', { name: 'Generated Chrono Forge world' })).toBeVisible();
+    expect(screen.getByLabelText('Camera position')).toHaveTextContent('1.80×');
   });
 
   it('clears a map selection when the next valid Worker frame removes that object', async () => {
@@ -365,15 +401,15 @@ describe('deterministic world lab', () => {
     });
   });
 
-  it('refits overview framing on resize without discarding deliberate exploration', async () => {
+  it('refits the release-world founding region on resize without discarding exploration', async () => {
     const user = userEvent.setup();
     render(<App persistence={createPreviewPersistence()} workerFactory={createRuntimeWorker} />);
     await screen.findByText('Worker projection ready · autonomous world active');
     const world = screen.getByRole('img', { name: 'Generated Chrono Forge world' });
 
-    expect(world).toHaveAttribute('data-camera', '24:24:1.5');
+    await waitFor(() => expect(world).toHaveAttribute('data-camera', '-676.5:-598.5:1.5'));
     await user.click(screen.getByRole('button', { name: 'Simulate large map viewport' }));
-    expect(world).not.toHaveAttribute('data-camera', '24:24:1.5');
+    await waitFor(() => expect(world).not.toHaveAttribute('data-camera', '-676.5:-598.5:1.5'));
 
     await user.click(screen.getByRole('button', { name: 'Zoom world in' }));
     const exploredCamera = world.getAttribute('data-camera');
@@ -705,7 +741,7 @@ describe('deterministic world lab', () => {
     await waitFor(() => {
       expect(screen.getByRole('combobox', { name: 'Load local slot' })).toHaveValue('primary');
     });
-  });
+  }, 30_000);
 
   it('reports a local persistence bootstrap failure without obscuring the world', async () => {
     const fallback = createInMemoryPersistenceGateway();

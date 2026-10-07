@@ -8,7 +8,7 @@ use std::{
     error::Error,
     fmt::{Display, Formatter, Write},
     fs,
-    path::Path,
+    path::{Path, PathBuf},
     sync::Mutex,
     time::{SystemTime, UNIX_EPOCH},
 };
@@ -19,7 +19,7 @@ use sha2::{Digest, Sha256};
 use tauri::State;
 
 const DATABASE_FILE: &str = "chrono-forge.sqlite3";
-const SCHEMA_VERSION: i64 = 7;
+const SCHEMA_VERSION: i64 = 8;
 const MAX_ID_BYTES: usize = 64;
 const MAX_NAME_BYTES: usize = 120;
 const MAX_SNAPSHOT_BYTES: usize = 50 * 1024 * 1024;
@@ -87,6 +87,30 @@ pub struct LoadedSave {
     pub focus_session: Option<FocusSession>,
     pub snapshot: String,
     pub checksum: String,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct SaveCommitReceipt {
+    pub slot_id: String,
+    pub name: String,
+    pub head_generation: i64,
+    pub saved_at_ms: i64,
+    pub checksum: String,
+}
+
+impl From<LoadedSave> for SaveCommitReceipt {
+    fn from(loaded: LoadedSave) -> Self {
+        Self {
+            slot_id: loaded.slot_id,
+            name: loaded.name,
+            head_generation: loaded
+                .head_generation
+                .expect("a committed save always has a head generation"),
+            saved_at_ms: loaded.saved_at_ms,
+            checksum: loaded.checksum,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -258,14 +282,17 @@ struct SaveExportEnvelope {
 
 pub struct PersistenceState {
     database: Mutex<PersistenceDatabase>,
+    database_path: PathBuf,
 }
 
 impl PersistenceState {
     pub fn open_app_local_data(app_local_data: &Path) -> Result<Self> {
         fs::create_dir_all(app_local_data)?;
-        let database = PersistenceDatabase::open(&app_local_data.join(DATABASE_FILE))?;
+        let database_path = app_local_data.join(DATABASE_FILE);
+        let database = PersistenceDatabase::open(&database_path)?;
         Ok(Self {
             database: Mutex::new(database),
+            database_path,
         })
     }
 
@@ -273,6 +300,19 @@ impl PersistenceState {
         self.database
             .lock()
             .map_err(|_| PersistenceError::new("persistence database lock was poisoned"))
+    }
+
+    fn defer_prune(&self, slot_id: String, head_generation: i64) {
+        let database_path = self.database_path.clone();
+        let _ = std::thread::Builder::new()
+            .name("chrono-forge-save-retention".to_owned())
+            .spawn(move || {
+                let Ok(mut database) = PersistenceDatabase::open_existing_for_prune(&database_path)
+                else {
+                    return;
+                };
+                let _ = database.prune_old_generations(&slot_id, head_generation);
+            });
     }
 }
 
@@ -286,6 +326,15 @@ impl PersistenceDatabase {
         let mut database = Self { connection };
         database.migrate()?;
         Ok(database)
+    }
+
+    fn open_existing_for_prune(path: &Path) -> Result<Self> {
+        let connection = Connection::open(path)?;
+        connection.execute_batch(
+            "PRAGMA foreign_keys = ON;
+             PRAGMA busy_timeout = 5000;",
+        )?;
+        Ok(Self { connection })
     }
 
     #[cfg(test)]
@@ -476,6 +525,21 @@ impl PersistenceDatabase {
             )?;
             transaction.commit()?;
         }
+        if newest_version < 8 {
+            let transaction = self
+                .connection
+                .transaction_with_behavior(TransactionBehavior::Immediate)?;
+            transaction.execute_batch(
+                "ALTER TABLE save_generations
+                 ADD COLUMN semantically_verified INTEGER NOT NULL DEFAULT 0
+                     CHECK (semantically_verified IN (0, 1));",
+            )?;
+            transaction.execute(
+                "INSERT INTO schema_migrations (version, applied_marker) VALUES (8, 1)",
+                [],
+            )?;
+            transaction.commit()?;
+        }
         Ok(())
     }
 
@@ -549,14 +613,9 @@ impl PersistenceDatabase {
                     snapshot,
                     checksum,
                 };
-                let mut candidates = vec![head];
-                candidates.extend(self.fallback_candidates(
-                    slot_id,
-                    &name,
-                    Some(head_generation),
-                    Some(head_generation),
-                )?);
-                return Ok(Some(candidates));
+                // The common path returns only the verified head. Older generations are loaded
+                // lazily only if the TypeScript semantic validator rejects this candidate.
+                return Ok(Some(vec![head]));
             }
         }
 
@@ -569,20 +628,50 @@ impl PersistenceDatabase {
         Ok(Some(candidates))
     }
 
+    fn load_slot_fallback_candidates(
+        &self,
+        slot_id: &str,
+        before_generation: i64,
+    ) -> Result<Option<Vec<LoadedSave>>> {
+        validate_identifier(slot_id, "slot ID")?;
+        if before_generation < 1 {
+            return Err(PersistenceError::new(
+                "fallback generation boundary must be positive",
+            ));
+        }
+        let slot = self
+            .connection
+            .query_row(
+                "SELECT name, head_generation FROM save_slots WHERE slot_id = ?1",
+                [slot_id],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, Option<i64>>(1)?)),
+            )
+            .optional()?;
+        let Some((name, head_generation)) = slot else {
+            return Ok(None);
+        };
+        Ok(Some(self.fallback_candidates(
+            slot_id,
+            &name,
+            head_generation,
+            Some(before_generation),
+        )?))
+    }
+
     fn fallback_candidates(
         &self,
         slot_id: &str,
         name: &str,
         head_generation: Option<i64>,
-        excluded_generation: Option<i64>,
+        before_generation: Option<i64>,
     ) -> Result<Vec<LoadedSave>> {
         let mut statement = self.connection.prepare(
             "SELECT generation, snapshot, checksum, saved_at_ms, focus_session_json
              FROM save_generations
-             WHERE slot_id = ?1 AND (?2 IS NULL OR generation != ?2)
+             WHERE slot_id = ?1 AND (?2 IS NULL OR generation < ?2)
              ORDER BY generation DESC",
         )?;
-        let generations = statement.query_map(params![slot_id, excluded_generation], |row| {
+        let generations = statement.query_map(params![slot_id, before_generation], |row| {
             Ok((
                 row.get::<_, i64>(0)?,
                 row.get::<_, String>(1)?,
@@ -627,13 +716,6 @@ impl PersistenceDatabase {
         snapshot: &str,
         session: &FocusSession,
     ) -> Result<LoadedSave> {
-        validate_focus_session(session)?;
-        if session.slot_id.as_deref() != Some(slot_id) {
-            return Err(PersistenceError::new(
-                "focus checkpoint session must belong to its save slot",
-            ));
-        }
-        validate_recap_event_references_in_snapshot(session, snapshot)?;
         self.commit_slot_inner(slot_id, name, snapshot, Some(session), false)
     }
 
@@ -647,7 +729,6 @@ impl PersistenceDatabase {
     ) -> Result<LoadedSave> {
         validate_identifier(slot_id, "slot ID")?;
         validate_name(name)?;
-        validate_snapshot(snapshot)?;
         if let Some(session) = focus_session {
             validate_focus_session(session)?;
             if session.slot_id.as_deref() != Some(slot_id) {
@@ -656,6 +737,8 @@ impl PersistenceDatabase {
                 ));
             }
             validate_recap_event_references_in_snapshot(session, snapshot)?;
+        } else {
+            validate_snapshot(snapshot)?;
         }
         let saved_at_ms = current_unix_epoch_ms()?;
         let checksum = sha256_hex(snapshot);
@@ -702,15 +785,14 @@ impl PersistenceDatabase {
                 ))
             },
         )?;
-        if inserted.0 != snapshot
-            || inserted.1 != checksum
-            || inserted.2 != focus_session_json
-            || sha256_hex(&inserted.0) != inserted.1
-        {
-            return Err(PersistenceError::new(
-                "inserted save generation did not verify",
-            ));
-        }
+        verify_inserted_generation(
+            &inserted.0,
+            &inserted.1,
+            inserted.2.as_deref(),
+            snapshot,
+            &checksum,
+            focus_session_json.as_deref(),
+        )?;
         if let Some(session) = focus_session {
             upsert_focus_session(
                 &transaction,
@@ -734,9 +816,6 @@ impl PersistenceDatabase {
         )?;
         transaction.commit()?;
 
-        // Retention is intentionally a separate best-effort transaction. A prune failure cannot
-        // invalidate a durable head that has already been verified and committed.
-        let _ = self.prune_old_generations(slot_id);
         Ok(LoadedSave {
             slot_id: slot_id.to_owned(),
             name: name.to_owned(),
@@ -750,45 +829,106 @@ impl PersistenceDatabase {
         })
     }
 
-    fn prune_old_generations(&mut self, slot_id: &str) -> Result<()> {
+    fn confirm_semantically_valid_generation(
+        &mut self,
+        slot_id: &str,
+        generation: i64,
+        checksum: &str,
+    ) -> Result<i64> {
+        validate_identifier(slot_id, "slot ID")?;
+        if generation <= 0 || !is_sha256_hex(checksum) {
+            return Err(PersistenceError::new(
+                "semantic save confirmation is malformed",
+            ));
+        }
         let transaction = self
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let generations = {
+        let candidate = transaction
+            .query_row(
+                "SELECT snapshot, checksum, saved_at_ms, focus_session_json
+                 FROM save_generations
+                 WHERE slot_id = ?1 AND generation = ?2",
+                params![slot_id, generation],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, i64>(2)?,
+                        row.get::<_, Option<String>>(3)?,
+                    ))
+                },
+            )
+            .optional()?
+            .ok_or_else(|| PersistenceError::new("save generation does not exist"))?;
+        if candidate.1 != checksum
+            || sha256_hex(&candidate.0) != checksum
+            || candidate.2 < 0
+            || validate_snapshot(&candidate.0).is_err()
+            || parse_focus_checkpoint(slot_id, &candidate.0, candidate.3.as_deref()).is_err()
+        {
+            return Err(PersistenceError::new(
+                "semantic save confirmation does not match verified stored material",
+            ));
+        }
+        transaction.execute(
+            "UPDATE save_generations SET semantically_verified = 1
+             WHERE slot_id = ?1 AND generation = ?2",
+            params![slot_id, generation],
+        )?;
+        let head_generation = transaction
+            .query_row(
+                "SELECT head_generation FROM save_slots WHERE slot_id = ?1",
+                [slot_id],
+                |row| row.get::<_, Option<i64>>(0),
+            )?
+            .ok_or_else(|| PersistenceError::new("save slot has no head generation"))?;
+        transaction.commit()?;
+        Ok(head_generation)
+    }
+
+    fn prune_old_generations(&mut self, slot_id: &str, head_generation: i64) -> Result<()> {
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let oldest_retained_verified_generation = {
             let mut statement = transaction.prepare(
                 "SELECT generation, snapshot, checksum, saved_at_ms, focus_session_json
-                 FROM save_generations WHERE slot_id = ?1 ORDER BY generation DESC",
+                 FROM save_generations
+                 WHERE slot_id = ?1 AND generation <= ?2 AND semantically_verified = 1
+                 ORDER BY generation DESC",
             )?;
-            let rows = statement.query_map([slot_id], |row| {
-                Ok((
-                    row.get::<_, i64>(0)?,
-                    row.get::<_, String>(1)?,
-                    row.get::<_, String>(2)?,
-                    row.get::<_, i64>(3)?,
-                    row.get::<_, Option<String>>(4)?,
-                ))
-            })?;
-            rows.collect::<std::result::Result<Vec<_>, _>>()?
-        };
-        let mut verified_count = 0;
-        let mut generations_to_delete = Vec::new();
-        for (generation, snapshot, checksum, saved_at_ms, focus_session_json) in generations {
-            if validate_snapshot(&snapshot).is_ok()
-                && checksum == sha256_hex(&snapshot)
-                && saved_at_ms >= 0
-                && parse_focus_checkpoint(slot_id, &snapshot, focus_session_json.as_deref()).is_ok()
-            {
-                if verified_count < RETAINED_GENERATIONS {
+            let mut rows = statement.query(params![slot_id, head_generation])?;
+            let mut verified_count = 0;
+            let mut oldest_retained = None;
+            while let Some(row) = rows.next()? {
+                let generation = row.get::<_, i64>(0)?;
+                let snapshot = row.get::<_, String>(1)?;
+                let checksum = row.get::<_, String>(2)?;
+                let saved_at_ms = row.get::<_, i64>(3)?;
+                let focus_session_json = row.get::<_, Option<String>>(4)?;
+                if validate_snapshot(&snapshot).is_ok()
+                    && checksum == sha256_hex(&snapshot)
+                    && saved_at_ms >= 0
+                    && parse_focus_checkpoint(slot_id, &snapshot, focus_session_json.as_deref())
+                        .is_ok()
+                {
                     verified_count += 1;
-                } else {
-                    generations_to_delete.push(generation);
+                    if verified_count == RETAINED_GENERATIONS {
+                        oldest_retained = Some(generation);
+                        break;
+                    }
                 }
             }
-        }
-        for generation in generations_to_delete {
+            oldest_retained
+        };
+        if let Some(oldest_retained) = oldest_retained_verified_generation {
+            // Only generations explicitly confirmed after the TypeScript canonical parser accepts
+            // them can establish the cutoff. JSON/checksum-valid but semantically invalid rows may
+            // remain as evidence, but they can never displace the three recoverable generations.
             transaction.execute(
-                "DELETE FROM save_generations WHERE slot_id = ?1 AND generation = ?2",
-                params![slot_id, generation],
+                "DELETE FROM save_generations WHERE slot_id = ?1 AND generation < ?2",
+                params![slot_id, oldest_retained],
             )?;
         }
         transaction.commit()?;
@@ -1222,8 +1362,19 @@ fn validate_recap_event_references_in_snapshot(
     session: &FocusSession,
     snapshot: &str,
 ) -> Result<()> {
+    if session.recap_event_ids.is_empty() && session.review.is_none() {
+        return validate_snapshot(snapshot);
+    }
+    let authority = parse_snapshot_authority(snapshot)?;
+    validate_recap_event_references_in_snapshot_authority(session, &authority)
+}
+
+fn validate_recap_event_references_in_snapshot_authority(
+    session: &FocusSession,
+    authority: &SnapshotAuthority,
+) -> Result<()> {
     if let Some(review) = &session.review
-        && world_tick(snapshot)? != review.after.tick
+        && authority.tick != review.after.tick
     {
         return Err(PersistenceError::new(
             "focus review must describe the exact saved-world checkpoint",
@@ -1232,18 +1383,17 @@ fn validate_recap_event_references_in_snapshot(
     if session.recap_event_ids.is_empty() {
         return Ok(());
     }
-    let source_events = world_events(snapshot)?;
     if session
         .recap_event_ids
         .iter()
-        .any(|event_id| !source_events.contains_key(event_id))
+        .any(|event_id| !authority.events.contains_key(event_id))
     {
         return Err(PersistenceError::new(
             "focus recap references an event absent from its source save",
         ));
     }
     if session.recap_entries.iter().any(|entry| {
-        source_events.get(&entry.id).is_none_or(|source| {
+        authority.events.get(&entry.id).is_none_or(|source| {
             source.tick != Some(entry.tick)
                 || source.summary.as_deref() != Some(entry.summary.as_str())
         })
@@ -1278,15 +1428,27 @@ fn validate_name(value: &str) -> Result<()> {
     Ok(())
 }
 
-fn validate_snapshot(snapshot: &str) -> Result<()> {
+fn validate_snapshot_bounds(snapshot: &str) -> Result<()> {
     if snapshot.is_empty() || snapshot.len() > MAX_SNAPSHOT_BYTES {
         return Err(PersistenceError::new(format!(
             "snapshot must be nonempty and at most {MAX_SNAPSHOT_BYTES} bytes"
         )));
     }
-    serde_json::from_str::<serde_json::Value>(snapshot)
+    Ok(())
+}
+
+fn validate_snapshot(snapshot: &str) -> Result<()> {
+    validate_snapshot_bounds(snapshot)?;
+    serde_json::from_str::<serde::de::IgnoredAny>(snapshot)
         .map(|_| ())
         .map_err(|_| PersistenceError::new("snapshot must be valid JSON data"))
+}
+
+fn is_sha256_hex(value: &str) -> bool {
+    value.len() == 64
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))
 }
 
 fn validate_settings(settings: &AppSettings) -> Result<()> {
@@ -1518,71 +1680,70 @@ struct SnapshotEventFact {
     summary: Option<String>,
 }
 
-fn world_tick(snapshot: &str) -> Result<u64> {
-    let envelope: serde_json::Value = serde_json::from_str(snapshot)?;
-    let format_version = envelope
-        .get("formatVersion")
-        .and_then(serde_json::Value::as_u64)
-        .ok_or_else(|| PersistenceError::new("source save has no format version"))?;
-    let legacy_payload;
-    let payload = if format_version == 0 {
-        let world_json = envelope
-            .get("worldJson")
-            .and_then(serde_json::Value::as_str)
-            .ok_or_else(|| PersistenceError::new("legacy source save has no world payload"))?;
-        legacy_payload = serde_json::from_str::<serde_json::Value>(world_json)?;
-        &legacy_payload
-    } else {
-        envelope
-            .get("payload")
-            .ok_or_else(|| PersistenceError::new("source save has no world payload"))?
-    };
-    payload
-        .get("tick")
-        .and_then(serde_json::Value::as_u64)
-        .filter(|tick| *tick <= MAX_JSON_SAFE_INTEGER)
-        .ok_or_else(|| PersistenceError::new("source save has no valid world tick"))
+#[derive(Debug)]
+struct SnapshotAuthority {
+    tick: u64,
+    events: BTreeMap<u64, SnapshotEventFact>,
 }
 
-fn world_events(snapshot: &str) -> Result<BTreeMap<u64, SnapshotEventFact>> {
-    let envelope: serde_json::Value = serde_json::from_str(snapshot)?;
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SnapshotAuthorityEnvelope {
+    format_version: Option<u64>,
+    payload: Option<SnapshotAuthorityPayload>,
+    world_json: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SnapshotAuthorityPayload {
+    tick: Option<u64>,
+    event_log: Option<Vec<SnapshotAuthorityEvent>>,
+}
+
+#[derive(Deserialize)]
+struct SnapshotAuthorityEvent {
+    id: Option<u64>,
+    tick: Option<u64>,
+    summary: Option<String>,
+}
+
+fn parse_snapshot_authority(snapshot: &str) -> Result<SnapshotAuthority> {
+    validate_snapshot_bounds(snapshot)?;
+    let envelope: SnapshotAuthorityEnvelope = serde_json::from_str(snapshot)
+        .map_err(|_| PersistenceError::new("snapshot must be valid JSON data"))?;
     let format_version = envelope
-        .get("formatVersion")
-        .and_then(serde_json::Value::as_u64)
+        .format_version
         .ok_or_else(|| PersistenceError::new("source save has no format version"))?;
-    let legacy_payload;
     let payload = if format_version == 0 {
         let world_json = envelope
-            .get("worldJson")
-            .and_then(serde_json::Value::as_str)
+            .world_json
             .ok_or_else(|| PersistenceError::new("legacy source save has no world payload"))?;
-        legacy_payload = serde_json::from_str::<serde_json::Value>(world_json)?;
-        &legacy_payload
+        serde_json::from_str::<SnapshotAuthorityPayload>(&world_json)?
     } else {
         envelope
-            .get("payload")
+            .payload
             .ok_or_else(|| PersistenceError::new("source save has no world payload"))?
     };
+    let tick = payload
+        .tick
+        .filter(|tick| *tick <= MAX_JSON_SAFE_INTEGER)
+        .ok_or_else(|| PersistenceError::new("source save has no valid world tick"))?;
     let events = payload
-        .get("eventLog")
-        .and_then(serde_json::Value::as_array)
+        .event_log
         .ok_or_else(|| PersistenceError::new("source save has no event log"))?;
     let mut events_by_id = BTreeMap::new();
     for event in events {
         let id = event
-            .get("id")
-            .and_then(serde_json::Value::as_u64)
+            .id
             .filter(|id| *id > 0)
             .ok_or_else(|| PersistenceError::new("source save contains an invalid event ID"))?;
         if events_by_id
             .insert(
                 id,
                 SnapshotEventFact {
-                    tick: event.get("tick").and_then(serde_json::Value::as_u64),
-                    summary: event
-                        .get("summary")
-                        .and_then(serde_json::Value::as_str)
-                        .map(str::to_owned),
+                    tick: event.tick,
+                    summary: event.summary,
                 },
             )
             .is_some()
@@ -1592,7 +1753,10 @@ fn world_events(snapshot: &str) -> Result<BTreeMap<u64, SnapshotEventFact>> {
             ));
         }
     }
-    Ok(events_by_id)
+    Ok(SnapshotAuthority {
+        tick,
+        events: events_by_id,
+    })
 }
 
 fn sha256_hex(value: &str) -> String {
@@ -1604,6 +1768,26 @@ fn sha256_hex(value: &str) -> String {
         write!(&mut encoded, "{byte:02x}").expect("writing to String cannot fail");
     }
     encoded
+}
+
+fn verify_inserted_generation(
+    inserted_snapshot: &str,
+    inserted_checksum: &str,
+    inserted_focus_session_json: Option<&str>,
+    expected_snapshot: &str,
+    expected_checksum: &str,
+    expected_focus_session_json: Option<&str>,
+) -> Result<()> {
+    if inserted_snapshot != expected_snapshot
+        || inserted_checksum != expected_checksum
+        || inserted_focus_session_json != expected_focus_session_json
+        || sha256_hex(inserted_snapshot) != inserted_checksum
+    {
+        return Err(PersistenceError::new(
+            "inserted save generation did not verify",
+        ));
+    }
+    Ok(())
 }
 
 fn current_unix_epoch_ms() -> Result<i64> {
@@ -1660,16 +1844,29 @@ pub fn load_save_slot_candidates(
 }
 
 #[tauri::command]
+pub fn load_save_slot_fallback_candidates(
+    state: State<'_, PersistenceState>,
+    slot_id: String,
+    before_generation: i64,
+) -> std::result::Result<Option<Vec<LoadedSave>>, String> {
+    state
+        .lock()
+        .and_then(|database| database.load_slot_fallback_candidates(&slot_id, before_generation))
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
 pub fn commit_save_slot(
     state: State<'_, PersistenceState>,
     slot_id: String,
     name: String,
     snapshot: String,
-) -> std::result::Result<LoadedSave, String> {
-    state
+) -> std::result::Result<SaveCommitReceipt, String> {
+    let committed = state
         .lock()
         .and_then(|mut database| database.commit_slot(&slot_id, &name, &snapshot))
-        .map_err(|error| error.to_string())
+        .map_err(|error| error.to_string())?;
+    Ok(SaveCommitReceipt::from(committed))
 }
 
 #[tauri::command]
@@ -1679,13 +1876,31 @@ pub fn commit_focus_checkpoint(
     name: String,
     snapshot: String,
     session: FocusSession,
-) -> std::result::Result<LoadedSave, String> {
-    state
+) -> std::result::Result<SaveCommitReceipt, String> {
+    let committed = state
         .lock()
         .and_then(|mut database| {
             database.commit_focus_checkpoint(&slot_id, &name, &snapshot, &session)
         })
-        .map_err(|error| error.to_string())
+        .map_err(|error| error.to_string())?;
+    Ok(SaveCommitReceipt::from(committed))
+}
+
+#[tauri::command]
+pub fn confirm_semantically_valid_save_generation(
+    state: State<'_, PersistenceState>,
+    slot_id: String,
+    generation: i64,
+    checksum: String,
+) -> std::result::Result<(), String> {
+    let head_generation = state
+        .lock()
+        .and_then(|mut database| {
+            database.confirm_semantically_valid_generation(&slot_id, generation, &checksum)
+        })
+        .map_err(|error| error.to_string())?;
+    state.defer_prune(slot_id, head_generation);
+    Ok(())
 }
 
 #[tauri::command]
@@ -1772,6 +1987,32 @@ mod tests {
         format!(
             r#"{{"format":"chrono-forge-world","formatVersion":1,"payload":{{"tick":1,"eventLog":[{{"id":7,"tick":0,"summary":"Recorded factual event 7."}},{{"id":9,"tick":0,"summary":"Recorded factual event 9."}},{{"id":11,"tick":0,"summary":"Recorded factual event 11."}}],"test":"{value}"}}}}"#
         )
+    }
+
+    fn confirm_and_prune(database: &mut PersistenceDatabase, loaded: &LoadedSave) {
+        let head_generation = database
+            .confirm_semantically_valid_generation(
+                &loaded.slot_id,
+                loaded.recovered_generation,
+                &loaded.checksum,
+            )
+            .expect("semantic confirmation");
+        database
+            .prune_old_generations(&loaded.slot_id, head_generation)
+            .expect("retention prune");
+    }
+
+    fn commit_semantically_verified_slot(
+        database: &mut PersistenceDatabase,
+        slot_id: &str,
+        name: &str,
+        snapshot: &str,
+    ) -> LoadedSave {
+        let loaded = database
+            .commit_slot(slot_id, name, snapshot)
+            .expect("verified save commit");
+        confirm_and_prune(database, &loaded);
+        loaded
     }
 
     fn focus_world_moment(tick: u64) -> FocusWorldMoment {
@@ -1867,9 +2108,7 @@ mod tests {
     fn retention_keeps_the_newest_three_verified_generations() {
         let mut database = PersistenceDatabase::in_memory().expect("database");
         for value in ["one", "two", "three", "four"] {
-            database
-                .commit_slot("alpha", "Alpha", &snapshot(value))
-                .expect("commit");
+            commit_semantically_verified_slot(&mut database, "alpha", "Alpha", &snapshot(value));
         }
         let generations: Vec<i64> = database
             .connection
@@ -1882,6 +2121,101 @@ mod tests {
             .collect::<std::result::Result<_, _>>()
             .expect("generations");
         assert_eq!(generations, vec![2, 3, 4]);
+    }
+
+    #[test]
+    fn unconfirmed_semantic_failures_cannot_displace_the_last_recoverable_generation() {
+        let mut database = PersistenceDatabase::in_memory().expect("database");
+        let oldest = commit_semantically_verified_slot(
+            &mut database,
+            "alpha",
+            "Alpha",
+            &snapshot("canonical-oldest"),
+        );
+        for malformed in [r#"{"hello":"world-2"}"#, r#"{"hello":"world-3"}"#] {
+            database
+                .commit_slot("alpha", "Alpha", malformed)
+                .expect("checksum-valid JSON generation");
+        }
+        let newest = commit_semantically_verified_slot(
+            &mut database,
+            "alpha",
+            "Alpha",
+            &snapshot("canonical-newest"),
+        );
+
+        let generations: Vec<i64> = database
+            .connection
+            .prepare(
+                "SELECT generation FROM save_generations WHERE slot_id = 'alpha' ORDER BY generation",
+            )
+            .expect("statement")
+            .query_map([], |row| row.get(0))
+            .expect("query")
+            .collect::<std::result::Result<_, _>>()
+            .expect("generations");
+        assert_eq!(generations, vec![1, 2, 3, 4]);
+
+        database
+            .connection
+            .execute(
+                "UPDATE save_generations SET checksum = 'corrupt'
+                 WHERE slot_id = 'alpha' AND generation = ?1",
+                [newest.recovered_generation],
+            )
+            .expect("corrupt newest head");
+        let candidates = database
+            .load_slot_candidates("alpha")
+            .expect("fallback candidates")
+            .expect("slot");
+        assert_eq!(
+            candidates
+                .iter()
+                .map(|candidate| candidate.recovered_generation)
+                .collect::<Vec<_>>(),
+            vec![3, 2, 1]
+        );
+        assert_eq!(
+            candidates
+                .last()
+                .map(|candidate| candidate.snapshot.as_str()),
+            Some(oldest.snapshot.as_str())
+        );
+    }
+
+    #[test]
+    fn healthy_head_loads_without_eagerly_reading_fallback_generations() {
+        let mut database = PersistenceDatabase::in_memory().expect("database");
+        for value in ["one", "two", "three"] {
+            database
+                .commit_slot("alpha", "Alpha", &snapshot(value))
+                .expect("commit");
+        }
+
+        let candidates = database
+            .load_slot_candidates("alpha")
+            .expect("load candidates")
+            .expect("slot");
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(candidates[0].recovered_generation, 3);
+        assert!(!candidates[0].recovered_from_corruption);
+
+        let fallbacks = database
+            .load_slot_fallback_candidates("alpha", 3)
+            .expect("fallback candidates")
+            .expect("slot");
+        assert_eq!(
+            fallbacks
+                .iter()
+                .map(|candidate| candidate.recovered_generation)
+                .collect::<Vec<_>>(),
+            vec![2, 1]
+        );
+        assert!(
+            fallbacks
+                .iter()
+                .all(|candidate| candidate.recovered_from_corruption)
+        );
     }
 
     #[test]
@@ -1995,9 +2329,7 @@ mod tests {
     fn invalid_checkpoint_material_does_not_displace_recoverable_generations() {
         let mut database = PersistenceDatabase::in_memory().expect("database");
         for value in ["one", "two", "three"] {
-            database
-                .commit_slot("alpha", "Alpha", &snapshot(value))
-                .expect("normal generation");
+            commit_semantically_verified_slot(&mut database, "alpha", "Alpha", &snapshot(value));
         }
         database
             .commit_focus_checkpoint(
@@ -2015,9 +2347,7 @@ mod tests {
                 [],
             )
             .expect("corrupt checkpoint");
-        database
-            .commit_slot("alpha", "Alpha", &snapshot("five"))
-            .expect("next generation");
+        commit_semantically_verified_slot(&mut database, "alpha", "Alpha", &snapshot("five"));
 
         let generations: Vec<i64> = database
             .connection
@@ -2096,6 +2426,24 @@ mod tests {
             )
             .expect("count");
         assert_eq!(count, 1);
+    }
+
+    #[test]
+    fn inserted_generation_verification_rejects_same_length_snapshot_corruption() {
+        let expected = "abcd";
+        let inserted = "wxyz";
+        assert_eq!(expected.len(), inserted.len());
+
+        let result = verify_inserted_generation(
+            inserted,
+            &sha256_hex(expected),
+            None,
+            expected,
+            &sha256_hex(expected),
+            None,
+        );
+
+        assert!(result.is_err());
     }
 
     #[test]
@@ -2221,10 +2569,13 @@ mod tests {
         database
             .commit_focus_checkpoint("alpha", "Alpha", &snapshot("focus-review"), &session)
             .expect("review checkpoint");
+        let checkpoint = database
+            .load_slot("alpha")
+            .expect("load checkpoint")
+            .expect("checkpoint");
+        confirm_and_prune(&mut database, &checkpoint);
         for suffix in ["later-1", "later-2", "later-3", "later-4"] {
-            database
-                .commit_slot("alpha", "Alpha", &snapshot(suffix))
-                .expect("later save");
+            commit_semantically_verified_slot(&mut database, "alpha", "Alpha", &snapshot(suffix));
         }
         let original_generation_exists: bool = database
             .connection
@@ -2578,7 +2929,7 @@ mod tests {
     }
 
     #[test]
-    fn v1_to_v7_migration_marks_existing_generations_and_defaults_new_fields() {
+    fn v1_to_v8_migration_defaults_existing_generations_to_semantically_unverified() {
         let connection = Connection::open_in_memory().expect("connection");
         connection
             .execute_batch(
@@ -2629,6 +2980,16 @@ mod tests {
         let loaded = database.load_slot("alpha").expect("load").expect("present");
         assert_eq!(loaded.saved_at_ms, 0);
         assert_eq!(loaded.focus_session, None);
+        let semantically_verified: i64 = database
+            .connection
+            .query_row(
+                "SELECT semantically_verified FROM save_generations
+                 WHERE slot_id = 'alpha' AND generation = 1",
+                [],
+                |row| row.get(0),
+            )
+            .expect("semantic verification marker");
+        assert_eq!(semantically_verified, 0);
         assert_eq!(
             database.load_settings().expect("settings").active_slot_id,
             None
@@ -2643,6 +3004,6 @@ mod tests {
             .expect("query")
             .collect::<std::result::Result<_, _>>()
             .expect("versions");
-        assert_eq!(versions, vec![1, 2, 3, 4, 5, 6, 7]);
+        assert_eq!(versions, vec![1, 2, 3, 4, 5, 6, 7, 8]);
     }
 }

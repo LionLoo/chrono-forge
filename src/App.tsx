@@ -17,6 +17,15 @@ import {
   panCamera,
   zoomCamera,
 } from './rendering/camera';
+import { SystemMap } from './rendering/SystemMap';
+import {
+  INITIAL_SYSTEM_CAMERA,
+  parseSystemSelection,
+  systemSelectionDetail,
+  systemSelectionOptions,
+  systemSelectionValue,
+  type SystemSelection,
+} from './rendering/system-map-model';
 import { WorldMapCanvas } from './rendering/WorldMapCanvas';
 import type { SelectableId } from './rendering/render-model';
 import { overlayDefinition, WORLD_OVERLAYS, type WorldOverlay } from './rendering/world-palette';
@@ -140,6 +149,32 @@ function tileForSelection(
   return null;
 }
 
+function initialSurfaceCamera(
+  worldWidth: number,
+  worldHeight: number,
+  foundingTile: number | null,
+  viewportWidth: number,
+  viewportHeight: number,
+): typeof INITIAL_WORLD_CAMERA {
+  const fitted = fitCameraToWorld(worldWidth, worldHeight, viewportWidth, viewportHeight);
+  if (
+    foundingTile === null ||
+    foundingTile < 0 ||
+    foundingTile >= worldWidth * worldHeight ||
+    (worldWidth <= 96 && worldHeight <= 64)
+  ) {
+    return fitted;
+  }
+  return frameCameraOnTile(
+    foundingTile,
+    worldWidth,
+    worldHeight,
+    viewportWidth,
+    viewportHeight,
+    1.5,
+  );
+}
+
 function systemPrefersReducedMotion(): boolean {
   return (
     typeof window !== 'undefined' &&
@@ -157,9 +192,12 @@ export function App({ focusAlerts, focusClock, persistence, soundscape, workerFa
   const mapDimensionsRef = useRef<string | null>(null);
   const cameraFollowsOverviewRef = useRef(true);
   const [camera, setCamera] = useState(INITIAL_WORLD_CAMERA);
+  const [systemCamera, setSystemCamera] = useState(INITIAL_SYSTEM_CAMERA);
+  const [primaryView, setPrimaryView] = useState<'surface' | 'system'>('surface');
   const [overlay, setOverlay] = useState<WorldOverlay>('terrain');
   const [inspectionOpen, setInspectionOpen] = useState(false);
   const [mapSelection, setMapSelection] = useState<SelectableId | null>(null);
+  const [systemSelection, setSystemSelection] = useState<SystemSelection | null>(null);
   const [userReducedEffects, setUserReducedEffects] = useState(false);
   const [systemReducedMotion, setSystemReducedMotion] = useState(systemPrefersReducedMotion);
   const reducedEffects = userReducedEffects || systemReducedMotion;
@@ -197,6 +235,10 @@ export function App({ focusAlerts, focusClock, persistence, soundscape, workerFa
 
   const frameWidth = simulation.frame?.width ?? null;
   const frameHeight = simulation.frame?.height ?? null;
+  const foundingTile =
+    simulation.frame?.civilizations.settlements[0]?.centerTileIndex ??
+    simulation.frame?.agentTiles[0] ??
+    null;
   useEffect(() => {
     if (frameWidth === null || frameHeight === null) return;
     const dimensions = `${frameWidth}x${frameHeight}`;
@@ -207,14 +249,15 @@ export function App({ focusAlerts, focusClock, persistence, soundscape, workerFa
     const viewportWidth = mapFrame?.clientWidth;
     const viewportHeight = mapFrame?.clientHeight;
     setCamera(
-      fitCameraToWorld(
+      initialSurfaceCamera(
         frameWidth,
         frameHeight,
+        foundingTile,
         viewportWidth === undefined || viewportWidth < 1 ? 960 : viewportWidth,
         viewportHeight === undefined || viewportHeight < 1 ? 540 : viewportHeight,
       ),
     );
-  }, [frameHeight, frameWidth]);
+  }, [foundingTile, frameHeight, frameWidth]);
 
   const setExploredCamera = useCallback((nextCamera: typeof INITIAL_WORLD_CAMERA) => {
     cameraFollowsOverviewRef.current = false;
@@ -225,14 +268,23 @@ export function App({ focusAlerts, focusClock, persistence, soundscape, workerFa
       if (!cameraFollowsOverviewRef.current || frameWidth === null || frameHeight === null) {
         return;
       }
-      setCamera(fitCameraToWorld(frameWidth, frameHeight, viewportWidth, viewportHeight));
+      setCamera(
+        initialSurfaceCamera(frameWidth, frameHeight, foundingTile, viewportWidth, viewportHeight),
+      );
     },
-    [frameHeight, frameWidth],
+    [foundingTile, frameHeight, frameWidth],
   );
 
   const selectMapObject = useCallback(
     (selection: SelectableId | null) => {
       setMapSelection(selection);
+      if (selection !== null) void gameSoundscape.playCue('selection', audioSettings);
+    },
+    [audioSettings, gameSoundscape],
+  );
+  const selectSystemObject = useCallback(
+    (selection: SystemSelection | null) => {
+      setSystemSelection(selection);
       if (selection !== null) void gameSoundscape.playCue('selection', audioSettings);
     },
     [audioSettings, gameSoundscape],
@@ -298,6 +350,30 @@ export function App({ focusAlerts, focusClock, persistence, soundscape, workerFa
   }, [simulation.frame]);
   const recentEvents = useMemo(() => simulation.events.slice(-4).reverse(), [simulation.events]);
   const overlayInfo = overlayDefinition(overlay);
+  const systemSelectableObjects = useMemo(
+    () => (simulation.frame === null ? [] : systemSelectionOptions(simulation.frame.space)),
+    [simulation.frame],
+  );
+  const activeSystemSelection = useMemo(
+    () =>
+      systemSelection !== null &&
+      systemSelectableObjects.some(
+        (choice) =>
+          choice.selection.kind === systemSelection.kind &&
+          choice.selection.id === systemSelection.id,
+      )
+        ? systemSelection
+        : null,
+    [systemSelectableObjects, systemSelection],
+  );
+  if (systemSelection !== null && activeSystemSelection === null) setSystemSelection(null);
+  const selectedSystemDetail = useMemo(
+    () =>
+      simulation.frame === null
+        ? null
+        : systemSelectionDetail(simulation.frame.space, activeSystemSelection),
+    [activeSystemSelection, simulation.frame],
+  );
   const selectableObjects = useMemo(() => {
     const frame = simulation.frame;
     if (frame === null) return [];
@@ -479,6 +555,7 @@ export function App({ focusAlerts, focusClock, persistence, soundscape, workerFa
         id: target.id,
         kind: target.kind === 'person' ? 'agent' : target.kind,
       };
+      setPrimaryView('surface');
       selectMapObject(selection);
       frameMapObject(selection);
       queueMicrotask(() => {
@@ -516,6 +593,18 @@ export function App({ focusAlerts, focusClock, persistence, soundscape, workerFa
       : simulation.status === 'faulted'
         ? `Simulation fault: ${simulation.error ?? 'unknown error'}`
         : 'Worker projection ready · autonomous world active';
+  const activeCamera = primaryView === 'surface' ? camera : systemCamera;
+  const cameraSubject = primaryView === 'surface' ? 'world' : 'system';
+  const updateActiveCamera = (
+    transform: (current: typeof INITIAL_WORLD_CAMERA) => typeof INITIAL_WORLD_CAMERA,
+  ) => {
+    if (primaryView === 'surface') {
+      cameraFollowsOverviewRef.current = false;
+      setCamera(transform);
+    } else {
+      setSystemCamera(transform);
+    }
+  };
 
   return (
     <div className="app-shell">
@@ -560,9 +649,12 @@ export function App({ focusAlerts, focusClock, persistence, soundscape, workerFa
           <section className="world-card" aria-labelledby="world-map-title">
             <header className="card-heading">
               <div>
-                <p>Live world</p>
+                <p>{primaryView === 'surface' ? 'Live world' : 'Known system'}</p>
                 <h2 id="world-map-title">
-                  {simulation.frame?.civilizations.settlements[0]?.name ?? 'Founding settlement'}
+                  {primaryView === 'surface'
+                    ? (simulation.frame?.civilizations.settlements[0]?.name ??
+                      'Founding settlement')
+                    : 'The wider system'}
                 </h2>
               </div>
               <div className="world-heading-status">
@@ -571,44 +663,85 @@ export function App({ focusAlerts, focusClock, persistence, soundscape, workerFa
                 </span>
                 <span>
                   {simulation.frame
-                    ? `${simulation.frame.width} × ${simulation.frame.height}`
+                    ? primaryView === 'surface'
+                      ? `${simulation.frame.width} × ${simulation.frame.height}`
+                      : `${simulation.frame.space.bodies.length} known bodies`
                     : '—'}
                 </span>
               </div>
             </header>
 
-            <fieldset className="overlay-picker">
-              <legend>Map overlay</legend>
-              {WORLD_OVERLAYS.map((option) => (
-                <label key={option.value}>
-                  <input
-                    checked={overlay === option.value}
-                    name="world-overlay"
-                    onChange={() => {
-                      setOverlay(option.value);
-                    }}
-                    type="radio"
-                    value={option.value}
-                  />
-                  <span>{option.label}</span>
-                </label>
-              ))}
+            <fieldset className="view-picker">
+              <legend>World view</legend>
+              <label>
+                <input
+                  checked={primaryView === 'surface'}
+                  name="primary-world-view"
+                  onChange={() => setPrimaryView('surface')}
+                  type="radio"
+                />
+                <span>Surface</span>
+              </label>
+              <label>
+                <input
+                  checked={primaryView === 'system'}
+                  name="primary-world-view"
+                  onChange={() => setPrimaryView('system')}
+                  type="radio"
+                />
+                <span>System</span>
+              </label>
             </fieldset>
+
+            {primaryView === 'surface' ? (
+              <fieldset className="overlay-picker">
+                <legend>Map overlay</legend>
+                {WORLD_OVERLAYS.map((option) => (
+                  <label key={option.value}>
+                    <input
+                      checked={overlay === option.value}
+                      name="world-overlay"
+                      onChange={() => {
+                        setOverlay(option.value);
+                      }}
+                      type="radio"
+                      value={option.value}
+                    />
+                    <span>{option.label}</span>
+                  </label>
+                ))}
+              </fieldset>
+            ) : (
+              <p className="system-view-note">
+                Only discovered bodies, recorded travel, colonies, messages, and contacted
+                civilizations appear here.
+              </p>
+            )}
 
             <div className="map-stage">
               <div className="map-frame" ref={mapFrameRef}>
                 {simulation.frame ? (
                   <>
-                    <WorldMapCanvas
-                      camera={camera}
-                      onCameraChange={setExploredCamera}
-                      onSelectionChange={selectMapObject}
-                      onViewportResize={refitOverviewOnResize}
-                      overlay={overlay}
-                      projection={simulation.frame}
-                      reducedEffects={reducedEffects}
-                      selection={activeMapSelection}
-                    />
+                    {primaryView === 'surface' ? (
+                      <WorldMapCanvas
+                        camera={camera}
+                        onCameraChange={setExploredCamera}
+                        onSelectionChange={selectMapObject}
+                        onViewportResize={refitOverviewOnResize}
+                        overlay={overlay}
+                        projection={simulation.frame}
+                        reducedEffects={reducedEffects}
+                        selection={activeMapSelection}
+                      />
+                    ) : (
+                      <SystemMap
+                        camera={systemCamera}
+                        onCameraChange={setSystemCamera}
+                        onSelectionChange={selectSystemObject}
+                        selection={activeSystemSelection}
+                        space={simulation.frame.space}
+                      />
+                    )}
                     {simulation.status === 'faulted' ? (
                       <div className="map-render-error" role="alert">
                         <p>
@@ -637,53 +770,56 @@ export function App({ focusAlerts, focusClock, persistence, soundscape, workerFa
                 )}
               </div>
 
-              <div className="overlay-legend" aria-live="polite">
-                <span
-                  aria-hidden="true"
-                  className={`overlay-pattern overlay-pattern-${overlayInfo.pattern}`}
-                />
-                <span>
-                  {overlayInfo.legend}. Pattern cue: {overlayInfo.pattern}.
-                </span>
-              </div>
+              {primaryView === 'surface' ? (
+                <div className="overlay-legend" aria-live="polite">
+                  <span
+                    aria-hidden="true"
+                    className={`overlay-pattern overlay-pattern-${overlayInfo.pattern}`}
+                  />
+                  <span>
+                    {overlayInfo.legend}. Pattern cue: {overlayInfo.pattern}.
+                  </span>
+                </div>
+              ) : null}
 
-              <div className="camera-toolbar" aria-label="World camera controls">
+              <div
+                className="camera-toolbar"
+                aria-label={
+                  primaryView === 'surface' ? 'World camera controls' : 'System camera controls'
+                }
+              >
                 <div className="camera-directions">
                   <button
-                    aria-label="Pan world left"
+                    aria-label={`Pan ${cameraSubject} left`}
                     onClick={() => {
-                      cameraFollowsOverviewRef.current = false;
-                      setCamera((current) => panCamera(current, -36, 0));
+                      updateActiveCamera((current) => panCamera(current, -36, 0));
                     }}
                     type="button"
                   >
                     ←
                   </button>
                   <button
-                    aria-label="Pan world up"
+                    aria-label={`Pan ${cameraSubject} up`}
                     onClick={() => {
-                      cameraFollowsOverviewRef.current = false;
-                      setCamera((current) => panCamera(current, 0, -36));
+                      updateActiveCamera((current) => panCamera(current, 0, -36));
                     }}
                     type="button"
                   >
                     ↑
                   </button>
                   <button
-                    aria-label="Pan world down"
+                    aria-label={`Pan ${cameraSubject} down`}
                     onClick={() => {
-                      cameraFollowsOverviewRef.current = false;
-                      setCamera((current) => panCamera(current, 0, 36));
+                      updateActiveCamera((current) => panCamera(current, 0, 36));
                     }}
                     type="button"
                   >
                     ↓
                   </button>
                   <button
-                    aria-label="Pan world right"
+                    aria-label={`Pan ${cameraSubject} right`}
                     onClick={() => {
-                      cameraFollowsOverviewRef.current = false;
-                      setCamera((current) => panCamera(current, 36, 0));
+                      updateActiveCamera((current) => panCamera(current, 36, 0));
                     }}
                     type="button"
                   >
@@ -691,14 +827,14 @@ export function App({ focusAlerts, focusClock, persistence, soundscape, workerFa
                   </button>
                 </div>
                 <span className="camera-readout" aria-label="Camera position">
-                  X {Math.round(camera.x)} · Y {Math.round(camera.y)} · {camera.zoom.toFixed(2)}×
+                  X {Math.round(activeCamera.x)} · Y {Math.round(activeCamera.y)} ·{' '}
+                  {activeCamera.zoom.toFixed(2)}×
                 </span>
                 <div className="zoom-controls">
                   <button
-                    aria-label="Zoom world out"
+                    aria-label={`Zoom ${cameraSubject} out`}
                     onClick={() => {
-                      cameraFollowsOverviewRef.current = false;
-                      setCamera((current) => zoomCamera(current, 1 / 1.2));
+                      updateActiveCamera((current) => zoomCamera(current, 1 / 1.2));
                     }}
                     type="button"
                   >
@@ -706,15 +842,20 @@ export function App({ focusAlerts, focusClock, persistence, soundscape, workerFa
                   </button>
                   <button
                     onClick={() => {
+                      if (primaryView === 'system') {
+                        setSystemCamera(INITIAL_SYSTEM_CAMERA);
+                        return;
+                      }
                       const frame = simulation.frame;
                       const mapFrame = mapFrameRef.current;
                       cameraFollowsOverviewRef.current = true;
                       setCamera(
                         frame === null || mapFrame === null
                           ? INITIAL_WORLD_CAMERA
-                          : fitCameraToWorld(
+                          : initialSurfaceCamera(
                               frame.width,
                               frame.height,
+                              foundingTile,
                               mapFrame.clientWidth < 1 ? 960 : mapFrame.clientWidth,
                               mapFrame.clientHeight < 1 ? 540 : mapFrame.clientHeight,
                             ),
@@ -725,10 +866,9 @@ export function App({ focusAlerts, focusClock, persistence, soundscape, workerFa
                     Overview
                   </button>
                   <button
-                    aria-label="Zoom world in"
+                    aria-label={`Zoom ${cameraSubject} in`}
                     onClick={() => {
-                      cameraFollowsOverviewRef.current = false;
-                      setCamera((current) => zoomCamera(current, 1.2));
+                      updateActiveCamera((current) => zoomCamera(current, 1.2));
                     }}
                     type="button"
                   >
@@ -746,40 +886,70 @@ export function App({ focusAlerts, focusClock, persistence, soundscape, workerFa
             >
               <div>
                 <h3 id="map-inspector-title">Map selection</h3>
-                <p>Pointer selection and this keyboard navigator open the same factual object.</p>
+                <p>
+                  {primaryView === 'surface'
+                    ? 'Pointer selection and this keyboard navigator open the same factual object.'
+                    : 'Select a known body, mission, route, colony, craft, or contacted civilization.'}
+                </p>
               </div>
               <label>
-                Inspect map object
-                <select
-                  onChange={(event) => {
-                    selectMapObject(parseSelectionKey(event.currentTarget.value));
-                  }}
-                  value={activeMapSelection === null ? '' : selectionKey(activeMapSelection)}
-                >
-                  <option value="">No object selected</option>
-                  {selectableObjects.map((choice) => (
-                    <option
-                      key={selectionKey(choice.selection)}
-                      value={selectionKey(choice.selection)}
-                    >
-                      {choice.label}
-                    </option>
-                  ))}
-                </select>
+                {primaryView === 'surface' ? 'Inspect map object' : 'Inspect system object'}
+                {primaryView === 'surface' ? (
+                  <select
+                    onChange={(event) => {
+                      selectMapObject(parseSelectionKey(event.currentTarget.value));
+                    }}
+                    value={activeMapSelection === null ? '' : selectionKey(activeMapSelection)}
+                  >
+                    <option value="">No object selected</option>
+                    {selectableObjects.map((choice) => (
+                      <option
+                        key={selectionKey(choice.selection)}
+                        value={selectionKey(choice.selection)}
+                      >
+                        {choice.label}
+                      </option>
+                    ))}
+                  </select>
+                ) : (
+                  <select
+                    onChange={(event) => {
+                      selectSystemObject(parseSystemSelection(event.currentTarget.value));
+                    }}
+                    value={systemSelectionValue(activeSystemSelection)}
+                  >
+                    <option value="">No system object selected</option>
+                    {systemSelectableObjects.map((choice) => (
+                      <option
+                        key={systemSelectionValue(choice.selection)}
+                        value={systemSelectionValue(choice.selection)}
+                      >
+                        {choice.label}
+                      </option>
+                    ))}
+                  </select>
+                )}
               </label>
-              {selectedMapDetail === null ? (
+              {(primaryView === 'surface' ? selectedMapDetail : selectedSystemDetail) === null ? (
                 <p className="map-selection-empty">
                   Choose an object to inspect its current Worker-projected facts.
                 </p>
               ) : (
                 <article aria-label="Selected map object" className="map-selection-detail">
-                  <h4>{selectedMapDetail.heading}</h4>
+                  <h4>
+                    {
+                      (primaryView === 'surface' ? selectedMapDetail : selectedSystemDetail)!
+                        .heading
+                    }
+                  </h4>
                   <ul>
-                    {selectedMapDetail.lines.map((line) => (
+                    {(primaryView === 'surface'
+                      ? selectedMapDetail
+                      : selectedSystemDetail)!.lines.map((line) => (
                       <li key={line}>{line}</li>
                     ))}
                   </ul>
-                  {selectedMapTile === null ? null : (
+                  {primaryView !== 'surface' || selectedMapTile === null ? null : (
                     <button
                       onClick={() => {
                         frameMapObject(activeMapSelection);

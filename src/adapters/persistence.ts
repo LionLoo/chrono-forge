@@ -8,6 +8,7 @@ import { rehydrateFocusState, type FocusState } from '../focus';
 import {
   projectFocusCheckpoint,
   validateFocusSessionReview,
+  type FocusCheckpointProjection,
   type FocusSessionReview,
 } from '../focus/session-review';
 import { deserializeWorldSnapshot } from '../simulation/persistence';
@@ -112,6 +113,7 @@ export interface PersistenceGateway {
     snapshot: string,
     session: FocusSession,
     sourceEventIds: readonly number[],
+    workerAuthority?: WorkerFocusCheckpointAuthority,
   ): Promise<LoadedSave>;
   deleteSaveSlot(slotId: string): Promise<boolean>;
   exportSaveSlot(slotId: string): Promise<string>;
@@ -122,10 +124,55 @@ export interface PersistenceGateway {
   saveSettings(settings: AppSettings): Promise<AppSettings>;
 }
 
+/** Exact checkpoint evidence produced alongside a snapshot by the authoritative simulation Worker. */
+export interface WorkerFocusCheckpointAuthority {
+  readonly baselineEventId: number | null;
+  readonly checkpoint: FocusCheckpointProjection;
+}
+
 export type TauriInvoke = <Result>(
   command: string,
   arguments_?: Readonly<Record<string, unknown>>,
 ) => Promise<Result>;
+
+interface ValidatedSnapshotAuthority {
+  readonly checksum: string;
+  readonly snapshot: string;
+  readonly world: ReturnType<typeof deserializeWorldSnapshot>;
+}
+
+const validatedLoadedSaves = new WeakMap<LoadedSave, ValidatedSnapshotAuthority>();
+
+function rememberValidatedLoadedSave(
+  loaded: LoadedSave,
+  world: ReturnType<typeof deserializeWorldSnapshot>,
+): LoadedSave {
+  validatedLoadedSaves.set(loaded, {
+    checksum: loaded.checksum,
+    snapshot: loaded.snapshot,
+    world,
+  });
+  return loaded;
+}
+
+async function confirmNativeSemanticSave(invoke: TauriInvoke, loaded: LoadedSave): Promise<void> {
+  try {
+    const result = await invoke<unknown>('confirm_semantically_valid_save_generation', {
+      slotId: loaded.slotId,
+      generation: loaded.recoveredGeneration,
+      checksum: loaded.checksum,
+    });
+    if (result !== null && result !== undefined) {
+      throw new TypeError(
+        'confirm_semantically_valid_save_generation returned an unexpected result',
+      );
+    }
+  } catch {
+    // Confirmation and pruning are best effort after the durable generation is committed. A
+    // failure retains extra immutable generations; it must not turn a successful save into a
+    // retry that writes a duplicate generation.
+  }
+}
 
 interface NativeFocusSessionRecord {
   readonly session: FocusSession;
@@ -137,20 +184,70 @@ async function loadNativeSemanticSave(
   invoke: TauriInvoke,
   slotId: string,
 ): Promise<LoadedSave | null> {
-  const result = await invoke<unknown>('load_save_slot_candidates', { slotId });
-  if (result === null) return null;
-  if (!Array.isArray(result) || result.length === 0) {
+  const initial = await invoke<unknown>('load_save_slot_candidates', { slotId });
+  if (initial === null) return null;
+  if (!Array.isArray(initial) || initial.length === 0) {
     throw new TypeError('load_save_slot_candidates returned an invalid candidate list');
   }
   const failures: string[] = [];
-  for (const candidate of result) {
+  let oldestRejectedGeneration: number | null = null;
+  const tryCandidates = (candidates: readonly unknown[]): LoadedSave | null => {
+    for (const candidate of candidates) {
+      try {
+        return parseLoadedSave(candidate);
+      } catch (error) {
+        failures.push(error instanceof Error ? error.message : 'unknown validation error');
+        try {
+          const generation = expectPositiveInteger(
+            expectRecord(candidate, 'loaded save').recoveredGeneration,
+            'recoveredGeneration',
+          );
+          oldestRejectedGeneration =
+            oldestRejectedGeneration === null
+              ? generation
+              : Math.min(oldestRejectedGeneration, generation);
+        } catch {
+          // An untrusted malformed generation cannot establish a safe fallback boundary.
+        }
+      }
+    }
+    return null;
+  };
+  const loaded = tryCandidates(initial);
+  if (loaded !== null) return loaded;
+  if (oldestRejectedGeneration !== null) {
     try {
-      return parseLoadedSave(candidate);
+      const fallback = await invoke<unknown>('load_save_slot_fallback_candidates', {
+        slotId,
+        beforeGeneration: oldestRejectedGeneration,
+      });
+      if (fallback !== null && Array.isArray(fallback)) {
+        const recovered = tryCandidates(fallback);
+        if (recovered !== null) return recovered;
+      } else {
+        failures.push('load_save_slot_fallback_candidates returned an invalid candidate list');
+      }
     } catch (error) {
-      failures.push(error instanceof Error ? error.message : 'unknown validation error');
+      failures.push(
+        `fallback query failed: ${error instanceof Error ? error.message : 'unknown error'}`,
+      );
     }
   }
   throw new Error(`save slot has no semantically valid generation: ${failures.join('; ')}`);
+}
+
+export function latestSnapshotEventId(save: LoadedSave): number {
+  const cached = validatedLoadedSaves.get(save);
+  const cachedWorld =
+    cached?.snapshot === save.snapshot && cached.checksum === save.checksum
+      ? cached.world
+      : undefined;
+  const world = cachedWorld ?? validateSnapshot(save.snapshot);
+  if (cachedWorld === undefined) {
+    validateChecksum(save.checksum, save.snapshot);
+    rememberValidatedLoadedSave(save, world);
+  }
+  return world.eventLog.at(-1)?.id ?? 0;
 }
 
 /** Creates the production gateway without importing Tauri into browser builds. */
@@ -168,15 +265,32 @@ export function createTauriPersistenceGateway(invoke: TauriInvoke): PersistenceG
       return loadNativeSemanticSave(invoke, slotId);
     },
     async commitSaveSlot(slotId, name, snapshot) {
-      validateCommit(slotId, name, snapshot);
-      return parseLoadedSave(await invoke<unknown>('commit_save_slot', { slotId, name, snapshot }));
-    },
-    async commitFocusCheckpoint(slotId, name, snapshot, session, sourceEventIds) {
-      validateCommit(slotId, name, snapshot);
-      validateFocusCheckpoint(slotId, snapshot, session, sourceEventIds);
-      return parseLoadedSave(
-        await invoke<unknown>('commit_focus_checkpoint', { slotId, name, snapshot, session }),
+      const snapshotWorld = validateCommit(slotId, name, snapshot);
+      const loaded = parseSaveCommitReceipt(
+        await invoke<unknown>('commit_save_slot', { slotId, name, snapshot }),
+        { slotId, name, snapshot, world: snapshotWorld, focusSession: null },
       );
+      await confirmNativeSemanticSave(invoke, loaded);
+      return loaded;
+    },
+    async commitFocusCheckpoint(slotId, name, snapshot, session, sourceEventIds, workerAuthority) {
+      const snapshotWorld = validateCommit(slotId, name, snapshot);
+      validateFocusCheckpoint(slotId, snapshot, session, sourceEventIds, snapshotWorld);
+      if (workerAuthority !== undefined) {
+        validateWorkerFocusCheckpoint(slotId, session, sourceEventIds, workerAuthority);
+      }
+      const loaded = parseSaveCommitReceipt(
+        await invoke<unknown>('commit_focus_checkpoint', { slotId, name, snapshot, session }),
+        {
+          slotId,
+          name,
+          snapshot,
+          world: snapshotWorld,
+          focusSession: session,
+        },
+      );
+      await confirmNativeSemanticSave(invoke, loaded);
+      return loaded;
     },
     async deleteSaveSlot(slotId) {
       validateIdentifier(slotId, 'slot ID');
@@ -205,7 +319,11 @@ export function createTauriPersistenceGateway(invoke: TauriInvoke): PersistenceG
     },
     async importSaveSlot(savePackage) {
       parseSaveExport(savePackage);
-      return parseLoadedSave(await invoke<unknown>('import_save_slot', { package: savePackage }));
+      const loaded = parseLoadedSave(
+        await invoke<unknown>('import_save_slot', { package: savePackage }),
+      );
+      await confirmNativeSemanticSave(invoke, loaded);
+      return loaded;
     },
     async recordFocusSession(session, sourceEventIds) {
       validateFocusSession(session);
@@ -221,6 +339,14 @@ export function createTauriPersistenceGateway(invoke: TauriInvoke): PersistenceG
         throw new TypeError('list_focus_sessions returned a non-array result');
       }
       const records = result.map(parseNativeFocusSessionRecord);
+      const exactHistory = exactCheckpointHistory(
+        records.map((record) => record.session),
+        records.flatMap((record) =>
+          record.authoritySession === null ? [] : [record.authoritySession],
+        ),
+        sourceSave,
+      );
+      if (exactHistory !== null) return exactHistory;
       const authority = focusHistoryAuthority(
         sourceSave,
         records.flatMap((record) =>
@@ -245,6 +371,7 @@ interface InMemoryGeneration {
   readonly focusSession: FocusSession | null;
   readonly snapshot: string;
   readonly checksum: string;
+  readonly workerAuthority: WorkerFocusCheckpointAuthority | null;
 }
 
 interface InMemorySlot {
@@ -278,10 +405,28 @@ export function createInMemoryPersistenceGateway(
     if (generation?.checksum !== sha256Hex(generation?.snapshot ?? '')) {
       throw new Error('in-memory save slot has no verified head generation');
     }
+    const snapshotWorld =
+      generation.focusSession === null ? null : validateSnapshot(generation.snapshot);
     if (generation.focusSession !== null) {
-      validateFocusCheckpoint(slotId, generation.snapshot, generation.focusSession, undefined);
+      if (snapshotWorld !== null) {
+        validateFocusCheckpoint(
+          slotId,
+          generation.snapshot,
+          generation.focusSession,
+          undefined,
+          snapshotWorld,
+        );
+      }
+      if (generation.workerAuthority !== null) {
+        validateWorkerFocusCheckpoint(
+          slotId,
+          generation.focusSession,
+          undefined,
+          generation.workerAuthority,
+        );
+      }
     }
-    return {
+    const loaded: LoadedSave = {
       slotId: slot.slotId,
       name: slot.name,
       headGeneration: slot.headGeneration,
@@ -293,6 +438,7 @@ export function createInMemoryPersistenceGateway(
       snapshot: generation.snapshot,
       checksum: generation.checksum,
     };
+    return snapshotWorld === null ? loaded : rememberValidatedLoadedSave(loaded, snapshotWorld);
   };
 
   const commit = (
@@ -300,10 +446,17 @@ export function createInMemoryPersistenceGateway(
     name: string,
     snapshot: string,
     focusSession: FocusSession | null = null,
+    sourceEventIds?: readonly number[],
+    workerAuthority?: WorkerFocusCheckpointAuthority,
   ): LoadedSave => {
-    validateCommit(slotId, name, snapshot);
+    const snapshotWorld = validateCommit(slotId, name, snapshot);
     if (focusSession !== null) {
-      validateFocusCheckpoint(slotId, snapshot, focusSession, undefined);
+      validateFocusCheckpoint(slotId, snapshot, focusSession, sourceEventIds, snapshotWorld);
+      if (workerAuthority !== undefined) {
+        validateWorkerFocusCheckpoint(slotId, focusSession, sourceEventIds, workerAuthority);
+      }
+    } else if (workerAuthority !== undefined) {
+      throw new TypeError('Worker checkpoint authority requires a focus session');
     }
     const existing = slots.get(slotId);
     const previousGeneration = existing?.generations.at(-1)?.generation ?? 0;
@@ -314,6 +467,8 @@ export function createInMemoryPersistenceGateway(
       focusSession: focusSession === null ? null : cloneFocusSession(focusSession),
       snapshot,
       checksum: sha256Hex(snapshot),
+      workerAuthority:
+        workerAuthority === undefined ? null : cloneWorkerFocusCheckpoint(workerAuthority),
     };
     const slot: InMemorySlot = {
       slotId,
@@ -329,7 +484,18 @@ export function createInMemoryPersistenceGateway(
       sessions.set(focusSession.sessionId, cloneFocusSession(focusSession));
       sessionAuthorities.set(focusSession.sessionId, cloneFocusSession(focusSession));
     }
-    return load(slotId) ?? fail('committed in-memory slot was not readable');
+    const loaded: LoadedSave = {
+      slotId: slot.slotId,
+      name: slot.name,
+      headGeneration: generation,
+      recoveredGeneration: generation,
+      recoveredFromCorruption: false,
+      savedAtMs: next.savedAtMs,
+      focusSession: next.focusSession === null ? null : cloneFocusSession(next.focusSession),
+      snapshot: next.snapshot,
+      checksum: next.checksum,
+    };
+    return rememberValidatedLoadedSave(loaded, snapshotWorld);
   };
 
   return {
@@ -351,10 +517,9 @@ export function createInMemoryPersistenceGateway(
       await Promise.resolve();
       return commit(slotId, name, snapshot);
     },
-    async commitFocusCheckpoint(slotId, name, snapshot, session, sourceEventIds) {
+    async commitFocusCheckpoint(slotId, name, snapshot, session, sourceEventIds, workerAuthority) {
       await Promise.resolve();
-      validateFocusCheckpoint(slotId, snapshot, session, sourceEventIds);
-      return commit(slotId, name, snapshot, session);
+      return commit(slotId, name, snapshot, session, sourceEventIds, workerAuthority);
     },
     async deleteSaveSlot(slotId) {
       await Promise.resolve();
@@ -414,15 +579,18 @@ export function createInMemoryPersistenceGateway(
     },
     async listFocusSessions(sourceSave) {
       await Promise.resolve();
-      const authority = focusHistoryAuthority(sourceSave, [...sessionAuthorities.values()]);
-      return [...sessions.values()]
+      const orderedSessions = [...sessions.values()]
         .sort(
           (left, right) =>
             right.startedAtMs - left.startedAtMs ||
             compareStableText(left.sessionId, right.sessionId),
         )
-        .map(cloneFocusSession)
-        .map((session) => withVerifiedStoredEvidence(session, authority));
+        .map(cloneFocusSession);
+      const retainedAuthorities = [...sessionAuthorities.values()];
+      const exactHistory = exactCheckpointHistory(orderedSessions, retainedAuthorities, sourceSave);
+      if (exactHistory !== null) return exactHistory;
+      const authority = focusHistoryAuthority(sourceSave, retainedAuthorities);
+      return orderedSessions.map((session) => withVerifiedStoredEvidence(session, authority));
     },
     async loadSettings() {
       await Promise.resolve();
@@ -454,7 +622,13 @@ function parseSaveSlotSummary(value: unknown): SaveSlotSummary {
   return { slotId, name, headGeneration };
 }
 
-function parseLoadedSave(value: unknown): LoadedSave {
+function parseLoadedSave(
+  value: unknown,
+  knownSnapshot?: Readonly<{
+    snapshot: string;
+    world: ReturnType<typeof deserializeWorldSnapshot>;
+  }>,
+): LoadedSave {
   const record = expectRecord(value, 'loaded save');
   expectExactKeys(
     record,
@@ -486,7 +660,9 @@ function parseLoadedSave(value: unknown): LoadedSave {
   );
   const savedAtMs = expectNonNegativeInteger(record.savedAtMs, 'savedAtMs');
   const snapshot = expectString(record.snapshot, 'snapshot');
-  const snapshotEvents = validateSnapshot(snapshot).eventLog;
+  const snapshotWorld =
+    knownSnapshot?.snapshot === snapshot ? knownSnapshot.world : validateSnapshot(snapshot);
+  const snapshotEvents = snapshotWorld.eventLog;
   const checksum = expectString(record.checksum, 'checksum');
   validateChecksum(checksum, snapshot);
   const source = createRecapAuthority(summary.slotId, snapshot, snapshotEvents);
@@ -495,17 +671,64 @@ function parseLoadedSave(value: unknown): LoadedSave {
   const focusSession =
     parsedFocusSession === null ? null : withMigratedLegacyRecapCopies(parsedFocusSession, source);
   if (focusSession !== null) {
-    validateFocusCheckpoint(summary.slotId, snapshot, focusSession, undefined, source.events);
+    validateFocusCheckpoint(summary.slotId, snapshot, focusSession, undefined, snapshotWorld);
   }
-  return {
-    ...summary,
-    recoveredGeneration,
-    recoveredFromCorruption,
+  return rememberValidatedLoadedSave(
+    {
+      ...summary,
+      recoveredGeneration,
+      recoveredFromCorruption,
+      savedAtMs,
+      focusSession,
+      snapshot,
+      checksum,
+    },
+    snapshotWorld,
+  );
+}
+
+function parseSaveCommitReceipt(
+  value: unknown,
+  expected: Readonly<{
+    slotId: string;
+    name: string;
+    snapshot: string;
+    world?: ReturnType<typeof deserializeWorldSnapshot>;
+    focusSession: FocusSession | null;
+  }>,
+): LoadedSave {
+  const record = expectRecord(value, 'save commit receipt');
+  expectExactKeys(
+    record,
+    ['slotId', 'name', 'headGeneration', 'savedAtMs', 'checksum'],
+    'save commit receipt',
+  );
+  const slotId = expectString(record.slotId, 'save commit receipt slotId');
+  const name = expectString(record.name, 'save commit receipt name');
+  const headGeneration = expectPositiveInteger(
+    record.headGeneration,
+    'save commit receipt headGeneration',
+  );
+  const savedAtMs = expectNonNegativeInteger(record.savedAtMs, 'save commit receipt savedAtMs');
+  const checksum = expectString(record.checksum, 'save commit receipt checksum');
+  if (slotId !== expected.slotId || name !== expected.name) {
+    throw new TypeError('save commit receipt does not match its requested slot');
+  }
+  validateChecksum(checksum, expected.snapshot);
+  const loaded: LoadedSave = {
+    slotId,
+    name,
+    headGeneration,
+    recoveredGeneration: headGeneration,
+    recoveredFromCorruption: false,
     savedAtMs,
-    focusSession,
-    snapshot,
+    focusSession: expected.focusSession,
+    snapshot: expected.snapshot,
     checksum,
   };
+  return expected.world === undefined
+    ? loaded
+    : rememberValidatedLoadedSave(loaded, expected.world);
 }
 
 type RecapSourceEvent = Readonly<{ id: number; summary: string; tick: number }>;
@@ -571,8 +794,20 @@ function focusHistoryAuthority(
     return { recap: null, checkpointsBySessionId: new Map() };
   }
   const snapshot = sourceSave.snapshot;
-  validateChecksum(sourceSave.checksum, snapshot);
-  const events = validateSnapshot(snapshot).eventLog;
+  const cached = validatedLoadedSaves.get(sourceSave);
+  const cachedWorld =
+    cached?.snapshot === snapshot && cached.checksum === sourceSave.checksum
+      ? cached.world
+      : undefined;
+  let snapshotWorld: ReturnType<typeof deserializeWorldSnapshot>;
+  if (cachedWorld !== undefined) {
+    snapshotWorld = cachedWorld;
+  } else {
+    validateChecksum(sourceSave.checksum, snapshot);
+    snapshotWorld = validateSnapshot(snapshot);
+  }
+  if (cachedWorld === undefined) rememberValidatedLoadedSave(sourceSave, snapshotWorld);
+  const events = snapshotWorld.eventLog;
   const recap = createRecapAuthority(sourceSave.slotId, snapshot, events);
   const checkpointsBySessionId = new Map<string, FocusSession>();
   for (const checkpoint of retainedAuthorities) {
@@ -587,7 +822,7 @@ function focusHistoryAuthority(
       snapshot,
       sourceSave.focusSession,
       undefined,
-      events,
+      snapshotWorld,
     );
     checkpointsBySessionId.set(
       sourceSave.focusSession.sessionId,
@@ -658,6 +893,29 @@ function hasSameCheckpointIdentity(session: FocusSession, checkpoint: FocusSessi
     session.status === checkpoint.status &&
     session.stateJson === checkpoint.stateJson
   );
+}
+
+function exactCheckpointHistory(
+  sessions: readonly FocusSession[],
+  retainedAuthorities: readonly FocusSession[],
+  sourceSave: LoadedSave | undefined,
+): readonly FocusSession[] | null {
+  if (sourceSave === undefined) return null;
+  const checkpoints = new Map<string, FocusSession>();
+  for (const checkpoint of retainedAuthorities) {
+    validateFocusSession(checkpoint);
+    if (checkpoint.slotId === sourceSave.slotId) checkpoints.set(checkpoint.sessionId, checkpoint);
+  }
+  if (sourceSave.focusSession !== null) {
+    checkpoints.set(sourceSave.focusSession.sessionId, sourceSave.focusSession);
+  }
+  const exact: FocusSession[] = [];
+  for (const session of sessions) {
+    const checkpoint = checkpoints.get(session.sessionId);
+    if (checkpoint === undefined || !hasSameCheckpointIdentity(session, checkpoint)) return null;
+    exact.push(cloneFocusSession(checkpoint));
+  }
+  return exact;
 }
 
 function withVerifiedStoredEvidence(
@@ -826,10 +1084,25 @@ function parseSaveExport(savePackage: string): SaveExport {
   return exported;
 }
 
-function validateCommit(slotId: string, name: string, snapshot: string): void {
+function validateCommit(
+  slotId: string,
+  name: string,
+  snapshot: string,
+): ReturnType<typeof deserializeWorldSnapshot> {
+  validateCommitMaterial(slotId, name, snapshot);
+  return deserializeWorldSnapshot(snapshot);
+}
+
+function validateCommitMaterial(slotId: string, name: string, snapshot: string): void {
   validateIdentifier(slotId, 'slot ID');
   validateName(name);
-  validateSnapshot(snapshot);
+  if (
+    typeof snapshot !== 'string' ||
+    snapshot.length === 0 ||
+    byteLength(snapshot) > MAX_SNAPSHOT_BYTES
+  ) {
+    throw new RangeError('snapshot must be nonempty and at most 50 MiB');
+  }
 }
 
 function readSavedAtMs(value: number): number {
@@ -1031,14 +1304,14 @@ function validateFocusCheckpoint(
   snapshot: string,
   session: FocusSession,
   sourceEventIds: readonly number[] | undefined,
-  snapshotEventsOverride?: readonly RecapSourceEvent[],
+  snapshotWorldOverride?: ReturnType<typeof deserializeWorldSnapshot>,
 ): void {
   validateFocusSession(session);
   if (session.slotId !== slotId) {
     throw new TypeError('focus checkpoint session must belong to its save slot');
   }
-  const snapshotWorld = deserializeWorldSnapshot(snapshot);
-  const snapshotEvents = snapshotEventsOverride ?? snapshotWorld.eventLog;
+  const snapshotWorld = snapshotWorldOverride ?? deserializeWorldSnapshot(snapshot);
+  const snapshotEvents = snapshotWorld.eventLog;
   const snapshotEventIds = snapshotEvents.map((event) => event.id);
   validateRecapReferences(session, snapshotEventIds);
   validateRecapCopiesAgainstSnapshot(session, snapshotEvents);
@@ -1057,6 +1330,51 @@ function validateFocusCheckpoint(
   if (sourceEventIds !== undefined) {
     validateRecapReferences(session, sourceEventIds);
   }
+}
+
+function validateWorkerFocusCheckpoint(
+  slotId: string,
+  session: FocusSession,
+  sourceEventIds: readonly number[] | undefined,
+  authority: WorkerFocusCheckpointAuthority,
+): void {
+  validateFocusSession(session);
+  if (session.slotId !== slotId) {
+    throw new TypeError('focus checkpoint session must belong to its save slot');
+  }
+  if (
+    authority.baselineEventId !== null &&
+    (!Number.isSafeInteger(authority.baselineEventId) || authority.baselineEventId < 0)
+  ) {
+    throw new TypeError('Worker focus checkpoint baseline is invalid');
+  }
+  const checkpoint = authority.checkpoint;
+  if (!Number.isSafeInteger(checkpoint.latestEventId) || checkpoint.latestEventId < 0) {
+    throw new TypeError('Worker focus checkpoint latest event ID is invalid');
+  }
+  const expectedBaseline = authority.baselineEventId ?? checkpoint.latestEventId;
+  const review = session.review;
+  if (
+    review?.baselineEventId !== expectedBaseline ||
+    JSON.stringify(review?.after) !== JSON.stringify(checkpoint.moment) ||
+    JSON.stringify(review?.revisitTarget) !== JSON.stringify(checkpoint.revisitTarget) ||
+    JSON.stringify(session.recapEntries) !== JSON.stringify(checkpoint.recapEntries) ||
+    session.recapEventIds.length !== checkpoint.recapEntries.length ||
+    session.recapEventIds.some(
+      (eventId, index) => eventId !== checkpoint.recapEntries[index]?.id,
+    ) ||
+    checkpoint.recapEntries.some((entry) => entry.id > checkpoint.latestEventId) ||
+    (authority.baselineEventId === null && checkpoint.recapEntries.length !== 0)
+  ) {
+    throw new TypeError('focus review must exactly match the authoritative Worker checkpoint');
+  }
+  if (
+    authority.baselineEventId === null &&
+    JSON.stringify(review?.before) !== JSON.stringify(checkpoint.moment)
+  ) {
+    throw new TypeError('initial focus review must begin at its authoritative Worker checkpoint');
+  }
+  if (sourceEventIds !== undefined) validateRecapReferences(session, sourceEventIds);
 }
 
 function validateAppSettings(settings: AppSettings): void {
@@ -1105,6 +1423,23 @@ function cloneFocusSession(session: FocusSession): FocusSession {
             revisitTarget:
               session.review.revisitTarget === null ? null : { ...session.review.revisitTarget },
           },
+  };
+}
+
+function cloneWorkerFocusCheckpoint(
+  authority: WorkerFocusCheckpointAuthority,
+): WorkerFocusCheckpointAuthority {
+  return {
+    baselineEventId: authority.baselineEventId,
+    checkpoint: {
+      latestEventId: authority.checkpoint.latestEventId,
+      moment: cloneFocusWorldMoment(authority.checkpoint.moment),
+      recapEntries: authority.checkpoint.recapEntries.map((entry) => ({ ...entry })),
+      revisitTarget:
+        authority.checkpoint.revisitTarget === null
+          ? null
+          : { ...authority.checkpoint.revisitTarget },
+    },
   };
 }
 

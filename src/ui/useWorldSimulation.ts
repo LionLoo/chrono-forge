@@ -14,6 +14,7 @@ import {
 import { applyWorldFrameDelta } from '../protocol/frame-delta';
 import type { FocusCheckpointProjection } from '../focus/session-review';
 import type { WorldConfig, WorldSeed } from '../simulation/world';
+import type { RuntimeActivityEvent, RuntimeActivityRecorder } from '../testing/runtime-activity';
 import {
   MAX_RECENT_WORKER_EVENTS,
   OFFLINE_CATCH_UP_POLICY_VERSION,
@@ -23,8 +24,8 @@ export const DEMO_WORLD_SEED: WorldSeed = Object.freeze([
   0x4348_524f, 0x4e4f_464f, 0x5247_4531, 0x0000_0001,
 ]);
 export const DEMO_WORLD_CONFIG: WorldConfig = Object.freeze({
-  width: 96,
-  height: 64,
+  width: 256,
+  height: 192,
   chunkSize: 32,
   societyYearTicks: 100_000,
 });
@@ -43,6 +44,30 @@ const createBrowserWorker: SimulationWorkerFactory = () =>
     name: 'chrono-forge-simulation',
     type: 'module',
   });
+
+function postWorkerMessage(
+  worker: SimulationWorkerPort,
+  message: UiToWorkerMessage,
+  activityRecorder: RuntimeActivityRecorder | undefined,
+): void {
+  worker.postMessage(message);
+  recordRuntimeActivity(activityRecorder, {
+    kind: 'worker-request',
+    messageType: message.type,
+    requestId: message.requestId,
+  });
+}
+
+function recordRuntimeActivity(
+  activityRecorder: RuntimeActivityRecorder | undefined,
+  event: RuntimeActivityEvent,
+): void {
+  try {
+    activityRecorder?.record(event);
+  } catch {
+    // Diagnostics must never change Worker delivery or authoritative UI state.
+  }
+}
 
 interface PendingVoidRequest {
   readonly reject: (reason: Error) => void;
@@ -115,6 +140,7 @@ function assertNonNegativeSafeInteger(value: number, label: string): void {
 
 export function useWorldSimulation(
   workerFactory: SimulationWorkerFactory = createBrowserWorker,
+  activityRecorder?: RuntimeActivityRecorder,
 ): WorldSimulationView {
   const [frame, setFrame] = useState<WorldFrameProjection | null>(null);
   const [events, setEvents] = useState<readonly WorkerEvent[]>([]);
@@ -137,6 +163,7 @@ export function useWorldSimulation(
   >({ personId: null, relationshipId: null, offset: 0, total: 0, events: [] });
   const [error, setError] = useState<string | null>(null);
   const [workerAttempt, setWorkerAttempt] = useState(0);
+  const activityRecorderRef = useRef(activityRecorder);
   const frameRef = useRef<WorldFrameProjection | null>(null);
   const workerRef = useRef<SimulationWorkerPort | null>(null);
   const requestSequenceRef = useRef(0);
@@ -145,6 +172,10 @@ export function useWorldSimulation(
   const pendingLoadsRef = useRef(new Map<string, PendingVoidRequest>());
   const pendingOfflineRef = useRef(new Map<string, PendingVoidRequest>());
   const pendingCommandsRef = useRef(new Map<string, PendingVoidRequest>());
+
+  useEffect(() => {
+    activityRecorderRef.current = activityRecorder;
+  }, [activityRecorder]);
 
   const nextRequestId = useCallback((kind: string) => {
     requestSequenceRef.current += 1;
@@ -231,7 +262,12 @@ export function useWorldSimulation(
       worker.terminate();
       setError(reason.message);
     };
-    const applyFrame = (nextFrame: WorldFrameProjection, replaceEvents: boolean) => {
+    const applyFrame = (
+      nextFrame: WorldFrameProjection,
+      replaceEvents: boolean,
+      requestId: string,
+      source: 'delta' | 'ready',
+    ) => {
       frameRef.current = nextFrame;
       setFrame(nextFrame);
       // A page belongs to an earlier authoritative state and must never be displayed as current.
@@ -250,10 +286,21 @@ export function useWorldSimulation(
       });
       if (replaceEvents) setEvents([]);
       setError(null);
+      recordRuntimeActivity(activityRecorderRef.current, {
+        kind: 'frame-applied',
+        requestId,
+        source,
+        tick: nextFrame.tick,
+      });
     };
 
     worker.onmessage = (event) => {
       const message = event.data;
+      recordRuntimeActivity(activityRecorderRef.current, {
+        kind: 'worker-response',
+        messageType: message.type,
+        requestId: message.requestId,
+      });
       if (message.protocolVersion !== WORKER_PROTOCOL_VERSION) {
         const reason = new Error('The simulation worker protocol version is not supported.');
         failWorker(reason);
@@ -262,7 +309,7 @@ export function useWorldSimulation(
 
       switch (message.type) {
         case 'ready': {
-          applyFrame(message.frame, true);
+          applyFrame(message.frame, true, message.requestId, 'ready');
           historicalEventRequestIds.add(message.requestId);
           setLatestRecordedEvents([]);
           const pendingLoad = pendingLoads.get(message.requestId);
@@ -276,7 +323,12 @@ export function useWorldSimulation(
           try {
             if (frameRef.current === null)
               throw new Error('Received a frame delta before a ready frame.');
-            applyFrame(applyWorldFrameDelta(frameRef.current, message.delta), false);
+            applyFrame(
+              applyWorldFrameDelta(frameRef.current, message.delta),
+              false,
+              message.requestId,
+              'delta',
+            );
           } catch (deltaError) {
             const reason =
               deltaError instanceof Error
@@ -384,13 +436,17 @@ export function useWorldSimulation(
     };
 
     const requestId = nextRequestId('initialize');
-    worker.postMessage({
-      type: 'initialize',
-      protocolVersion: WORKER_PROTOCOL_VERSION,
-      requestId,
-      seed: DEMO_WORLD_SEED,
-      config: DEMO_WORLD_CONFIG,
-    });
+    postWorkerMessage(
+      worker,
+      {
+        type: 'initialize',
+        protocolVersion: WORKER_PROTOCOL_VERSION,
+        requestId,
+        seed: DEMO_WORLD_SEED,
+        config: DEMO_WORLD_CONFIG,
+      },
+      activityRecorderRef.current,
+    );
 
     return () => {
       disposed = true;
@@ -417,12 +473,16 @@ export function useWorldSimulation(
       const worker = workerRef.current;
       if (worker === null) return;
       const requestId = nextRequestId('advance');
-      worker.postMessage({
-        type: 'advanceTicks',
-        protocolVersion: WORKER_PROTOCOL_VERSION,
-        requestId,
-        ticks,
-      });
+      postWorkerMessage(
+        worker,
+        {
+          type: 'advanceTicks',
+          protocolVersion: WORKER_PROTOCOL_VERSION,
+          requestId,
+          ticks,
+        },
+        activityRecorderRef.current,
+      );
     },
     [nextRequestId],
   );
@@ -434,11 +494,15 @@ export function useWorldSimulation(
     const promise = new Promise<string>((resolve, reject) => {
       pendingSavesRef.current.set(requestId, { resolve, reject });
     });
-    worker.postMessage({
-      type: 'requestSave',
-      protocolVersion: WORKER_PROTOCOL_VERSION,
-      requestId,
-    });
+    postWorkerMessage(
+      worker,
+      {
+        type: 'requestSave',
+        protocolVersion: WORKER_PROTOCOL_VERSION,
+        requestId,
+      },
+      activityRecorderRef.current,
+    );
     return promise;
   }, [nextRequestId]);
 
@@ -453,12 +517,16 @@ export function useWorldSimulation(
       const promise = new Promise<FocusCheckpointResult>((resolve, reject) => {
         pendingFocusCheckpointsRef.current.set(requestId, { resolve, reject });
       });
-      worker.postMessage({
-        type: 'requestFocusCheckpoint',
-        protocolVersion: WORKER_PROTOCOL_VERSION,
-        requestId,
-        baselineEventId,
-      });
+      postWorkerMessage(
+        worker,
+        {
+          type: 'requestFocusCheckpoint',
+          protocolVersion: WORKER_PROTOCOL_VERSION,
+          requestId,
+          baselineEventId,
+        },
+        activityRecorderRef.current,
+      );
       return promise;
     },
     [nextRequestId],
@@ -469,12 +537,16 @@ export function useWorldSimulation(
       assertNonNegativeSafeInteger(offset, 'Timeline offset');
       const worker = workerRef.current;
       if (worker === null) return;
-      worker.postMessage({
-        type: 'requestTimelinePage',
-        protocolVersion: WORKER_PROTOCOL_VERSION,
-        requestId: nextRequestId('timeline'),
-        offset,
-      });
+      postWorkerMessage(
+        worker,
+        {
+          type: 'requestTimelinePage',
+          protocolVersion: WORKER_PROTOCOL_VERSION,
+          requestId: nextRequestId('timeline'),
+          offset,
+        },
+        activityRecorderRef.current,
+      );
     },
     [nextRequestId],
   );
@@ -486,13 +558,17 @@ export function useWorldSimulation(
       assertNonNegativeSafeInteger(offset, 'Relationship offset');
       const worker = workerRef.current;
       if (worker === null) return;
-      worker.postMessage({
-        type: 'requestRelationshipPage',
-        protocolVersion: WORKER_PROTOCOL_VERSION,
-        requestId: nextRequestId('relationship'),
-        personId,
-        offset,
-      });
+      postWorkerMessage(
+        worker,
+        {
+          type: 'requestRelationshipPage',
+          protocolVersion: WORKER_PROTOCOL_VERSION,
+          requestId: nextRequestId('relationship'),
+          personId,
+          offset,
+        },
+        activityRecorderRef.current,
+      );
     },
     [nextRequestId],
   );
@@ -506,14 +582,18 @@ export function useWorldSimulation(
       assertNonNegativeSafeInteger(offset, 'Relationship event offset');
       const worker = workerRef.current;
       if (worker === null) return;
-      worker.postMessage({
-        type: 'requestRelationshipEventPage',
-        protocolVersion: WORKER_PROTOCOL_VERSION,
-        requestId: nextRequestId('relationship-events'),
-        personId,
-        relationshipId,
-        offset,
-      });
+      postWorkerMessage(
+        worker,
+        {
+          type: 'requestRelationshipEventPage',
+          protocolVersion: WORKER_PROTOCOL_VERSION,
+          requestId: nextRequestId('relationship-events'),
+          personId,
+          relationshipId,
+          offset,
+        },
+        activityRecorderRef.current,
+      );
     },
     [nextRequestId],
   );
@@ -527,12 +607,16 @@ export function useWorldSimulation(
       const promise = new Promise<void>((resolve, reject) => {
         pendingLoadsRef.current.set(requestId, { resolve, reject });
       });
-      worker.postMessage({
-        type: 'load',
-        protocolVersion: WORKER_PROTOCOL_VERSION,
-        requestId,
-        snapshot,
-      });
+      postWorkerMessage(
+        worker,
+        {
+          type: 'load',
+          protocolVersion: WORKER_PROTOCOL_VERSION,
+          requestId,
+          snapshot,
+        },
+        activityRecorderRef.current,
+      );
       return promise;
     },
     [nextRequestId],
@@ -550,14 +634,18 @@ export function useWorldSimulation(
       const promise = new Promise<void>((resolve, reject) => {
         pendingOfflineRef.current.set(requestId, { resolve, reject });
       });
-      worker.postMessage({
-        type: 'performOfflineCatchUp',
-        protocolVersion: WORKER_PROTOCOL_VERSION,
-        requestId,
-        elapsedMilliseconds,
-        rate,
-        policyVersion: OFFLINE_CATCH_UP_POLICY_VERSION,
-      });
+      postWorkerMessage(
+        worker,
+        {
+          type: 'performOfflineCatchUp',
+          protocolVersion: WORKER_PROTOCOL_VERSION,
+          requestId,
+          elapsedMilliseconds,
+          rate,
+          policyVersion: OFFLINE_CATCH_UP_POLICY_VERSION,
+        },
+        activityRecorderRef.current,
+      );
       return promise;
     },
     [nextRequestId],
@@ -572,12 +660,16 @@ export function useWorldSimulation(
       const promise = new Promise<void>((resolve, reject) => {
         pendingCommandsRef.current.set(requestId, { resolve, reject });
       });
-      worker.postMessage({
-        type: 'queueCommand',
-        protocolVersion: WORKER_PROTOCOL_VERSION,
-        requestId,
-        command,
-      });
+      postWorkerMessage(
+        worker,
+        {
+          type: 'queueCommand',
+          protocolVersion: WORKER_PROTOCOL_VERSION,
+          requestId,
+          command,
+        },
+        activityRecorderRef.current,
+      );
       return promise;
     },
     [nextRequestId],

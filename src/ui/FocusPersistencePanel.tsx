@@ -7,6 +7,7 @@ import type {
   LoadedSave,
   SaveSlotSummary,
 } from '../adapters/persistence';
+import { latestSnapshotEventId } from '../adapters/persistence';
 import type { FocusAlerts } from '../adapters/focus-alerts';
 import { type RuntimePersistence } from '../adapters/runtime-persistence';
 import { getGameSoundscape, type GameSoundscape } from '../adapters/soundscape';
@@ -19,7 +20,6 @@ import {
   type FocusSessionReview,
 } from '../focus/session-review';
 import type { WorkerEvent } from '../protocol';
-import { deserializeWorldSnapshot } from '../simulation/persistence';
 import { systemFocusClock, useFocusController, type FocusClock } from './useFocusController';
 import type { WorldSimulationView } from './useWorldSimulation';
 
@@ -160,7 +160,7 @@ async function loadWorkspace(
     initialSession: selectRestorableSession(activeSave),
     initialOperationError: null,
     offlineCatchUpApplied,
-    recapBaselineEventId: deserializeWorldSnapshot(activeSave.snapshot).eventLog.at(-1)?.id ?? 0,
+    recapBaselineEventId: latestSnapshotEventId(activeSave),
     settings,
     slots,
   };
@@ -215,6 +215,18 @@ function canLeaveFocusSession(session: FocusSession | null): boolean {
 
 function focusHasEnded(session: FocusSession): boolean {
   return rehydrateFocusState(JSON.parse(session.stateJson) as unknown).focusEndedAtEpochMs !== null;
+}
+
+function isAlreadyDurableCheckpoint(
+  save: LoadedSave,
+  snapshot: string,
+  session: FocusSession,
+): boolean {
+  return (
+    save.snapshot === snapshot &&
+    save.focusSession !== null &&
+    JSON.stringify(save.focusSession) === JSON.stringify(session)
+  );
 }
 
 function workspaceNotice(workspace: WorkspaceData): string {
@@ -601,12 +613,18 @@ function FocusWorkspace({
           recapEntriesRef.current = recapEntries;
           latestSessionRef.current = persistedSession;
           const slot = activeSaveRef.current;
+          if (isAlreadyDurableCheckpoint(slot, snapshot, persistedSession)) {
+            setNotice(reason);
+            setOperationError(null);
+            return;
+          }
           const committed = await runtime.gateway.commitFocusCheckpoint(
             slot.slotId,
             slot.name,
             snapshot,
             persistedSession,
             recapEventIds,
+            { baselineEventId, checkpoint },
           );
           await updateArchiveState(committed);
           setNotice(reason);
@@ -664,6 +682,11 @@ function FocusWorkspace({
         );
         const snapshot = await simulation.requestSave();
         const slot = activeSaveRef.current;
+        if (isAlreadyDurableCheckpoint(slot, snapshot, persistedSession)) {
+          setNotice(reason);
+          setOperationError(null);
+          return;
+        }
         const committed = await runtime.gateway.commitFocusCheckpoint(
           slot.slotId,
           slot.name,
@@ -833,7 +856,7 @@ function FocusWorkspace({
         }
         const snapshot = await simulation.requestSave();
         const committed = await runtime.gateway.commitSaveSlot(slotId, name, snapshot);
-        const recapBaselineEventId = deserializeWorldSnapshot(snapshot).eventLog.at(-1)?.id ?? 0;
+        const recapBaselineEventId = latestSnapshotEventId(committed);
         const [nextSlots, nextHistory] = await Promise.all([
           runtime.gateway.listSaveSlots(),
           runtime.gateway.listFocusSessions(committed),
@@ -1025,8 +1048,7 @@ function FocusWorkspace({
         }
         const loaded = await runtime.gateway.loadSaveSlot(slotId);
         if (loaded === null) throw new Error('The selected slot has no valid save.');
-        const recapBaselineEventId =
-          deserializeWorldSnapshot(loaded.snapshot).eventLog.at(-1)?.id ?? 0;
+        const recapBaselineEventId = latestSnapshotEventId(loaded);
         const [loadedSettings, nextSlots, nextHistory] = await Promise.all([
           runtime.gateway.loadSettings(),
           runtime.gateway.listSaveSlots(),

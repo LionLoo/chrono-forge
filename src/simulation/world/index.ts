@@ -896,6 +896,55 @@ function namedScaleResidents(
 function reconcileSettlementPopulationAuthority(
   state: Pick<WorldState, 'civilization' | 'civilizations' | 'config' | 'populationScale' | 'tick'>,
 ): PopulationScaleState {
+  const settlementsById = new Map(
+    state.civilizations.settlements.map((settlement) => [settlement.id, settlement] as const),
+  );
+  const namedPersonIds = new Set(state.civilization.society.people.map((person) => person.id));
+  const scalePopulationBySettlement = new Map<number, number>();
+  let persistedPartitionMatchesSettlements = true;
+  for (const resident of state.populationScale.detailedResidents) {
+    scalePopulationBySettlement.set(
+      resident.settlementId,
+      (scalePopulationBySettlement.get(resident.settlementId) ?? 0) + 1,
+    );
+    if (namedPersonIds.has(resident.id)) continue;
+    const settlement = settlementsById.get(resident.settlementId);
+    if (
+      settlement === undefined ||
+      settlement.status === 'abandoned' ||
+      resident.civilizationId !== settlement.civilizationId ||
+      resident.cultureId !== settlement.cultureId ||
+      resident.tileIndex !== settlement.centerTileIndex
+    ) {
+      persistedPartitionMatchesSettlements = false;
+    }
+  }
+  for (const cohort of state.populationScale.cohorts) {
+    scalePopulationBySettlement.set(
+      cohort.classification.settlementId,
+      (scalePopulationBySettlement.get(cohort.classification.settlementId) ?? 0) +
+        cohort.residentIds.length,
+    );
+    const settlement = settlementsById.get(cohort.classification.settlementId);
+    if (
+      settlement === undefined ||
+      settlement.status === 'abandoned' ||
+      cohort.classification.civilizationId !== settlement.civilizationId ||
+      cohort.classification.cultureId !== settlement.cultureId ||
+      cohort.classification.tileIndex !== settlement.centerTileIndex
+    ) {
+      persistedPartitionMatchesSettlements = false;
+    }
+  }
+  if (
+    persistedPartitionMatchesSettlements &&
+    state.civilizations.settlements.every(
+      (settlement) =>
+        settlement.population === (scalePopulationBySettlement.get(settlement.id) ?? 0),
+    )
+  ) {
+    return state.populationScale;
+  }
   const named = namedScaleResidents(state);
   const namedBySettlement = new Map<number, number>();
   for (const resident of named) {

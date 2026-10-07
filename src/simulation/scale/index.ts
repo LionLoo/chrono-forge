@@ -287,6 +287,73 @@ function nextScheduledTick(state: PopulationScaleState): number {
   return next;
 }
 
+type DueScaleWork = Readonly<{
+  kind: 'detail' | 'cohort';
+  id: number;
+  scheduledTick: number;
+}>;
+
+/**
+ * Selects the same fixed quota as a full `(scheduled tick, ID, kind)` sort without sorting the
+ * entire due backlog. Both authority arrays are already ID sorted, so each scheduled-tick bucket
+ * is a deterministic two-way merge. This keeps max-scale advancement bounded and allocation-light.
+ */
+function selectDueScaleWork(state: PopulationScaleState, tick: number): readonly DueScaleWork[] {
+  const selected: DueScaleWork[] = [];
+  let afterScheduledTick = -1;
+  while (selected.length < MAX_SCALE_WORK_PER_TICK) {
+    let scheduledTick = Number.MAX_SAFE_INTEGER;
+    for (const resident of state.detailedResidents) {
+      if (
+        resident.nextUpdateTick > afterScheduledTick &&
+        resident.nextUpdateTick <= tick &&
+        resident.nextUpdateTick < scheduledTick
+      ) {
+        scheduledTick = resident.nextUpdateTick;
+      }
+    }
+    for (const cohort of state.cohorts) {
+      if (
+        cohort.nextUpdateTick > afterScheduledTick &&
+        cohort.nextUpdateTick <= tick &&
+        cohort.nextUpdateTick < scheduledTick
+      ) {
+        scheduledTick = cohort.nextUpdateTick;
+      }
+    }
+    if (scheduledTick === Number.MAX_SAFE_INTEGER) break;
+
+    let detailedIndex = 0;
+    let cohortIndex = 0;
+    while (selected.length < MAX_SCALE_WORK_PER_TICK) {
+      while (
+        detailedIndex < state.detailedResidents.length &&
+        state.detailedResidents[detailedIndex]!.nextUpdateTick !== scheduledTick
+      ) {
+        detailedIndex += 1;
+      }
+      while (
+        cohortIndex < state.cohorts.length &&
+        state.cohorts[cohortIndex]!.nextUpdateTick !== scheduledTick
+      ) {
+        cohortIndex += 1;
+      }
+      const resident = state.detailedResidents[detailedIndex];
+      const cohort = state.cohorts[cohortIndex];
+      if (resident === undefined && cohort === undefined) break;
+      if (cohort === undefined || (resident !== undefined && resident.id <= cohort.id)) {
+        selected.push({ kind: 'detail', id: resident!.id, scheduledTick });
+        detailedIndex += 1;
+      } else {
+        selected.push({ kind: 'cohort', id: cohort.id, scheduledTick });
+        cohortIndex += 1;
+      }
+    }
+    afterScheduledTick = scheduledTick;
+  }
+  return selected;
+}
+
 function restoredResidentRngState(id: number): Xoshiro128State {
   return [id >>> 0, (id ^ 0x9e3779b9) >>> 0, (id ^ 0x243f6a88) >>> 0, (id ^ 0xb7e15162) >>> 0];
 }
@@ -416,16 +483,21 @@ export function createPopulationScale(
   tick: number,
   initialization: PopulationScaleInitialization,
 ): PopulationScaleState {
+  let nextResidentId = FIRST_ORDINARY_RESIDENT_ID;
+  for (const resident of initialization.detailedResidents) {
+    nextResidentId = Math.max(nextResidentId, resident.id + 1);
+  }
+  let nextCohortId = 1;
+  for (const cohort of initialization.cohorts ?? []) {
+    nextCohortId = Math.max(nextCohortId, cohort.id + 1);
+    for (const residentId of cohort.residentIds) {
+      nextResidentId = Math.max(nextResidentId, residentId + 1);
+    }
+  }
   const provisional: PopulationScaleState = {
     tick,
-    nextResidentId: Math.max(
-      FIRST_ORDINARY_RESIDENT_ID,
-      ...initialization.detailedResidents.map((resident) => resident.id + 1),
-      ...(initialization.cohorts?.flatMap((cohort) =>
-        cohort.residentIds.map((residentId) => residentId + 1),
-      ) ?? []),
-    ),
-    nextCohortId: Math.max(0, ...(initialization.cohorts?.map((cohort) => cohort.id) ?? [])) + 1,
+    nextResidentId,
+    nextCohortId,
     nextTransferId: 1,
     rng,
     detailedResidents: [...initialization.detailedResidents].sort(
@@ -457,37 +529,16 @@ export function advancePopulationScale(
     const scheduledTick = nextScheduledTick(state);
     const tick = Math.min(endingTick, Math.max(state.tick + 1, scheduledTick));
     const rng = advanceRngState(state.rng, tick - state.tick);
-    const due = [
-      ...state.detailedResidents
-        .filter((resident) => resident.nextUpdateTick <= tick)
-        .map((resident) => ({
-          kind: 'detail' as const,
-          id: resident.id,
-          scheduledTick: resident.nextUpdateTick,
-        })),
-      ...state.cohorts
-        .filter((cohort) => cohort.nextUpdateTick <= tick)
-        .map((cohort) => ({
-          kind: 'cohort' as const,
-          id: cohort.id,
-          scheduledTick: cohort.nextUpdateTick,
-        })),
-    ].sort(
-      (left, right) =>
-        left.scheduledTick - right.scheduledTick ||
-        left.id - right.id ||
-        (left.kind === right.kind ? 0 : left.kind === 'detail' ? -1 : 1),
-    );
+    const due = selectDueScaleWork(state, tick);
     if (due.length === 0) {
       state = { ...state, tick, rng };
       continue;
     }
-    const selected = due.slice(0, MAX_SCALE_WORK_PER_TICK);
     const selectedDetails = new Set(
-      selected.filter((item) => item.kind === 'detail').map((item) => item.id),
+      due.filter((item) => item.kind === 'detail').map((item) => item.id),
     );
     const selectedCohorts = new Set(
-      selected.filter((item) => item.kind === 'cohort').map((item) => item.id),
+      due.filter((item) => item.kind === 'cohort').map((item) => item.id),
     );
     const detailedResidents = state.detailedResidents.map((resident) =>
       selectedDetails.has(resident.id)
@@ -515,7 +566,7 @@ export function advancePopulationScale(
       detailedResidents,
       cohorts,
       backlog: normalizeBacklog(tick, detailedResidents, cohorts),
-      operationCount: state.operationCount + selected.length,
+      operationCount: state.operationCount + due.length,
     };
   }
   assertPopulationScaleInvariants(state);

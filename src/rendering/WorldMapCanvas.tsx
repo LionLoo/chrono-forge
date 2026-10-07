@@ -11,6 +11,7 @@ import {
 } from 'react';
 
 import { STRUCTURE_STATE_CODES, type WorldFrameProjection } from '../protocol';
+import type { RuntimeActivityEvent, RuntimeActivityRecorder } from '../testing/runtime-activity';
 import { panCamera, zoomCamera, zoomCameraAt, type WorldCamera } from './camera';
 import {
   buildPreparedRenderModel,
@@ -26,6 +27,7 @@ import type { WorldOverlay } from './world-palette';
 export type WorldMapProjection = WorldFrameProjection;
 
 interface WorldMapCanvasProps {
+  readonly activityRecorder?: RuntimeActivityRecorder;
   readonly camera: WorldCamera;
   readonly onCameraChange: (camera: WorldCamera) => void;
   readonly onSelectionChange?: (selection: SelectableId | null) => void;
@@ -50,7 +52,10 @@ interface PixiScene {
   readonly structureGraphics: Graphics;
   readonly terrainGraphics: Graphics;
   readonly worldLayer: Container;
+  readonly host: HTMLElement;
+  activityRecorder: RuntimeActivityRecorder | undefined;
   lastModel: RenderModel | null;
+  lastProjectionTick: number;
   preparedProjection: PreparedRenderProjection | null;
   preparedSource: WorldMapProjection | null;
   animationFrame: number | null;
@@ -58,6 +63,10 @@ interface PixiScene {
 }
 
 const TILE_SIZE = 6;
+const VIEWPORT_CACHE_MARGIN_TILES = 32;
+const MIN_AGENT_MOTION_DURATION_MS = 120;
+const MAX_AGENT_MOTION_DURATION_MS = 480;
+const MAX_INTERPOLATED_AGENT_COUNT = 512;
 
 interface AgentMotion {
   readonly durationMs: number;
@@ -89,6 +98,28 @@ function viewportFor(
     widthTiles: Math.max(1, Math.ceil(widthPixels / (TILE_SIZE * camera.zoom))),
     heightTiles: Math.max(1, Math.ceil(heightPixels / (TILE_SIZE * camera.zoom))),
   };
+}
+
+function cachedViewport(viewport: RenderViewport): RenderViewport {
+  return {
+    leftTile: viewport.leftTile - VIEWPORT_CACHE_MARGIN_TILES,
+    topTile: viewport.topTile - VIEWPORT_CACHE_MARGIN_TILES,
+    widthTiles: viewport.widthTiles + VIEWPORT_CACHE_MARGIN_TILES * 2,
+    heightTiles: viewport.heightTiles + VIEWPORT_CACHE_MARGIN_TILES * 2,
+  };
+}
+
+function viewportContains(container: RenderViewport, candidate: RenderViewport): boolean {
+  return (
+    candidate.leftTile >= container.leftTile &&
+    candidate.topTile >= container.topTile &&
+    candidate.leftTile + candidate.widthTiles <= container.leftTile + container.widthTiles &&
+    candidate.topTile + candidate.heightTiles <= container.topTile + container.heightTiles
+  );
+}
+
+function sameSelection(left: SelectableId | null, right: SelectableId | null): boolean {
+  return left?.id === right?.id && left?.kind === right?.kind;
 }
 
 function tilePoint(tileIndex: number, width: number): readonly [number, number] {
@@ -823,9 +854,12 @@ function updateAgentMotions(
       } else {
         scene.agentMotions.set(id, {
           // One authoritative position is emitted per completed logical movement.
-          // Use that observed interval so normal focus pace glides between sparse
-          // action pulses, while accelerated pace remains responsive.
-          durationMs: Math.max(120, Math.min(10_000, Math.round((now - priorTargetAtMs) * 0.9))),
+          // Follow short observed intervals, but bound presentation-only work so
+          // accelerated or delayed projections cannot trigger prolonged redraws.
+          durationMs: Math.max(
+            MIN_AGENT_MOTION_DURATION_MS,
+            Math.min(MAX_AGENT_MOTION_DURATION_MS, Math.round((now - priorTargetAtMs) * 0.9)),
+          ),
           fromX,
           fromY,
           startedAtMs: now,
@@ -857,12 +891,36 @@ function scheduleAgentMotion(scene: PixiScene): void {
     const model = scene.lastModel;
     if (model === null) return;
     drawAgents(scene.agentGraphics, model, scene.agentMotions, now);
+    renderScene(scene, 'motion');
     const hasActiveMotion = [...scene.agentMotions.values()].some(
       (motion) => agentMotionPoint(motion, now)[2],
     );
     if (hasActiveMotion) scheduleAgentMotion(scene);
   };
   scene.animationFrame = window.requestAnimationFrame(animate);
+}
+
+function renderScene(scene: PixiScene, reason: 'initial' | 'motion' | 'projection' | 'view'): void {
+  scene.application.render();
+  scene.host.dataset.renderSequence = String(
+    Number.parseInt(scene.host.dataset.renderSequence ?? '0', 10) + 1,
+  );
+  recordRuntimeActivity(scene.activityRecorder, {
+    kind: 'render-applied',
+    reason,
+    tick: scene.lastProjectionTick,
+  });
+}
+
+function recordRuntimeActivity(
+  activityRecorder: RuntimeActivityRecorder | undefined,
+  event: RuntimeActivityEvent,
+): void {
+  try {
+    activityRecorder?.record(event);
+  } catch {
+    // Diagnostics must never change presentation behavior or renderer lifecycle.
+  }
 }
 
 function drawEffects(graphics: Graphics, model: RenderModel): void {
@@ -954,7 +1012,14 @@ function applyProjection(
     drawEffects(scene.effectsGraphics, model);
   }
   const agentLayerChanged = previous?.layerSignatures.agents !== model.layerSignatures.agents;
-  const agentMotionChanged = updateAgentMotions(scene, model, reducedEffects);
+  // Dense wide views keep every factual position but skip presentation-only interpolation.
+  // Close and ordinary views retain motion; camera density never changes Worker authority.
+  const suppressAgentMotion = reducedEffects || model.agents.length > MAX_INTERPOLATED_AGENT_COUNT;
+  const agentMotionChanged = updateAgentMotions(scene, model, suppressAgentMotion);
+  if (suppressAgentMotion && scene.animationFrame !== null) {
+    window.cancelAnimationFrame(scene.animationFrame);
+    scene.animationFrame = null;
+  }
   if (agentLayerChanged || agentMotionChanged || scene.reducedEffects !== reducedEffects) {
     drawAgents(scene.agentGraphics, model, scene.agentMotions, performance.now());
   }
@@ -966,7 +1031,8 @@ function applyProjection(
   }
   scene.reducedEffects = reducedEffects;
   scene.lastModel = model;
-  if (!reducedEffects && scene.agentMotions.size > 0) scheduleAgentMotion(scene);
+  scene.lastProjectionTick = projection.tick;
+  if (!suppressAgentMotion && scene.agentMotions.size > 0) scheduleAgentMotion(scene);
   return model;
 }
 
@@ -1006,6 +1072,7 @@ function selectableAtTile(model: RenderModel, tileIndex: number): SelectableId |
 }
 
 export function WorldMapCanvas({
+  activityRecorder,
   camera,
   onCameraChange,
   onSelectionChange,
@@ -1019,6 +1086,7 @@ export function WorldMapCanvas({
   const hostRef = useRef<HTMLDivElement>(null);
   const sceneRef = useRef<PixiScene | null>(null);
   const cameraRef = useRef(camera);
+  const activityRecorderRef = useRef(activityRecorder);
   const onCameraChangeRef = useRef(onCameraChange);
   const onSelectionChangeRef = useRef(onSelectionChange);
   const onViewportResizeRef = useRef(onViewportResize);
@@ -1039,6 +1107,8 @@ export function WorldMapCanvas({
   } | null>(null);
 
   useEffect(() => {
+    activityRecorderRef.current = activityRecorder;
+    if (sceneRef.current !== null) sceneRef.current.activityRecorder = activityRecorder;
     cameraRef.current = camera;
     onCameraChangeRef.current = onCameraChange;
     onSelectionChangeRef.current = onSelectionChange;
@@ -1048,6 +1118,7 @@ export function WorldMapCanvas({
     reducedEffectsRef.current = reducedEffects;
     selectionRef.current = selection;
   }, [
+    activityRecorder,
     camera,
     onCameraChange,
     onSelectionChange,
@@ -1115,6 +1186,7 @@ export function WorldMapCanvas({
       .init({
         antialias: false,
         autoDensity: true,
+        autoStart: false,
         background: '#0b1510',
         preference: 'webgl',
         resolution: Math.min(window.devicePixelRatio || 1, 2),
@@ -1148,6 +1220,7 @@ export function WorldMapCanvas({
         application.canvas.setAttribute('aria-hidden', 'true');
         host.appendChild(application.canvas);
         const scene: PixiScene = {
+          activityRecorder: activityRecorderRef.current,
           agentGraphics,
           agentLastTargetAtMs: new Map(),
           agentMotions: new Map(),
@@ -1161,7 +1234,9 @@ export function WorldMapCanvas({
           structureGraphics,
           terrainGraphics,
           worldLayer,
+          host,
           lastModel: null,
+          lastProjectionTick: projectionRef.current.tick,
           preparedProjection: null,
           preparedSource: null,
           animationFrame: null,
@@ -1172,7 +1247,7 @@ export function WorldMapCanvas({
           scene,
           projectionRef.current,
           overlayRef.current,
-          viewportFor(host, cameraRef.current, projectionRef.current),
+          cachedViewport(viewportFor(host, cameraRef.current, projectionRef.current)),
           selectionRef.current,
           reducedEffectsRef.current,
           cameraRef.current.zoom,
@@ -1183,6 +1258,7 @@ export function WorldMapCanvas({
         host.dataset.detail = model.detailLevel;
         worldLayer.position.set(cameraRef.current.x, cameraRef.current.y);
         worldLayer.scale.set(cameraRef.current.zoom);
+        renderScene(scene, 'initial');
         setRenderError(null);
       })
       .catch((error: unknown) => {
@@ -1209,21 +1285,36 @@ export function WorldMapCanvas({
     const scene = sceneRef.current;
     const host = hostRef.current;
     if (!scene || !host) return;
-    const model = applyProjection(
-      scene,
-      projection,
-      overlay,
-      viewportFor(host, camera, projection),
-      selection,
-      reducedEffects,
-      camera.zoom,
-    );
+    const projectionChanged = scene.preparedSource !== projection;
+    const viewport = viewportFor(host, camera, projection);
+    const detailLevel = renderDetailForZoom(camera.zoom);
+    const previous = scene.lastModel;
+    const canReusePreparedView =
+      !projectionChanged &&
+      previous !== null &&
+      previous.overlay.value === overlay &&
+      previous.detailLevel === detailLevel &&
+      sameSelection(previous.selected, selection) &&
+      scene.reducedEffects === reducedEffects &&
+      viewportContains(previous.viewport, viewport);
+    const model = canReusePreparedView
+      ? previous
+      : applyProjection(
+          scene,
+          projection,
+          overlay,
+          cachedViewport(viewport),
+          selection,
+          reducedEffects,
+          camera.zoom,
+        );
     setAccessibleLabel(
       `${model.era} world map, ${projection.agentIds.length} visible agents, ${projection.structureIds.length} structures, ${model.overlay.legend} overlay`,
     );
     host.dataset.detail = model.detailLevel;
     scene.worldLayer.position.set(camera.x, camera.y);
     scene.worldLayer.scale.set(camera.zoom);
+    renderScene(scene, projectionChanged ? 'projection' : 'view');
   }, [camera, overlay, projection, reducedEffects, selection, viewportRevision]);
 
   const handlePointerDown = (event: ReactPointerEvent<HTMLDivElement>) => {

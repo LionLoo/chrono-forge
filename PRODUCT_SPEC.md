@@ -70,6 +70,8 @@ Model context-sensitive drought, flood, fire, storm, earthquake, disease, famine
 
 Smooth animated 2D world; responsive location-anchored pan/zoom from a civilization overview into distinct settlements, districts, homes, structures, and visible people; readable terrain/resources; stable factual character identity and activity; construction progress; era/condition buildings, roads, districts, farms, industry, infrastructure, ruins, advanced structures, weather/time/disasters/environment; resource/population/trade/technology/danger overlays; inspection of people/buildings/settlements/events; timeline and recap; calm non-demanding focus presentation. The v1 result must read as a polished, cohesive game rather than a debug dashboard or circle-and-block placeholder view. Assets must be original, generated, procedural, or appropriately licensed and attributed.
 
+The release world must provide a substantially larger civilization canvas than the 96x64 development baseline: the default v1 surface is 256x192 authoritative tiles. The generated homeworld is one continuous surface; civilizations and their territories are the world's countries or polities and expand across that shared map rather than opening unrelated country maps. The camera begins at a readable founding-region scale and the player can always pan, zoom, select, and return to civilization-wide context without camera state changing simulation outcomes.
+
 ### Sound, atmosphere, and game feel
 
 Quiet-by-default, optional local audio and restrained atmosphere may communicate actual focus actions, selection, construction/progress, danger, discovery, session completion, and recorded major events without affecting authoritative timing or outcomes. Persist master, music/ambience, effects, mute, calm, and reduced-effects choices; provide redundant visual/text cues; degrade silently when audio is unavailable; and use only original or properly licensed and attributed sounds. The result should make the world feel present without distracting a working user.
@@ -81,6 +83,8 @@ Fixed deterministic ticks, spatial indexing, validated authoritative aggregation
 ### Planetary and space age
 
 Advanced planetary civilization, planet-scale travel/abstraction, spaceflight research, spacecraft, orbit, missions, additional celestial bodies, autonomous colonies, communication/travel delays, colony divergence, interworld exchange, alien life or civilizations, and space diplomacy/cooperation/competition/conflict. Higher abstraction is acceptable, but systems must be playable, visible, historical, and autonomously reached.
+
+The primary world stage must offer an accessible **Surface** / **System** view switch. Surface renders the shared homeworld and its civilization territories. System renders a deterministic read-only projection of the actual saved star, celestial bodies, orbits, spacecraft, missions, colonies, travel and communication routes, and discovered alien civilizations. Selecting a body or route opens its factual inspector; undiscovered aliens and unrecorded activity remain absent. V1 does not promise a second tile-by-tile terrain simulation for every celestial body, and it never labels the procedural homeworld as Earth unless the saved authority actually defines it that way.
 
 ### Saves and offline behavior
 
