@@ -338,10 +338,10 @@ describe('native focus persistence phase 1', () => {
       plannedFocusMs: 120_000,
       focusedMs: 10_000,
     });
-    const pausedCandidates = await executeTauri(({ core }) =>
+    const pausedCandidatePage = await executeTauri(({ core }) =>
       core.invoke('load_save_slot_candidates', { slotId: 'primary' }),
     );
-    expect(pausedCandidates[0]?.focusSession).toMatchObject({
+    expect(pausedCandidatePage.candidates[0]?.focusSession).toMatchObject({
       sessionId: pausedSessions[0]?.sessionId,
       status: 'paused',
       plannedFocusMs: 120_000,

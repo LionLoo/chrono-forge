@@ -141,6 +141,14 @@ interface ValidatedSnapshotAuthority {
   readonly world: ReturnType<typeof deserializeWorldSnapshot>;
 }
 
+interface NativeSaveCandidatePage {
+  readonly candidates: readonly unknown[];
+  readonly nextBeforeGeneration: number | null;
+}
+
+const SAVE_CANDIDATE_PAGE_SIZE = 1;
+const MAX_REPORTED_SAVE_VALIDATION_FAILURES = 8;
+
 const validatedLoadedSaves = new WeakMap<LoadedSave, ValidatedSnapshotAuthority>();
 
 function rememberValidatedLoadedSave(
@@ -186,54 +194,55 @@ async function loadNativeSemanticSave(
 ): Promise<LoadedSave | null> {
   const initial = await invoke<unknown>('load_save_slot_candidates', { slotId });
   if (initial === null) return null;
-  if (!Array.isArray(initial) || initial.length === 0) {
-    throw new TypeError('load_save_slot_candidates returned an invalid candidate list');
-  }
+  let page = parseNativeSaveCandidatePage(initial, 'load_save_slot_candidates');
   const failures: string[] = [];
-  let oldestRejectedGeneration: number | null = null;
-  const tryCandidates = (candidates: readonly unknown[]): LoadedSave | null => {
-    for (const candidate of candidates) {
+  let omittedFailureCount = 0;
+  let beforeGeneration: number | null = null;
+  const reportFailure = (message: string) => {
+    if (failures.length < MAX_REPORTED_SAVE_VALIDATION_FAILURES) failures.push(message);
+    else omittedFailureCount += 1;
+  };
+  while (true) {
+    for (const candidate of page.candidates) {
       try {
-        return parseLoadedSave(candidate);
-      } catch (error) {
-        failures.push(error instanceof Error ? error.message : 'unknown validation error');
-        try {
-          const generation = expectPositiveInteger(
-            expectRecord(candidate, 'loaded save').recoveredGeneration,
-            'recoveredGeneration',
-          );
-          oldestRejectedGeneration =
-            oldestRejectedGeneration === null
-              ? generation
-              : Math.min(oldestRejectedGeneration, generation);
-        } catch {
-          // An untrusted malformed generation cannot establish a safe fallback boundary.
+        const loaded = parseLoadedSave(candidate);
+        if (beforeGeneration !== null && loaded.recoveredGeneration >= beforeGeneration) {
+          throw new TypeError('fallback save candidate did not precede its requested boundary');
         }
+        return loaded;
+      } catch (error) {
+        reportFailure(error instanceof Error ? error.message : 'unknown validation error');
       }
     }
-    return null;
-  };
-  const loaded = tryCandidates(initial);
-  if (loaded !== null) return loaded;
-  if (oldestRejectedGeneration !== null) {
+
+    const nextBeforeGeneration = page.nextBeforeGeneration;
+    if (nextBeforeGeneration === null) break;
+    if (beforeGeneration !== null && nextBeforeGeneration >= beforeGeneration) {
+      reportFailure('save candidate cursor did not move to an older generation');
+      break;
+    }
+    beforeGeneration = nextBeforeGeneration;
     try {
       const fallback = await invoke<unknown>('load_save_slot_fallback_candidates', {
         slotId,
-        beforeGeneration: oldestRejectedGeneration,
+        beforeGeneration,
       });
-      if (fallback !== null && Array.isArray(fallback)) {
-        const recovered = tryCandidates(fallback);
-        if (recovered !== null) return recovered;
-      } else {
-        failures.push('load_save_slot_fallback_candidates returned an invalid candidate list');
+      if (fallback === null) {
+        reportFailure('save slot disappeared during fallback recovery');
+        break;
       }
+      page = parseNativeSaveCandidatePage(fallback, 'load_save_slot_fallback_candidates');
     } catch (error) {
-      failures.push(
+      reportFailure(
         `fallback query failed: ${error instanceof Error ? error.message : 'unknown error'}`,
       );
+      break;
     }
   }
-  throw new Error(`save slot has no semantically valid generation: ${failures.join('; ')}`);
+  const omitted = omittedFailureCount === 0 ? '' : `; ${omittedFailureCount} more failures omitted`;
+  throw new Error(
+    `save slot has no semantically valid generation: ${failures.join('; ')}${omitted}`,
+  );
 }
 
 export function latestSnapshotEventId(save: LoadedSave): number {
@@ -620,6 +629,35 @@ function parseSaveSlotSummary(value: unknown): SaveSlotSummary {
   validateIdentifier(slotId, 'slot ID');
   validateName(name);
   return { slotId, name, headGeneration };
+}
+
+function parseNativeSaveCandidatePage(value: unknown, source: string): NativeSaveCandidatePage {
+  const record = expectRecord(value, `${source} page`);
+  expectExactKeys(record, ['candidates', 'nextBeforeGeneration'], `${source} page`);
+  if (!Array.isArray(record.candidates)) {
+    throw new TypeError(`${source} candidates must be an array`);
+  }
+  if (record.candidates.length > SAVE_CANDIDATE_PAGE_SIZE) {
+    throw new RangeError(`${source} exceeded the bounded candidate page size`);
+  }
+  const nextBeforeGeneration = expectNullablePositiveInteger(
+    record.nextBeforeGeneration,
+    `${source} nextBeforeGeneration`,
+  );
+  if (record.candidates.length === 1) {
+    const candidate = expectRecord(record.candidates[0], `${source} candidate`);
+    const recoveredGeneration = expectPositiveInteger(
+      candidate.recoveredGeneration,
+      `${source} candidate recoveredGeneration`,
+    );
+    if (nextBeforeGeneration !== recoveredGeneration) {
+      throw new TypeError(`${source} cursor must match its sole candidate generation`);
+    }
+  }
+  return {
+    candidates: record.candidates,
+    nextBeforeGeneration,
+  };
 }
 
 function parseLoadedSave(

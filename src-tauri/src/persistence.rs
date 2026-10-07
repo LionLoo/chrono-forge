@@ -29,6 +29,7 @@ const MAX_FOCUS_REVISIT_LABEL_BYTES: usize = 80;
 const MAX_JSON_SAFE_INTEGER: u64 = 9_007_199_254_740_991;
 const MAX_FOCUS_STATE_BYTES: usize = 64 * 1024;
 const RETAINED_GENERATIONS: i64 = 3;
+const SAVE_CANDIDATE_SCAN_ROWS_PER_PAGE: i64 = 1;
 
 #[derive(Debug)]
 pub struct PersistenceError(String);
@@ -87,6 +88,13 @@ pub struct LoadedSave {
     pub focus_session: Option<FocusSession>,
     pub snapshot: String,
     pub checksum: String,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct SaveCandidatePage {
+    pub candidates: Vec<LoadedSave>,
+    pub next_before_generation: Option<i64>,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -559,12 +567,25 @@ impl PersistenceDatabase {
 
     #[cfg(test)]
     fn load_slot(&self, slot_id: &str) -> Result<Option<LoadedSave>> {
-        Ok(self
-            .load_slot_candidates(slot_id)?
-            .and_then(|candidates| candidates.into_iter().next()))
+        let Some(mut page) = self.load_slot_candidates(slot_id)? else {
+            return Ok(None);
+        };
+        loop {
+            if let Some(candidate) = page.candidates.into_iter().next() {
+                return Ok(Some(candidate));
+            }
+            let Some(before_generation) = page.next_before_generation else {
+                return Err(PersistenceError::new(
+                    "save slot has no generation with a verified snapshot",
+                ));
+            };
+            page = self
+                .load_slot_fallback_candidates(slot_id, before_generation)?
+                .ok_or_else(|| PersistenceError::new("save slot disappeared during recovery"))?;
+        }
     }
 
-    fn load_slot_candidates(&self, slot_id: &str) -> Result<Option<Vec<LoadedSave>>> {
+    fn load_slot_candidates(&self, slot_id: &str) -> Result<Option<SaveCandidatePage>> {
         validate_identifier(slot_id, "slot ID")?;
         let slot = self
             .connection
@@ -615,24 +636,26 @@ impl PersistenceDatabase {
                 };
                 // The common path returns only the verified head. Older generations are loaded
                 // lazily only if the TypeScript semantic validator rejects this candidate.
-                return Ok(Some(vec![head]));
+                return Ok(Some(SaveCandidatePage {
+                    candidates: vec![head],
+                    next_before_generation: Some(head_generation),
+                }));
             }
         }
 
-        let candidates = self.fallback_candidates(slot_id, &name, head_generation, None)?;
-        if candidates.is_empty() {
-            return Err(PersistenceError::new(
-                "save slot has no generation with a verified snapshot",
-            ));
-        }
-        Ok(Some(candidates))
+        Ok(Some(self.fallback_candidate_page(
+            slot_id,
+            &name,
+            head_generation,
+            None,
+        )?))
     }
 
     fn load_slot_fallback_candidates(
         &self,
         slot_id: &str,
         before_generation: i64,
-    ) -> Result<Option<Vec<LoadedSave>>> {
+    ) -> Result<Option<SaveCandidatePage>> {
         validate_identifier(slot_id, "slot ID")?;
         if before_generation < 1 {
             return Err(PersistenceError::new(
@@ -650,7 +673,7 @@ impl PersistenceDatabase {
         let Some((name, head_generation)) = slot else {
             return Ok(None);
         };
-        Ok(Some(self.fallback_candidates(
+        Ok(Some(self.fallback_candidate_page(
             slot_id,
             &name,
             head_generation,
@@ -658,31 +681,41 @@ impl PersistenceDatabase {
         )?))
     }
 
-    fn fallback_candidates(
+    fn fallback_candidate_page(
         &self,
         slot_id: &str,
         name: &str,
         head_generation: Option<i64>,
         before_generation: Option<i64>,
-    ) -> Result<Vec<LoadedSave>> {
+    ) -> Result<SaveCandidatePage> {
         let mut statement = self.connection.prepare(
             "SELECT generation, snapshot, checksum, saved_at_ms, focus_session_json
              FROM save_generations
              WHERE slot_id = ?1 AND (?2 IS NULL OR generation < ?2)
-             ORDER BY generation DESC",
+             ORDER BY generation DESC
+             LIMIT ?3",
         )?;
-        let generations = statement.query_map(params![slot_id, before_generation], |row| {
-            Ok((
-                row.get::<_, i64>(0)?,
-                row.get::<_, String>(1)?,
-                row.get::<_, String>(2)?,
-                row.get::<_, i64>(3)?,
-                row.get::<_, Option<String>>(4)?,
-            ))
-        })?;
+        let generations = statement.query_map(
+            params![
+                slot_id,
+                before_generation,
+                SAVE_CANDIDATE_SCAN_ROWS_PER_PAGE
+            ],
+            |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, i64>(3)?,
+                    row.get::<_, Option<String>>(4)?,
+                ))
+            },
+        )?;
         let mut candidates = Vec::new();
+        let mut next_before_generation = None;
         for generation in generations {
             let (generation, snapshot, checksum, saved_at_ms, focus_session_json) = generation?;
+            next_before_generation = Some(generation);
             if validate_snapshot(&snapshot).is_ok()
                 && checksum == sha256_hex(&snapshot)
                 && saved_at_ms >= 0
@@ -702,7 +735,10 @@ impl PersistenceDatabase {
                 });
             }
         }
-        Ok(candidates)
+        Ok(SaveCandidatePage {
+            candidates,
+            next_before_generation,
+        })
     }
 
     fn commit_slot(&mut self, slot_id: &str, name: &str, snapshot: &str) -> Result<LoadedSave> {
@@ -1836,7 +1872,7 @@ pub fn list_save_slots(
 pub fn load_save_slot_candidates(
     state: State<'_, PersistenceState>,
     slot_id: String,
-) -> std::result::Result<Option<Vec<LoadedSave>>, String> {
+) -> std::result::Result<Option<SaveCandidatePage>, String> {
     state
         .lock()
         .and_then(|database| database.load_slot_candidates(&slot_id))
@@ -1848,7 +1884,7 @@ pub fn load_save_slot_fallback_candidates(
     state: State<'_, PersistenceState>,
     slot_id: String,
     before_generation: i64,
-) -> std::result::Result<Option<Vec<LoadedSave>>, String> {
+) -> std::result::Result<Option<SaveCandidatePage>, String> {
     state
         .lock()
         .and_then(|database| database.load_slot_fallback_candidates(&slot_id, before_generation))
@@ -2015,6 +2051,47 @@ mod tests {
         loaded
     }
 
+    fn collect_candidate_pages(database: &PersistenceDatabase, slot_id: &str) -> Vec<LoadedSave> {
+        let Some(mut page) = database
+            .load_slot_candidates(slot_id)
+            .expect("initial candidate page")
+        else {
+            return Vec::new();
+        };
+        let mut candidates = Vec::new();
+        let mut requested_before = None;
+        loop {
+            assert!(
+                page.candidates.len() <= SAVE_CANDIDATE_SCAN_ROWS_PER_PAGE as usize,
+                "native recovery pages must remain bounded"
+            );
+            if let Some(boundary) = requested_before {
+                assert!(
+                    page.candidates
+                        .iter()
+                        .all(|candidate| candidate.recovered_generation < boundary),
+                    "fallback candidates must precede their requested boundary"
+                );
+            }
+            candidates.extend(page.candidates);
+            let Some(next_before_generation) = page.next_before_generation else {
+                break;
+            };
+            if let Some(boundary) = requested_before {
+                assert!(
+                    next_before_generation < boundary,
+                    "candidate page cursor must move backward"
+                );
+            }
+            requested_before = Some(next_before_generation);
+            page = database
+                .load_slot_fallback_candidates(slot_id, next_before_generation)
+                .expect("fallback candidate page")
+                .expect("slot remains present during test recovery");
+        }
+        candidates
+    }
+
     fn focus_world_moment(tick: u64) -> FocusWorldMoment {
         FocusWorldMoment {
             tick,
@@ -2164,10 +2241,7 @@ mod tests {
                 [newest.recovered_generation],
             )
             .expect("corrupt newest head");
-        let candidates = database
-            .load_slot_candidates("alpha")
-            .expect("fallback candidates")
-            .expect("slot");
+        let candidates = collect_candidate_pages(&database, "alpha");
         assert_eq!(
             candidates
                 .iter()
@@ -2192,30 +2266,126 @@ mod tests {
                 .expect("commit");
         }
 
-        let candidates = database
+        let page = database
             .load_slot_candidates("alpha")
             .expect("load candidates")
             .expect("slot");
-        assert_eq!(candidates.len(), 1);
-        assert_eq!(candidates[0].recovered_generation, 3);
-        assert!(!candidates[0].recovered_from_corruption);
+        assert_eq!(page.candidates.len(), 1);
+        assert_eq!(page.candidates[0].recovered_generation, 3);
+        assert!(!page.candidates[0].recovered_from_corruption);
+        assert_eq!(page.next_before_generation, Some(3));
 
-        let fallbacks = database
+        let fallback_two = database
             .load_slot_fallback_candidates("alpha", 3)
             .expect("fallback candidates")
             .expect("slot");
-        assert_eq!(
-            fallbacks
-                .iter()
-                .map(|candidate| candidate.recovered_generation)
-                .collect::<Vec<_>>(),
-            vec![2, 1]
-        );
-        assert!(
-            fallbacks
-                .iter()
-                .all(|candidate| candidate.recovered_from_corruption)
-        );
+        assert_eq!(fallback_two.candidates.len(), 1);
+        assert_eq!(fallback_two.candidates[0].recovered_generation, 2);
+        assert!(fallback_two.candidates[0].recovered_from_corruption);
+        assert_eq!(fallback_two.next_before_generation, Some(2));
+
+        let fallback_one = database
+            .load_slot_fallback_candidates("alpha", 2)
+            .expect("fallback candidates")
+            .expect("slot");
+        assert_eq!(fallback_one.candidates.len(), 1);
+        assert_eq!(fallback_one.candidates[0].recovered_generation, 1);
+        assert!(fallback_one.candidates[0].recovered_from_corruption);
+        assert_eq!(fallback_one.next_before_generation, Some(1));
+    }
+
+    #[test]
+    fn candidate_pages_bound_scans_across_corrupt_rows_without_deleting_evidence() {
+        let mut database = PersistenceDatabase::in_memory().expect("database");
+        commit_semantically_verified_slot(&mut database, "alpha", "Alpha", &snapshot("one"));
+        database
+            .commit_slot("alpha", "Alpha", &snapshot("two"))
+            .expect("second generation");
+        database
+            .commit_slot("alpha", "Alpha", &snapshot("three"))
+            .expect("third generation");
+        database
+            .commit_focus_checkpoint(
+                "alpha",
+                "Alpha",
+                &snapshot("four"),
+                &completed_focus_session("alpha", vec![7]),
+            )
+            .expect("fourth generation");
+        database
+            .commit_slot("alpha", "Alpha", r#"{"hello":"world-five"}"#)
+            .expect("checksum-valid semantic failure");
+        database
+            .connection
+            .execute(
+                "UPDATE save_generations SET snapshot = '{'
+                 WHERE slot_id = 'alpha' AND generation = 2",
+                [],
+            )
+            .expect("truncate second generation");
+        database
+            .connection
+            .execute(
+                "UPDATE save_generations SET checksum = 'corrupt'
+                 WHERE slot_id = 'alpha' AND generation = 3",
+                [],
+            )
+            .expect("corrupt third generation checksum");
+        database
+            .connection
+            .execute(
+                "UPDATE save_generations SET focus_session_json = '{}'
+                 WHERE slot_id = 'alpha' AND generation = 4",
+                [],
+            )
+            .expect("corrupt fourth generation checkpoint");
+
+        let mut page = database
+            .load_slot_candidates("alpha")
+            .expect("initial page")
+            .expect("slot");
+        let mut cursors = Vec::new();
+        let mut candidate_generations = Vec::new();
+        let mut requested_before = None;
+        loop {
+            assert!(page.candidates.len() <= 1);
+            if let Some(boundary) = requested_before {
+                assert!(
+                    page.candidates
+                        .iter()
+                        .all(|candidate| candidate.recovered_generation < boundary)
+                );
+            }
+            candidate_generations.extend(
+                page.candidates
+                    .iter()
+                    .map(|candidate| candidate.recovered_generation),
+            );
+            let Some(next_before_generation) = page.next_before_generation else {
+                break;
+            };
+            if let Some(boundary) = requested_before {
+                assert!(next_before_generation < boundary);
+            }
+            cursors.push(next_before_generation);
+            requested_before = Some(next_before_generation);
+            page = database
+                .load_slot_fallback_candidates("alpha", next_before_generation)
+                .expect("fallback page")
+                .expect("slot");
+        }
+
+        assert_eq!(cursors, vec![5, 4, 3, 2, 1]);
+        assert_eq!(candidate_generations, vec![5, 1]);
+        let row_count: i64 = database
+            .connection
+            .query_row(
+                "SELECT COUNT(*) FROM save_generations WHERE slot_id = 'alpha'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("row count");
+        assert_eq!(row_count, 5);
     }
 
     #[test]
@@ -2426,6 +2596,49 @@ mod tests {
             )
             .expect("count");
         assert_eq!(count, 1);
+    }
+
+    #[test]
+    fn interrupted_focus_checkpoint_rolls_back_world_history_and_generation_together() {
+        let mut database = PersistenceDatabase::in_memory().expect("database");
+        let first =
+            commit_semantically_verified_slot(&mut database, "alpha", "Alpha", &snapshot("one"));
+        let session = completed_focus_session("alpha", vec![7, 9]);
+
+        assert!(
+            database
+                .commit_slot_inner(
+                    "alpha",
+                    "Alpha",
+                    &snapshot("interrupted"),
+                    Some(&session),
+                    true,
+                )
+                .is_err()
+        );
+
+        let loaded = database.load_slot("alpha").expect("load").expect("present");
+        assert_eq!(loaded.recovered_generation, first.recovered_generation);
+        assert_eq!(loaded.snapshot, first.snapshot);
+        assert!(database.list_focus_sessions().expect("history").is_empty());
+        let row_count: i64 = database
+            .connection
+            .query_row(
+                "SELECT COUNT(*) FROM save_generations WHERE slot_id = 'alpha'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("row count");
+        assert_eq!(row_count, 1);
+
+        let committed = database
+            .commit_focus_checkpoint("alpha", "Alpha", &snapshot("two"), &session)
+            .expect("retry checkpoint");
+        assert_eq!(committed.recovered_generation, 2);
+        assert_eq!(
+            database.list_focus_sessions().expect("history"),
+            vec![session]
+        );
     }
 
     #[test]

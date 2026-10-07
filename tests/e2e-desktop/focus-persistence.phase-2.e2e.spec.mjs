@@ -70,10 +70,10 @@ describe('native focus persistence phase 2', () => {
     expect(completedRecord?.checkpointGeneration).toBeGreaterThan(0);
     expect(completedRecord?.authoritySession).toEqual(completedSession);
     expect(completedSession.review.after.tick - completedSession.review.before.tick).toBe(600);
-    const completedCandidates = await executeTauri(({ core }) =>
+    const completedCandidatePage = await executeTauri(({ core }) =>
       core.invoke('load_save_slot_candidates', { slotId: 'primary' }),
     );
-    const completedWorld = JSON.parse(completedCandidates[0]?.snapshot).payload;
+    const completedWorld = JSON.parse(completedCandidatePage.candidates[0]?.snapshot).payload;
     const eventsById = new Map(completedWorld.eventLog.map((event) => [event.id, event]));
     expect(completedSession.recapEntries).toEqual(
       completedSession.recapEventIds.map((eventId) => {
@@ -100,7 +100,7 @@ describe('native focus persistence phase 2', () => {
     await revisit.waitForDisplayed();
     await revisit.click();
     expect(await (await $('#map-inspector')).isFocused()).toBe(true);
-    expect(completedCandidates[0]?.focusSession).toMatchObject({
+    expect(completedCandidatePage.candidates[0]?.focusSession).toMatchObject({
       sessionId: completedSession.sessionId,
       status: 'completed',
       plannedFocusMs: 120_000,
@@ -127,10 +127,10 @@ describe('native focus persistence phase 2', () => {
       async () => (await $('.persistence-status').getText()).includes('World saved manually.'),
       { timeoutMsg: 'mid-flight M9 save did not commit' },
     );
-    const candidates = await executeTauri(({ core }) =>
+    const candidatePage = await executeTauri(({ core }) =>
       core.invoke('load_save_slot_candidates', { slotId: 'm9-mid-flight' }),
     );
-    expectM10Migration(candidates[0]?.snapshot, expectedMidFlight);
+    expectM10Migration(candidatePage.candidates[0]?.snapshot, expectedMidFlight);
   });
 
   it('reloads an exact post-contact M9 save through SQLite and the real Worker', async () => {
@@ -153,9 +153,9 @@ describe('native focus persistence phase 2', () => {
       async () => (await $('.persistence-status').getText()).includes('World saved manually.'),
       { timeoutMsg: 'post-contact M9 save did not commit' },
     );
-    const candidates = await executeTauri(({ core }) =>
+    const candidatePage = await executeTauri(({ core }) =>
       core.invoke('load_save_slot_candidates', { slotId: 'm9-contacted' }),
     );
-    expectM10Migration(candidates[0]?.snapshot, expectedContacted);
+    expectM10Migration(candidatePage.candidates[0]?.snapshot, expectedContacted);
   });
 });
