@@ -2,7 +2,7 @@
 
 `PRODUCT_SPEC.md` is the product contract and `PLAN.md` contains the decision-complete acceptance criteria, branches, and validation for each item. Milestones run in this order:
 
-Current checkpoint: M0-M10.6 are merged, independently reviewed, and hosted-verified on `main` at `7ccdad20e38bb038b4091b35b35d87bddae2e090`. M10.65 long-session performance, power, and responsiveness is active on `release/v1-long-session-performance`. M10.65-M12 and the private v1.0.0 release remain fully blocking.
+Current checkpoint: M0-M10.65 are merged, independently reviewed, and hosted-verified on `main` at `dfb79527828f9fefe86cef4b2b5bcb96b6e3158c`. M10.7 backend bug hunt and repair is active on `release/v1-backend-bug-hunt`. M10.7-M12 and the private v1.0.0 release remain fully blocking.
 
 | Order  | Milestone                                                    | Outcome                                                                                                            |
 | ------ | ------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------ |
