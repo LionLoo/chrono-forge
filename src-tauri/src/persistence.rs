@@ -2784,6 +2784,526 @@ mod tests {
         }
     }
 
+    struct HistoricalDatabaseFile {
+        path: PathBuf,
+    }
+
+    impl HistoricalDatabaseFile {
+        fn create(schema_version: i64) -> Self {
+            assert!([2, 4, 5, 7].contains(&schema_version));
+            let unique = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("test clock")
+                .as_nanos();
+            let path = std::env::temp_dir().join(format!(
+                "chrono-forge-m10-7-v{schema_version}-{}-{unique}.sqlite3",
+                std::process::id()
+            ));
+            let connection = Connection::open(&path).expect("historical database");
+            seed_historical_database(&connection, schema_version);
+            drop(connection);
+            Self { path }
+        }
+
+        fn path(&self) -> &Path {
+            &self.path
+        }
+    }
+
+    impl Drop for HistoricalDatabaseFile {
+        fn drop(&mut self) {
+            for path in [
+                self.path.clone(),
+                PathBuf::from(format!("{}-wal", self.path.display())),
+                PathBuf::from(format!("{}-shm", self.path.display())),
+            ] {
+                let _ = fs::remove_file(path);
+            }
+        }
+    }
+
+    fn historical_focus_session(schema_version: i64) -> FocusSession {
+        let mut session = completed_focus_session("alpha", vec![7]);
+        if schema_version < 4 {
+            session.recap_entries.clear();
+        }
+        if schema_version >= 5 {
+            session.review = Some(FocusSessionReview {
+                version: 1,
+                baseline_event_id: 6,
+                before: focus_world_moment(0),
+                after: focus_world_moment(1),
+                revisit_target: Some(FocusRevisitTarget {
+                    kind: FocusRevisitKind::Settlement,
+                    id: 1,
+                    label: "First Hearth".to_owned(),
+                    source_event_id: Some(7),
+                }),
+            });
+        }
+        session
+    }
+
+    fn seed_historical_database(connection: &Connection, schema_version: i64) {
+        connection
+            .execute_batch(
+                "
+                PRAGMA foreign_keys = ON;
+                CREATE TABLE schema_migrations (
+                    version INTEGER PRIMARY KEY,
+                    applied_marker INTEGER NOT NULL
+                );
+                INSERT INTO schema_migrations (version, applied_marker) VALUES (1, 1);
+                CREATE TABLE save_slots (
+                    slot_id TEXT PRIMARY KEY NOT NULL,
+                    name TEXT NOT NULL,
+                    head_generation INTEGER,
+                    FOREIGN KEY (slot_id, head_generation)
+                        REFERENCES save_generations(slot_id, generation)
+                        DEFERRABLE INITIALLY DEFERRED
+                );
+                CREATE TABLE save_generations (
+                    slot_id TEXT NOT NULL,
+                    generation INTEGER NOT NULL,
+                    snapshot TEXT NOT NULL,
+                    checksum TEXT NOT NULL,
+                    PRIMARY KEY (slot_id, generation),
+                    FOREIGN KEY (slot_id) REFERENCES save_slots(slot_id) ON DELETE CASCADE
+                );
+                CREATE INDEX idx_save_generations_newest
+                    ON save_generations (slot_id, generation DESC);
+                CREATE TABLE focus_sessions (
+                    session_id TEXT PRIMARY KEY NOT NULL,
+                    slot_id TEXT,
+                    started_at_ms INTEGER NOT NULL,
+                    ended_at_ms INTEGER,
+                    planned_focus_ms INTEGER NOT NULL,
+                    focused_ms INTEGER NOT NULL,
+                    planned_break_ms INTEGER NOT NULL,
+                    break_ms INTEGER NOT NULL,
+                    issued_simulation_ticks INTEGER NOT NULL,
+                    status TEXT NOT NULL,
+                    state_json TEXT NOT NULL,
+                    recap_event_ids_json TEXT NOT NULL,
+                    FOREIGN KEY (slot_id) REFERENCES save_slots(slot_id) ON DELETE SET NULL
+                );
+                CREATE INDEX idx_focus_sessions_newest
+                    ON focus_sessions (started_at_ms DESC, session_id ASC);
+                CREATE TABLE app_settings (
+                    singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+                    focus_to_sim_ratio INTEGER NOT NULL,
+                    default_focus_minutes INTEGER NOT NULL,
+                    default_break_minutes INTEGER NOT NULL,
+                    volume_percent INTEGER NOT NULL,
+                    offline_progression_enabled INTEGER NOT NULL
+                        CHECK (offline_progression_enabled IN (0, 1)),
+                    max_offline_hours INTEGER NOT NULL,
+                    calm_mode INTEGER NOT NULL CHECK (calm_mode IN (0, 1)),
+                    notifications_enabled INTEGER NOT NULL
+                        CHECK (notifications_enabled IN (0, 1)),
+                    sound_enabled INTEGER NOT NULL CHECK (sound_enabled IN (0, 1)),
+                    breaks_enabled INTEGER NOT NULL CHECK (breaks_enabled IN (0, 1))
+                );
+                ",
+            )
+            .expect("v1 schema");
+
+        for version in 2..=schema_version {
+            let migration = match version {
+                2 => {
+                    "ALTER TABLE save_generations
+                     ADD COLUMN saved_at_ms INTEGER NOT NULL DEFAULT 0;"
+                }
+                3 => {
+                    "ALTER TABLE save_generations ADD COLUMN focus_session_json TEXT;
+                     ALTER TABLE app_settings ADD COLUMN active_slot_id TEXT;"
+                }
+                4 => {
+                    "ALTER TABLE focus_sessions
+                         ADD COLUMN recap_entries_json TEXT NOT NULL DEFAULT '[]';
+                     ALTER TABLE app_settings ADD COLUMN reduced_effects INTEGER NOT NULL DEFAULT 0
+                         CHECK (reduced_effects IN (0, 1));"
+                }
+                5 => "ALTER TABLE focus_sessions ADD COLUMN review_json TEXT;",
+                6 => {
+                    "ALTER TABLE focus_sessions ADD COLUMN checkpoint_generation INTEGER;
+                     ALTER TABLE focus_sessions ADD COLUMN review_authority_json TEXT;
+                     ALTER TABLE focus_sessions ADD COLUMN review_authority_checksum TEXT;"
+                }
+                7 => {
+                    "ALTER TABLE app_settings ADD COLUMN audio_muted INTEGER NOT NULL DEFAULT 0
+                         CHECK (audio_muted IN (0, 1));
+                     ALTER TABLE app_settings ADD COLUMN ambience_enabled INTEGER NOT NULL DEFAULT 0
+                         CHECK (ambience_enabled IN (0, 1));
+                     ALTER TABLE app_settings
+                         ADD COLUMN ambience_volume_percent INTEGER NOT NULL DEFAULT 20;
+                     ALTER TABLE app_settings
+                         ADD COLUMN effects_volume_percent INTEGER NOT NULL DEFAULT 45;"
+                }
+                _ => unreachable!("bounded historical schema version"),
+            };
+            connection
+                .execute_batch(migration)
+                .unwrap_or_else(|error| panic!("v{version} schema: {error}"));
+            connection
+                .execute(
+                    "INSERT INTO schema_migrations (version, applied_marker) VALUES (?1, 1)",
+                    [version],
+                )
+                .unwrap_or_else(|error| panic!("v{version} marker: {error}"));
+        }
+
+        let legacy_snapshot = snapshot(&format!("legacy-v{schema_version}"));
+        let legacy_checksum = sha256_hex(&legacy_snapshot);
+        let session = historical_focus_session(schema_version);
+        let session_json = serde_json::to_string(&session).expect("historical session JSON");
+        connection
+            .execute(
+                "INSERT INTO save_slots (slot_id, name, head_generation)
+                 VALUES ('alpha', 'Alpha', NULL)",
+                [],
+            )
+            .expect("historical slot");
+        if schema_version >= 3 {
+            connection
+                .execute(
+                    "INSERT INTO save_generations
+                     (slot_id, generation, snapshot, checksum, saved_at_ms, focus_session_json)
+                     VALUES ('alpha', 1, ?1, ?2, ?3, ?4)",
+                    params![
+                        legacy_snapshot,
+                        legacy_checksum,
+                        1_000 + schema_version,
+                        session_json
+                    ],
+                )
+                .expect("historical generation with checkpoint");
+        } else {
+            connection
+                .execute(
+                    "INSERT INTO save_generations
+                     (slot_id, generation, snapshot, checksum, saved_at_ms)
+                     VALUES ('alpha', 1, ?1, ?2, ?3)",
+                    params![legacy_snapshot, legacy_checksum, 1_000 + schema_version],
+                )
+                .expect("historical generation");
+        }
+        connection
+            .execute(
+                "UPDATE save_slots SET head_generation = 1 WHERE slot_id = 'alpha'",
+                [],
+            )
+            .expect("historical head");
+        connection
+            .execute(
+                "INSERT INTO app_settings
+                 (singleton, focus_to_sim_ratio, default_focus_minutes, default_break_minutes,
+                  volume_percent, offline_progression_enabled, max_offline_hours, calm_mode,
+                  notifications_enabled, sound_enabled, breaks_enabled)
+                 VALUES (1, 25, 50, 10, 60, 0, 12, 1, 0, 0, 1)",
+                [],
+            )
+            .expect("historical settings");
+        if schema_version >= 3 {
+            connection
+                .execute(
+                    "UPDATE app_settings SET active_slot_id = 'alpha' WHERE singleton = 1",
+                    [],
+                )
+                .expect("historical active slot");
+        }
+        if schema_version >= 4 {
+            connection
+                .execute(
+                    "UPDATE app_settings SET reduced_effects = 1 WHERE singleton = 1",
+                    [],
+                )
+                .expect("historical reduced effects");
+        }
+        if schema_version >= 7 {
+            connection
+                .execute(
+                    "UPDATE app_settings
+                     SET audio_muted = 1, ambience_enabled = 1,
+                         ambience_volume_percent = 33, effects_volume_percent = 44
+                     WHERE singleton = 1",
+                    [],
+                )
+                .expect("historical audio settings");
+        }
+
+        connection
+            .execute(
+                "INSERT INTO focus_sessions
+                 (session_id, slot_id, started_at_ms, ended_at_ms, planned_focus_ms, focused_ms,
+                  planned_break_ms, break_ms, issued_simulation_ticks, status, state_json,
+                  recap_event_ids_json)
+                 VALUES ('session-1', 'alpha', 100, 220, 100, 100, 20, 20, 1,
+                         'completed', ?1, '[7]')",
+                [completed_focus_state_json()],
+            )
+            .expect("historical focus session");
+        if schema_version >= 4 {
+            connection
+                .execute(
+                    "UPDATE focus_sessions SET recap_entries_json = ?1
+                     WHERE session_id = 'session-1'",
+                    [serde_json::to_string(&session.recap_entries)
+                        .expect("historical recap entries")],
+                )
+                .expect("historical recap entries");
+        }
+        if schema_version >= 5 {
+            connection
+                .execute(
+                    "UPDATE focus_sessions SET review_json = ?1 WHERE session_id = 'session-1'",
+                    [serde_json::to_string(&session.review).expect("historical review")],
+                )
+                .expect("historical review");
+        }
+        if schema_version >= 7 {
+            connection
+                .execute(
+                    "UPDATE focus_sessions
+                     SET checkpoint_generation = 1, review_authority_json = ?1,
+                         review_authority_checksum = ?2
+                     WHERE session_id = 'session-1'",
+                    params![session_json, sha256_hex(&session_json)],
+                )
+                .expect("historical review authority");
+        }
+    }
+
+    fn schema_fingerprint(database: &PersistenceDatabase) -> Vec<(String, String)> {
+        database
+            .connection
+            .prepare(
+                "SELECT type || ':' || name, COALESCE(sql, '')
+                 FROM sqlite_schema
+                 WHERE name NOT LIKE 'sqlite_%'
+                 ORDER BY type, name",
+            )
+            .expect("schema statement")
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+            .expect("schema query")
+            .collect::<std::result::Result<_, _>>()
+            .expect("schema fingerprint")
+    }
+
+    #[test]
+    fn historical_schema_matrix_migrates_idempotently_and_preserves_recovery_contracts() {
+        for schema_version in [2, 4, 5, 7] {
+            let file = HistoricalDatabaseFile::create(schema_version);
+            let mut database = PersistenceDatabase::open(file.path())
+                .unwrap_or_else(|error| panic!("open v{schema_version}: {error}"));
+            let expected_session = historical_focus_session(schema_version);
+            let expected_settings = AppSettings {
+                focus_to_sim_ratio: 25,
+                default_focus_minutes: 50,
+                default_break_minutes: 10,
+                volume_percent: 60,
+                audio_muted: schema_version >= 7,
+                ambience_enabled: schema_version >= 7,
+                ambience_volume_percent: if schema_version >= 7 { 33 } else { 20 },
+                effects_volume_percent: if schema_version >= 7 { 44 } else { 45 },
+                offline_progression_enabled: false,
+                max_offline_hours: 12,
+                calm_mode: true,
+                reduced_effects: schema_version >= 4,
+                notifications_enabled: false,
+                sound_enabled: false,
+                breaks_enabled: true,
+                active_slot_id: (schema_version >= 3).then(|| "alpha".to_owned()),
+            };
+            let schema_after_first_migration = schema_fingerprint(&database);
+            let loaded_after_first_migration = database
+                .load_slot("alpha")
+                .expect("load migrated slot")
+                .expect("migrated slot");
+            let settings_after_first_migration =
+                database.load_settings().expect("migrated settings");
+            let focus_after_first_migration = database
+                .list_focus_session_records()
+                .expect("migrated focus history");
+
+            database
+                .migrate()
+                .unwrap_or_else(|error| panic!("repeat v{schema_version} migration: {error}"));
+            assert_eq!(schema_fingerprint(&database), schema_after_first_migration);
+            assert_eq!(
+                database.load_slot("alpha").expect("repeat load"),
+                Some(loaded_after_first_migration.clone())
+            );
+            assert_eq!(
+                database.load_settings().expect("repeat settings"),
+                settings_after_first_migration
+            );
+            assert_eq!(
+                database
+                    .list_focus_session_records()
+                    .expect("repeat focus history"),
+                focus_after_first_migration
+            );
+            let versions: Vec<i64> = database
+                .connection
+                .prepare("SELECT version FROM schema_migrations ORDER BY version")
+                .expect("version statement")
+                .query_map([], |row| row.get(0))
+                .expect("version query")
+                .collect::<std::result::Result<_, _>>()
+                .expect("schema versions");
+            assert_eq!(versions, (1..=SCHEMA_VERSION).collect::<Vec<_>>());
+            let foreign_key_failures: i64 = database
+                .connection
+                .query_row("SELECT COUNT(*) FROM pragma_foreign_key_check", [], |row| {
+                    row.get(0)
+                })
+                .expect("foreign-key check");
+            assert_eq!(foreign_key_failures, 0);
+
+            assert_eq!(
+                loaded_after_first_migration.snapshot,
+                snapshot(&format!("legacy-v{schema_version}"))
+            );
+            assert_eq!(loaded_after_first_migration.recovered_generation, 1);
+            assert_eq!(loaded_after_first_migration.head_generation, Some(1));
+            assert!(!loaded_after_first_migration.recovered_from_corruption);
+            assert_eq!(
+                loaded_after_first_migration.checksum,
+                sha256_hex(&loaded_after_first_migration.snapshot)
+            );
+            assert_eq!(
+                loaded_after_first_migration.saved_at_ms,
+                1_000 + schema_version
+            );
+            assert_eq!(
+                loaded_after_first_migration.focus_session,
+                (schema_version >= 3).then(|| expected_session.clone())
+            );
+            assert_eq!(settings_after_first_migration, expected_settings);
+            assert_eq!(focus_after_first_migration.len(), 1);
+            assert_eq!(focus_after_first_migration[0].session, expected_session);
+            assert_eq!(
+                focus_after_first_migration[0].checkpoint_generation,
+                (schema_version >= 7).then_some(1)
+            );
+            assert_eq!(
+                focus_after_first_migration[0].authority_session,
+                (schema_version >= 7).then(|| expected_session.clone())
+            );
+            let legacy_semantic_marker: i64 = database
+                .connection
+                .query_row(
+                    "SELECT semantically_verified FROM save_generations
+                     WHERE slot_id = 'alpha' AND generation = 1",
+                    [],
+                    |row| row.get(0),
+                )
+                .expect("legacy semantic marker");
+            assert_eq!(legacy_semantic_marker, 0);
+            assert!(
+                database
+                    .confirm_semantically_valid_generation("alpha", 1, &"0".repeat(64),)
+                    .is_err()
+            );
+            confirm_and_prune(&mut database, &loaded_after_first_migration);
+
+            let current_snapshot = snapshot(&format!("current-v{schema_version}"));
+            let committed = database
+                .commit_slot("alpha", "Alpha", &current_snapshot)
+                .expect("post-migration commit");
+            assert_eq!(committed.recovered_generation, 2);
+            assert_eq!(committed.head_generation, Some(2));
+            assert_eq!(committed.checksum, sha256_hex(&current_snapshot));
+            let exported: SaveExportEnvelope = serde_json::from_str(
+                &database
+                    .export_generation("alpha", 2)
+                    .expect("post-migration export"),
+            )
+            .expect("export envelope");
+            assert_eq!(exported.slot_id, "alpha");
+            assert_eq!(exported.name, "Alpha");
+            assert_eq!(exported.snapshot, current_snapshot);
+            assert_eq!(exported.checksum, committed.checksum);
+            confirm_and_prune(&mut database, &committed);
+
+            database
+                .connection
+                .execute(
+                    "UPDATE save_generations SET checksum = ?1
+                     WHERE slot_id = 'alpha' AND generation = 2",
+                    ["0".repeat(64)],
+                )
+                .expect("corrupt migrated head");
+            let recovered = database
+                .load_slot("alpha")
+                .expect("recover migrated slot")
+                .expect("recovered migrated slot");
+            assert_eq!(recovered.recovered_generation, 1);
+            assert!(recovered.recovered_from_corruption);
+            assert_eq!(recovered.snapshot, loaded_after_first_migration.snapshot);
+
+            for generation in 3..=5 {
+                let replacement = snapshot(&format!("replacement-v{schema_version}-{generation}"));
+                let loaded = database
+                    .commit_slot("alpha", "Alpha", &replacement)
+                    .expect("replacement commit");
+                assert_eq!(loaded.recovered_generation, generation);
+                confirm_and_prune(&mut database, &loaded);
+                if generation < 5 {
+                    let historical_candidate_count: i64 = database
+                        .connection
+                        .query_row(
+                            "SELECT COUNT(*) FROM save_generations
+                             WHERE slot_id = 'alpha' AND generation = 1",
+                            [],
+                            |row| row.get(0),
+                        )
+                        .expect("historical recovery candidate");
+                    assert_eq!(historical_candidate_count, 1);
+                }
+            }
+            let retained: Vec<(i64, i64)> = database
+                .connection
+                .prepare(
+                    "SELECT generation, semantically_verified FROM save_generations
+                     WHERE slot_id = 'alpha' ORDER BY generation",
+                )
+                .expect("retained statement")
+                .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+                .expect("retained query")
+                .collect::<std::result::Result<_, _>>()
+                .expect("retained generations");
+            assert_eq!(retained, vec![(3, 1), (4, 1), (5, 1)]);
+            database
+                .connection
+                .execute(
+                    "UPDATE save_generations SET checksum = ?1
+                     WHERE slot_id = 'alpha' AND generation = 5",
+                    ["f".repeat(64)],
+                )
+                .expect("corrupt retained head");
+            let retained_recovery = database
+                .load_slot("alpha")
+                .expect("retained recovery")
+                .expect("retained recovery candidate");
+            assert_eq!(retained_recovery.recovered_generation, 4);
+            assert!(retained_recovery.recovered_from_corruption);
+            assert_eq!(
+                retained_recovery.checksum,
+                sha256_hex(&retained_recovery.snapshot)
+            );
+            let retained_export: SaveExportEnvelope = serde_json::from_str(
+                &database
+                    .export_generation("alpha", 4)
+                    .expect("retained export"),
+            )
+            .expect("retained export envelope");
+            assert_eq!(retained_export.snapshot, retained_recovery.snapshot);
+            assert_eq!(retained_export.checksum, retained_recovery.checksum);
+        }
+    }
+
     #[test]
     fn v6_to_v7_migration_defaults_audio_settings_and_enforces_boolean_columns() {
         let connection = Connection::open_in_memory().expect("connection");

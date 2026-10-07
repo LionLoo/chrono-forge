@@ -651,6 +651,100 @@ describe('persistence adapter', () => {
     expect(serializeWorldSnapshot(reloaded)).toBe(recoveredSnapshot);
   });
 
+  it('keeps migrated fallback export and post-migration confirmation bound to exact generations', async () => {
+    const malformedSnapshot = '{"hello":"migrated-head"}';
+    const recoveredSnapshot = snapshot('one');
+    const recoveredChecksum = checksumOf(recoveredSnapshot);
+    const replacementSnapshot = snapshot('two');
+    const replacementChecksum = checksumOf(replacementSnapshot);
+    const recoveredExport = JSON.stringify({
+      format: 'chrono-forge-save-export',
+      version: 1,
+      slotId: 'alpha',
+      name: 'Alpha',
+      snapshot: recoveredSnapshot,
+      checksum: recoveredChecksum,
+    });
+    const calls: { command: string; arguments_: Readonly<Record<string, unknown>> }[] = [];
+    const gateway = createTauriPersistenceGateway(async (command, arguments_ = {}) => {
+      await Promise.resolve();
+      calls.push({ command, arguments_ });
+      switch (command) {
+        case 'load_save_slot_candidates':
+          return [
+            {
+              slotId: 'alpha',
+              name: 'Alpha',
+              headGeneration: 7,
+              recoveredGeneration: 7,
+              recoveredFromCorruption: false,
+              savedAtMs: 7_000,
+              focusSession: null,
+              snapshot: malformedSnapshot,
+              checksum: checksumOf(malformedSnapshot),
+            },
+          ] as never;
+        case 'load_save_slot_fallback_candidates':
+          return [
+            {
+              slotId: 'alpha',
+              name: 'Alpha',
+              headGeneration: 7,
+              recoveredGeneration: 4,
+              recoveredFromCorruption: true,
+              savedAtMs: 4_000,
+              focusSession: null,
+              snapshot: recoveredSnapshot,
+              checksum: recoveredChecksum,
+            },
+          ] as never;
+        case 'export_save_generation':
+          return recoveredExport as never;
+        case 'commit_save_slot':
+          return {
+            slotId: 'alpha',
+            name: 'Alpha',
+            headGeneration: 8,
+            savedAtMs: 8_000,
+            checksum: replacementChecksum,
+          } as never;
+        case 'confirm_semantically_valid_save_generation':
+          return undefined as never;
+        default:
+          throw new Error(`unexpected command ${command}`);
+      }
+    });
+
+    await expect(gateway.exportSaveSlot('alpha')).resolves.toBe(recoveredExport);
+    await expect(
+      gateway.commitSaveSlot('alpha', 'Alpha', replacementSnapshot),
+    ).resolves.toMatchObject({
+      headGeneration: 8,
+      recoveredGeneration: 8,
+      snapshot: replacementSnapshot,
+      checksum: replacementChecksum,
+    });
+    expect(calls).toEqual([
+      { command: 'load_save_slot_candidates', arguments_: { slotId: 'alpha' } },
+      {
+        command: 'load_save_slot_fallback_candidates',
+        arguments_: { beforeGeneration: 7, slotId: 'alpha' },
+      },
+      {
+        command: 'export_save_generation',
+        arguments_: { generation: 4, slotId: 'alpha' },
+      },
+      {
+        command: 'commit_save_slot',
+        arguments_: { name: 'Alpha', slotId: 'alpha', snapshot: replacementSnapshot },
+      },
+      {
+        command: 'confirm_semantically_valid_save_generation',
+        arguments_: { checksum: replacementChecksum, generation: 8, slotId: 'alpha' },
+      },
+    ]);
+  });
+
   it('recovers the oldest canonical generation through checksum-valid semantic failures', async () => {
     const malformedTwo = '{"hello":"world-2"}';
     const malformedThree = '{"hello":"world-3"}';
