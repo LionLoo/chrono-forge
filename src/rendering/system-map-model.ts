@@ -1,4 +1,5 @@
 import type {
+  AlienCivilizationProjection,
   SpaceBodyProjection,
   SpaceCargoEndpointProjection,
   SpaceProjection,
@@ -33,17 +34,25 @@ export function sameSystemSelection(left: SystemSelection | null, right: SystemS
   return left?.kind === right.kind && left.id === right.id;
 }
 
+export function contactedSystemAliens(
+  space: SpaceProjection,
+): readonly AlienCivilizationProjection[] {
+  return space.aliens.filter((alien) => alien.discoveredTick !== null);
+}
+
 export function systemEndpointBodyId(
   endpoint: SpaceCargoEndpointProjection,
   space: SpaceProjection,
 ): number | null {
   if (endpoint.kind === 'settlement') {
-    return space.bodies.find((body) => body.kind === 'home')?.id ?? 1;
+    return space.bodies.find((body) => body.kind === 'home')?.id ?? null;
   }
   if (endpoint.kind === 'colony') {
     return space.colonies.find((colony) => colony.id === endpoint.colonyId)?.bodyId ?? null;
   }
-  return space.aliens.find((alien) => alien.id === endpoint.alienId)?.homeBodyId ?? null;
+  return (
+    contactedSystemAliens(space).find((alien) => alien.id === endpoint.alienId)?.homeBodyId ?? null
+  );
 }
 
 /** Stable presentation layout derived only from ordered, already-visible Worker facts. */
@@ -92,7 +101,7 @@ export function systemSelectionOptions(
       label: `${systemLabel(communication.topic)} communication · ${communication.id}`,
       selection: { id: communication.id, kind: 'communication' } as const,
     })),
-    ...space.aliens.map((alien) => ({
+    ...contactedSystemAliens(space).map((alien) => ({
       label: `Contacted civilization · ${alien.id}`,
       selection: { id: alien.id, kind: 'alien' } as const,
     })),
@@ -201,7 +210,7 @@ export function systemSelectionDetail(
       ],
     };
   }
-  const alien = space.aliens.find((candidate) => candidate.id === selection.id);
+  const alien = contactedSystemAliens(space).find((candidate) => candidate.id === selection.id);
   if (alien === undefined) return null;
   const relation = space.relations.find((candidate) => candidate.alienId === alien.id);
   return {

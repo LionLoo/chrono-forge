@@ -193,4 +193,45 @@ describe('system map', () => {
     expect(screen.getByText(/2 known bodies/)).toBeVisible();
     expect(screen.getByText(/1 contacted civilizations/)).toBeVisible();
   });
+
+  it('omits uncontacted aliens and unplaced objects instead of inventing map positions', () => {
+    const incompleteProjection: SpaceProjection = Object.freeze({
+      ...space,
+      aliens: Object.freeze([
+        Object.freeze({ discoveredTick: null, homeBodyId: 2, id: 7, trait: 'curious' as const }),
+      ]),
+      bodies: Object.freeze([space.bodies[1]!]),
+      communications: Object.freeze([
+        Object.freeze({ ...space.communications[0]!, originBodyId: 99 }),
+      ]),
+      missions: Object.freeze([Object.freeze({ ...space.missions[0]!, originBodyId: 99 })]),
+      relations: Object.freeze([]),
+      spacecraft: Object.freeze([Object.freeze({ ...space.spacecraft[0]!, currentBodyId: 99 })]),
+    });
+
+    expect(
+      systemSelectionOptions(incompleteProjection).some(
+        (option) => option.selection.kind === 'alien',
+      ),
+    ).toBe(false);
+    expect(systemSelectionDetail(incompleteProjection, { id: 7, kind: 'alien' })).toBeNull();
+
+    render(
+      <SystemMap
+        camera={INITIAL_SYSTEM_CAMERA}
+        onCameraChange={vi.fn()}
+        onSelectionChange={vi.fn()}
+        selection={null}
+        space={incompleteProjection}
+      />,
+    );
+
+    expect(screen.getByRole('button', { name: 'Aster Haven, planet body' })).toBeVisible();
+    expect(screen.queryByRole('button', { name: /Contacted civilization 7/ })).toBeNull();
+    expect(screen.queryByRole('button', { name: 'Spacecraft 4, orbiting' })).toBeNull();
+    expect(screen.queryByRole('button', { name: 'colony mission 5, active' })).toBeNull();
+    expect(screen.queryByRole('button', { name: 'Cargo route 6, active' })).toBeNull();
+    expect(screen.queryByRole('button', { name: 'contact communication 10, pending' })).toBeNull();
+    expect(screen.getByText(/0 contacted civilizations/)).toBeVisible();
+  });
 });

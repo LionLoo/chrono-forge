@@ -155,4 +155,19 @@ describe('SpacePanel', () => {
     expect(screen.getByText(/No civilization has yet assembled the knowledge/)).toBeVisible();
     expect(screen.getByText('No alien civilization has been contacted.')).toBeVisible();
   });
+
+  it('fails closed if an uncontacted alien reaches the read-only projection', () => {
+    render(
+      <SpacePanel
+        space={{
+          ...space,
+          aliens: [{ id: 1, homeBodyId: 2, trait: 'curious', discoveredTick: null }],
+        }}
+      />,
+    );
+
+    expect(screen.getByText('Contacted civilizations').nextElementSibling).toHaveTextContent('0');
+    expect(screen.queryByRole('list', { name: 'Alien civilizations' })).not.toBeInTheDocument();
+    expect(screen.getByText('No alien civilization has been contacted.')).toBeVisible();
+  });
 });

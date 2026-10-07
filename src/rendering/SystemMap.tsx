@@ -3,6 +3,7 @@ import type { KeyboardEvent } from 'react';
 import type { SpaceProjection } from '../protocol';
 import { panCamera, zoomCamera, type WorldCamera } from './camera';
 import {
+  contactedSystemAliens,
   sameSystemSelection,
   systemBodyLayout,
   systemEndpointBodyId,
@@ -16,8 +17,8 @@ const SYSTEM_HEIGHT = 600;
 const SYSTEM_CENTER_X = SYSTEM_WIDTH / 2;
 const SYSTEM_CENTER_Y = SYSTEM_HEIGHT / 2;
 
-function bodyPoint(points: ReadonlyMap<number, SystemPoint>, bodyId: number): SystemPoint {
-  return points.get(bodyId) ?? { bodyId, x: 0, y: 0 };
+function bodyPoint(points: ReadonlyMap<number, SystemPoint>, bodyId: number): SystemPoint | null {
+  return points.get(bodyId) ?? null;
 }
 
 function activate(
@@ -46,7 +47,7 @@ export function SystemMap({
   const layout = systemBodyLayout(space.bodies);
   const points = new Map(layout.map((point) => [point.bodyId, point]));
   const bodyById = new Map(space.bodies.map((body) => [body.id, body]));
-  const homeBodyId = space.bodies.find((body) => body.kind === 'home')?.id ?? 1;
+  const contactedAliens = contactedSystemAliens(space);
   const route = (
     key: string,
     originBodyId: number | null,
@@ -58,6 +59,7 @@ export function SystemMap({
     if (originBodyId === null || destinationBodyId === null) return null;
     const origin = bodyPoint(points, originBodyId);
     const destination = bodyPoint(points, destinationBodyId);
+    if (origin === null || destination === null) return null;
     return (
       <g
         aria-label={routeLabel}
@@ -150,7 +152,7 @@ export function SystemMap({
             if (body === undefined) return null;
             const bodySelection: SystemSelection = { id: body.id, kind: 'body' };
             const colonies = space.colonies.filter((colony) => colony.bodyId === body.id);
-            const aliens = space.aliens.filter((alien) => alien.homeBodyId === body.id);
+            const aliens = contactedAliens.filter((alien) => alien.homeBodyId === body.id);
             return (
               <g key={`body-group-${body.id}`} transform={`translate(${point.x} ${point.y})`}>
                 <g
@@ -204,7 +206,8 @@ export function SystemMap({
             );
           })}
           {space.spacecraft.map((craft, index) => {
-            const point = bodyPoint(points, craft.currentBodyId || homeBodyId);
+            const point = bodyPoint(points, craft.currentBodyId);
+            if (point === null) return null;
             const craftSelection: SystemSelection = { id: craft.id, kind: 'spacecraft' };
             return (
               <g
@@ -227,7 +230,7 @@ export function SystemMap({
         {space.bodies.length} known {space.bodies.length === 1 ? 'body' : 'bodies'} ·{' '}
         {space.missions.filter((mission) => mission.status === 'active').length} active missions ·{' '}
         {space.colonies.filter((colony) => colony.status === 'active').length} active colonies ·{' '}
-        {space.aliens.length} contacted civilizations
+        {contactedAliens.length} contacted civilizations
       </p>
     </div>
   );

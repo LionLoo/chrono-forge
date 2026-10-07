@@ -147,6 +147,12 @@ describe('simulation worker runtime', () => {
     expect(ready.frame.tick).toBe(0);
     expect(ready.frame.biome.length).toBe(ready.frame.width * ready.frame.height);
     expect(ready.frame.agentIds).toStrictEqual(new Uint32Array([1, 2, 3, 4, 5, 6]));
+    expect(
+      createInitialWorld([10, 20, 30, 40]).space.aliens.some(
+        (alien) => alien.discoveredTick === null,
+      ),
+    ).toBe(true);
+    expect(ready.frame.space.aliens).toStrictEqual([]);
     expect(responses.slice(0, 2).map((response) => response.type)).toStrictEqual([
       'ready',
       'eventBatch',

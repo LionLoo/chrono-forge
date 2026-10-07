@@ -25,6 +25,7 @@ export function SpacePanel({ space }: { readonly space: SpaceProjection }) {
     (communication) => communication.status === 'pending',
   );
   const activeColonies = space.colonies.filter((colony) => colony.status === 'active');
+  const contactedAliens = space.aliens.filter((alien) => alien.discoveredTick !== null);
 
   return (
     <section className="space-panel" aria-labelledby="space-title">
@@ -61,7 +62,7 @@ export function SpacePanel({ space }: { readonly space: SpaceProjection }) {
           </div>
           <div>
             <dt>Contacted civilizations</dt>
-            <dd>{space.aliens.length}</dd>
+            <dd>{contactedAliens.length}</dd>
           </div>
         </dl>
         {space.programs.length === 0 ? (
@@ -132,11 +133,11 @@ export function SpacePanel({ space }: { readonly space: SpaceProjection }) {
 
       <section aria-labelledby="space-contact-title">
         <h3 id="space-contact-title">Contact and delayed exchange</h3>
-        {space.aliens.length === 0 ? (
+        {contactedAliens.length === 0 ? (
           <p>No alien civilization has been contacted.</p>
         ) : (
           <ul className="space-list" aria-label="Alien civilizations">
-            {space.aliens.map((alien) => {
+            {contactedAliens.map((alien) => {
               const relation = space.relations.find((entry) => entry.alienId === alien.id);
               return (
                 <li key={alien.id}>
