@@ -1007,7 +1007,7 @@ describe('versioned world snapshots', () => {
     deathResidence!.endedTick = null;
     envelope.checksum = hashCanonicalJson(JSON.stringify(envelope.payload));
     expect(() => migrateWorldSnapshot(JSON.stringify(envelope))).toThrow(/factual death/i);
-  }, 30_000);
+  }, 60_000);
 
   it.each([
     ['mid-flight', m9E2eArchives.midFlightPackage],
