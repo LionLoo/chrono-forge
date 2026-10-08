@@ -30,6 +30,10 @@ const MAX_JSON_SAFE_INTEGER: u64 = 9_007_199_254_740_991;
 const MAX_FOCUS_STATE_BYTES: usize = 64 * 1024;
 const RETAINED_GENERATIONS: i64 = 3;
 const SAVE_CANDIDATE_SCAN_ROWS_PER_PAGE: i64 = 1;
+#[cfg(feature = "desktop-e2e")]
+const E2E_INTERRUPTED_CHECKPOINT_SLOT: &str = "ipc-interrupted-checkpoint";
+#[cfg(feature = "desktop-e2e")]
+const E2E_CORRUPT_RECOVERY_SLOT: &str = "ipc-corrupt-recovery";
 
 #[derive(Debug)]
 pub struct PersistenceError(String);
@@ -806,6 +810,9 @@ impl PersistenceDatabase {
         focus_session: Option<&FocusSession>,
         fail_before_head_update: bool,
     ) -> Result<LoadedSave> {
+        #[cfg(feature = "desktop-e2e")]
+        let fail_before_head_update =
+            fail_before_head_update || slot_id == E2E_INTERRUPTED_CHECKPOINT_SLOT;
         validate_identifier(slot_id, "slot ID")?;
         validate_name(name)?;
         if let Some(session) = focus_session {
@@ -888,6 +895,14 @@ impl PersistenceDatabase {
             return Err(PersistenceError::new(
                 "injected commit failure before head update",
             ));
+        }
+        #[cfg(feature = "desktop-e2e")]
+        if slot_id == E2E_CORRUPT_RECOVERY_SLOT && next_generation == 2 {
+            transaction.execute(
+                "UPDATE save_generations SET checksum = ?3
+                 WHERE slot_id = ?1 AND generation = ?2",
+                params![slot_id, next_generation, "0".repeat(64)],
+            )?;
         }
         transaction.execute(
             "UPDATE save_slots SET head_generation = ?2 WHERE slot_id = ?1",

@@ -3,6 +3,8 @@ import path from 'node:path';
 
 import { createNativeE2eCommandTracker } from './scripts/run-native-e2e-ci.mjs';
 
+process.env.CHRONO_FORGE_PROFILE ??= `wdio-${process.pid}-${Date.now()}`;
+
 const rootDirectory = path.dirname(fileURLToPath(import.meta.url));
 const appBinaryPath = path.join(
   rootDirectory,
@@ -18,6 +20,8 @@ export const config = {
   specs: [
     './tests/e2e-desktop/focus-persistence.phase-1.e2e.spec.mjs',
     './tests/e2e-desktop/focus-persistence.phase-2.e2e.spec.mjs',
+    './tests/e2e-desktop/focus-persistence.phase-3.e2e.spec.mjs',
+    './tests/e2e-desktop/focus-persistence.phase-4.e2e.spec.mjs',
   ],
   maxInstances: 1,
   logLevel: 'warn',

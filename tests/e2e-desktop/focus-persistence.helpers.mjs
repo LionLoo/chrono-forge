@@ -117,7 +117,7 @@ export async function installActiveM9Archive(savePackage) {
 export function expectM10Migration(actualSnapshot, legacySnapshot) {
   const actual = JSON.parse(actualSnapshot);
   const legacy = JSON.parse(legacySnapshot);
-  expect(actual).toMatchObject({ contentVersion: 13, engineVersion: 13, formatVersion: 13 });
+  expect(actual).toMatchObject({ contentVersion: 14, engineVersion: 14, formatVersion: 14 });
   const withoutSummary = (event) => {
     const copy = { ...event };
     delete copy.summary;

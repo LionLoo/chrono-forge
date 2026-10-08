@@ -36,6 +36,16 @@ describe('native focus persistence phase 1', () => {
   it('validates the initial native UI and persists a paused ten-second focus session through SQLite', async function () {
     await $('#focus-title').waitForDisplayed();
     await $('span=SQLite archive').waitForDisplayed();
+    const initialArchive = await executeTauri(async ({ core }) => ({
+      history: await core.invoke('list_focus_sessions'),
+      settings: await core.invoke('load_settings'),
+      slots: await core.invoke('list_save_slots'),
+    }));
+    expect(initialArchive.history).toEqual([]);
+    expect(initialArchive.settings).toMatchObject({ activeSlotId: 'primary' });
+    expect(initialArchive.slots).toEqual([
+      { headGeneration: 1, name: 'Founding world', slotId: 'primary' },
+    ]);
     for (const scale of [100, 150, 200]) {
       const layout = await browser.execute((percent) => {
         document.documentElement.style.fontSize = `${percent}%`;
