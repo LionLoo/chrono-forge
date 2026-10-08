@@ -390,6 +390,57 @@ interface InMemorySlot {
   readonly generations: InMemoryGeneration[];
 }
 
+function stableComparisonJson(value: unknown): string {
+  if (Array.isArray(value)) {
+    return `[${value.map((entry) => stableComparisonJson(entry)).join(',')}]`;
+  }
+  if (value !== null && typeof value === 'object') {
+    const record = value as Record<string, unknown>;
+    return `{${Object.keys(record)
+      .sort()
+      .map((key) => `${JSON.stringify(key)}:${stableComparisonJson(record[key])}`)
+      .join(',')}}`;
+  }
+  const serialized = JSON.stringify(value);
+  if (serialized === undefined) throw new TypeError('focus session value is not JSON-safe');
+  return serialized;
+}
+
+function validateFocusSessionUpdate(previous: FocusSession, next: FocusSession): void {
+  const immutableIdentityChanged =
+    previous.slotId !== next.slotId ||
+    previous.startedAtMs !== next.startedAtMs ||
+    previous.plannedFocusMs !== next.plannedFocusMs ||
+    previous.plannedBreakMs !== next.plannedBreakMs;
+  const accountingRegressed =
+    next.focusedMs < previous.focusedMs ||
+    next.breakMs < previous.breakMs ||
+    next.issuedSimulationTicks < previous.issuedSimulationTicks;
+  const previousTerminal = previous.status === 'completed' || previous.status === 'cancelled';
+  const previousReview =
+    previous.review === undefined || previous.review === null
+      ? null
+      : validateFocusSessionReview(previous.review);
+  const nextReview =
+    next.review === undefined || next.review === null
+      ? null
+      : validateFocusSessionReview(next.review);
+  const terminalChanged =
+    previousTerminal &&
+    (previous.status !== next.status ||
+      previous.endedAtMs !== next.endedAtMs ||
+      previous.focusedMs !== next.focusedMs ||
+      previous.breakMs !== next.breakMs ||
+      previous.issuedSimulationTicks !== next.issuedSimulationTicks ||
+      previous.stateJson !== next.stateJson ||
+      stableComparisonJson(previous.recapEventIds) !== stableComparisonJson(next.recapEventIds) ||
+      stableComparisonJson(previous.recapEntries) !== stableComparisonJson(next.recapEntries) ||
+      stableComparisonJson(previousReview) !== stableComparisonJson(nextReview));
+  if (immutableIdentityChanged || accountingRegressed || terminalChanged) {
+    throw new Error('focus session update is stale or changes immutable identity');
+  }
+}
+
 /**
  * Process-local deterministic substitute for browser previews and tests. It is
  * deliberately not durable storage and must never be presented as a native save.
@@ -464,6 +515,8 @@ export function createInMemoryPersistenceGateway(
       if (workerAuthority !== undefined) {
         validateWorkerFocusCheckpoint(slotId, focusSession, sourceEventIds, workerAuthority);
       }
+      const previous = sessions.get(focusSession.sessionId);
+      if (previous !== undefined) validateFocusSessionUpdate(previous, focusSession);
     } else if (workerAuthority !== undefined) {
       throw new TypeError('Worker checkpoint authority requires a focus session');
     }
@@ -584,6 +637,8 @@ export function createInMemoryPersistenceGateway(
         }
         validateRecapCopiesAgainstSnapshot(session, savedEvents);
       }
+      const previous = sessions.get(session.sessionId);
+      if (previous !== undefined) validateFocusSessionUpdate(previous, session);
       sessions.set(session.sessionId, cloneFocusSession(session));
     },
     async listFocusSessions(sourceSave) {

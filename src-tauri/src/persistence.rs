@@ -233,7 +233,50 @@ pub enum FocusSessionStatus {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "kebab-case")]
+enum FocusPhase {
+    Idle,
+    FocusRunning,
+    FocusPaused,
+    FocusCompleted,
+    FocusCancelled,
+    BreakRunning,
+    BreakPaused,
+    Finished,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+enum FocusOutcome {
+    Completed,
+    Cancelled,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct FocusState {
+    version: u32,
+    phase: FocusPhase,
+    focus_duration_ms: Option<u64>,
+    break_duration_ms: Option<u64>,
+    simulation_ticks_per_focus_second: Option<u64>,
+    accumulated_focus_ms: u64,
+    accumulated_break_ms: u64,
+    total_issued_simulation_ticks: u64,
+    simulation_tick_remainder: u64,
+    started_at_epoch_ms: Option<u64>,
+    focus_started_at_epoch_ms: Option<u64>,
+    focus_ended_at_epoch_ms: Option<u64>,
+    break_started_at_epoch_ms: Option<u64>,
+    break_ended_at_epoch_ms: Option<u64>,
+    ended_at_epoch_ms: Option<u64>,
+    active_segment_started_at_epoch_ms: Option<u64>,
+    last_observed_epoch_ms: Option<u64>,
+    outcome: Option<FocusOutcome>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct AppSettings {
     pub focus_to_sim_ratio: u32,
     pub default_focus_minutes: u32,
@@ -1294,6 +1337,7 @@ fn upsert_focus_session(
     session: &FocusSession,
     authority: Option<(i64, &str)>,
 ) -> Result<()> {
+    validate_focus_session_update(transaction, session)?;
     let event_ids = serde_json::to_string(&session.recap_event_ids)?;
     let entries = serde_json::to_string(&session.recap_entries)?;
     let review = session
@@ -1358,6 +1402,121 @@ fn upsert_focus_session(
             authority_checksum,
         ],
     )?;
+    Ok(())
+}
+
+struct StoredFocusSessionProgress {
+    slot_id: Option<String>,
+    started_at_ms: i64,
+    ended_at_ms: Option<i64>,
+    planned_focus_ms: i64,
+    focused_ms: i64,
+    planned_break_ms: i64,
+    break_ms: i64,
+    issued_simulation_ticks: i64,
+    status: FocusSessionStatus,
+    state_json: String,
+    recap_event_ids_json: String,
+    recap_entries_json: String,
+    review_json: Option<String>,
+}
+
+fn validate_focus_session_update(
+    transaction: &rusqlite::Transaction<'_>,
+    session: &FocusSession,
+) -> Result<()> {
+    let prior = transaction
+        .query_row(
+            "SELECT slot_id, started_at_ms, ended_at_ms, planned_focus_ms, focused_ms,
+                    planned_break_ms, break_ms, issued_simulation_ticks, status, state_json,
+                    recap_event_ids_json, recap_entries_json, review_json
+             FROM focus_sessions WHERE session_id = ?1",
+            [&session.session_id],
+            |row| {
+                Ok((
+                    row.get::<_, Option<String>>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, Option<i64>>(2)?,
+                    row.get::<_, i64>(3)?,
+                    row.get::<_, i64>(4)?,
+                    row.get::<_, i64>(5)?,
+                    row.get::<_, i64>(6)?,
+                    row.get::<_, i64>(7)?,
+                    row.get::<_, String>(8)?,
+                    row.get::<_, String>(9)?,
+                    row.get::<_, String>(10)?,
+                    row.get::<_, String>(11)?,
+                    row.get::<_, Option<String>>(12)?,
+                ))
+            },
+        )
+        .optional()?;
+    let Some((
+        slot_id,
+        started_at_ms,
+        ended_at_ms,
+        planned_focus_ms,
+        focused_ms,
+        planned_break_ms,
+        break_ms,
+        issued_simulation_ticks,
+        status,
+        state_json,
+        recap_event_ids_json,
+        recap_entries_json,
+        review_json,
+    )) = prior
+    else {
+        return Ok(());
+    };
+    let prior = StoredFocusSessionProgress {
+        slot_id,
+        started_at_ms,
+        ended_at_ms,
+        planned_focus_ms,
+        focused_ms,
+        planned_break_ms,
+        break_ms,
+        issued_simulation_ticks,
+        status: focus_status_from_db(&status)?,
+        state_json,
+        recap_event_ids_json,
+        recap_entries_json,
+        review_json,
+    };
+    let immutable_identity_changed = prior.slot_id != session.slot_id
+        || prior.started_at_ms != session.started_at_ms
+        || prior.planned_focus_ms != session.planned_focus_ms
+        || prior.planned_break_ms != session.planned_break_ms;
+    let accounting_regressed = session.focused_ms < prior.focused_ms
+        || session.break_ms < prior.break_ms
+        || session.issued_simulation_ticks < prior.issued_simulation_ticks;
+    let prior_terminal = matches!(
+        prior.status,
+        FocusSessionStatus::Completed | FocusSessionStatus::Cancelled
+    );
+    let recap_event_ids_json = serde_json::to_string(&session.recap_event_ids)?;
+    let recap_entries_json = serde_json::to_string(&session.recap_entries)?;
+    let review_json = session
+        .review
+        .as_ref()
+        .map(serde_json::to_string)
+        .transpose()?;
+    let terminal_changed = prior_terminal
+        && (prior.status != session.status
+            || prior.ended_at_ms != session.ended_at_ms
+            || prior.focused_ms != session.focused_ms
+            || prior.break_ms != session.break_ms
+            || prior.issued_simulation_ticks != session.issued_simulation_ticks
+            || prior.state_json != session.state_json
+            || prior.recap_event_ids_json != recap_event_ids_json
+            || prior.recap_entries_json != recap_entries_json
+            || prior.review_json != review_json);
+    if immutable_identity_changed || accounting_regressed || terminal_changed {
+        return Err(PersistenceError::new(
+            "focus session update is stale or changes immutable identity",
+        ));
+    }
     Ok(())
 }
 
@@ -1659,55 +1818,266 @@ fn validate_recap_entries(session: &FocusSession) -> Result<()> {
 }
 
 fn validate_focus_state_summary(session: &FocusSession) -> Result<()> {
-    let state: serde_json::Value = serde_json::from_str(&session.state_json)?;
-    let object = state
-        .as_object()
-        .ok_or_else(|| PersistenceError::new("focus state must be an object"))?;
-    let phase = object
-        .get("phase")
-        .and_then(serde_json::Value::as_str)
-        .ok_or_else(|| PersistenceError::new("focus state phase is missing"))?;
-    let expected_status = match phase {
-        "focus-running" | "break-running" => FocusSessionStatus::Active,
-        "focus-paused" | "break-paused" => FocusSessionStatus::Paused,
-        "focus-completed" | "finished" => FocusSessionStatus::Completed,
-        "focus-cancelled" => FocusSessionStatus::Cancelled,
-        _ => {
+    let state: FocusState = serde_json::from_str(&session.state_json).map_err(|_| {
+        PersistenceError::new("focus state must contain exactly the supported fields")
+    })?;
+    validate_focus_state(&state)?;
+    if serde_json::to_string(&state)? != session.state_json {
+        return Err(PersistenceError::new(
+            "focus state must use canonical JSON serialization",
+        ));
+    }
+    let expected_status = match state.phase {
+        FocusPhase::FocusRunning | FocusPhase::BreakRunning => FocusSessionStatus::Active,
+        FocusPhase::FocusPaused | FocusPhase::BreakPaused => FocusSessionStatus::Paused,
+        FocusPhase::FocusCompleted | FocusPhase::Finished => FocusSessionStatus::Completed,
+        FocusPhase::FocusCancelled => FocusSessionStatus::Cancelled,
+        FocusPhase::Idle => {
             return Err(PersistenceError::new(
-                "focus state phase is not persistable",
+                "idle focus state cannot be persisted as a session",
             ));
         }
     };
-    let matches_summary = object.get("version").and_then(serde_json::Value::as_u64) == Some(1)
-        && expected_status == session.status
-        && json_i64(object, "startedAtEpochMs") == Some(session.started_at_ms)
-        && json_nullable_i64(object, "endedAtEpochMs") == Some(session.ended_at_ms)
-        && json_i64(object, "focusDurationMs") == Some(session.planned_focus_ms)
-        && json_i64(object, "accumulatedFocusMs") == Some(session.focused_ms)
-        && json_i64(object, "breakDurationMs") == Some(session.planned_break_ms)
-        && json_i64(object, "accumulatedBreakMs") == Some(session.break_ms)
-        && json_i64(object, "totalIssuedSimulationTicks") == Some(session.issued_simulation_ticks);
+    let matches_summary = expected_status == session.status
+        && i64_matches_u64(session.started_at_ms, state.started_at_epoch_ms)
+        && nullable_i64_matches_u64(session.ended_at_ms, state.ended_at_epoch_ms)
+        && i64_matches_u64(session.planned_focus_ms, state.focus_duration_ms)
+        && i64_matches_u64(session.focused_ms, Some(state.accumulated_focus_ms))
+        && i64_matches_u64(session.planned_break_ms, state.break_duration_ms)
+        && i64_matches_u64(session.break_ms, Some(state.accumulated_break_ms))
+        && i64_matches_u64(
+            session.issued_simulation_ticks,
+            Some(state.total_issued_simulation_ticks),
+        );
     if !matches_summary {
         return Err(PersistenceError::new(
-            "focus session summary does not match its serialized focus state",
+            "focus session summary does not match its canonical focus state",
         ));
     }
     Ok(())
 }
 
-fn json_i64(object: &serde_json::Map<String, serde_json::Value>, key: &str) -> Option<i64> {
-    object.get(key).and_then(serde_json::Value::as_i64)
+fn i64_matches_u64(value: i64, candidate: Option<u64>) -> bool {
+    u64::try_from(value).ok() == candidate
 }
 
-fn json_nullable_i64(
-    object: &serde_json::Map<String, serde_json::Value>,
-    key: &str,
-) -> Option<Option<i64>> {
-    match object.get(key) {
-        Some(serde_json::Value::Null) => Some(None),
-        Some(value) => value.as_i64().map(Some),
-        None => None,
+fn nullable_i64_matches_u64(value: Option<i64>, candidate: Option<u64>) -> bool {
+    match (value, candidate) {
+        (None, None) => true,
+        (Some(value), Some(candidate)) => u64::try_from(value).ok() == Some(candidate),
+        _ => false,
     }
+}
+
+fn validate_focus_state(state: &FocusState) -> Result<()> {
+    let numeric_values = [
+        state.focus_duration_ms,
+        state.break_duration_ms,
+        state.simulation_ticks_per_focus_second,
+        Some(state.accumulated_focus_ms),
+        Some(state.accumulated_break_ms),
+        Some(state.total_issued_simulation_ticks),
+        Some(state.simulation_tick_remainder),
+        state.started_at_epoch_ms,
+        state.focus_started_at_epoch_ms,
+        state.focus_ended_at_epoch_ms,
+        state.break_started_at_epoch_ms,
+        state.break_ended_at_epoch_ms,
+        state.ended_at_epoch_ms,
+        state.active_segment_started_at_epoch_ms,
+        state.last_observed_epoch_ms,
+    ];
+    if state.version != 1
+        || numeric_values
+            .into_iter()
+            .flatten()
+            .any(|value| value > MAX_JSON_SAFE_INTEGER)
+        || state.simulation_tick_remainder >= 1_000
+    {
+        return Err(PersistenceError::new(
+            "focus state contains an unsupported version or unsafe integer",
+        ));
+    }
+
+    if matches!(state.phase, FocusPhase::Idle) {
+        let idle = FocusState {
+            version: 1,
+            phase: FocusPhase::Idle,
+            focus_duration_ms: None,
+            break_duration_ms: None,
+            simulation_ticks_per_focus_second: None,
+            accumulated_focus_ms: 0,
+            accumulated_break_ms: 0,
+            total_issued_simulation_ticks: 0,
+            simulation_tick_remainder: 0,
+            started_at_epoch_ms: None,
+            focus_started_at_epoch_ms: None,
+            focus_ended_at_epoch_ms: None,
+            break_started_at_epoch_ms: None,
+            break_ended_at_epoch_ms: None,
+            ended_at_epoch_ms: None,
+            active_segment_started_at_epoch_ms: None,
+            last_observed_epoch_ms: None,
+            outcome: None,
+        };
+        if *state != idle {
+            return Err(PersistenceError::new(
+                "idle focus state must not contain session data",
+            ));
+        }
+        return Ok(());
+    }
+
+    let (
+        Some(focus_duration_ms),
+        Some(break_duration_ms),
+        Some(simulation_ticks_per_focus_second),
+        Some(started_at_epoch_ms),
+        Some(focus_started_at_epoch_ms),
+        Some(last_observed_epoch_ms),
+    ) = (
+        state.focus_duration_ms,
+        state.break_duration_ms,
+        state.simulation_ticks_per_focus_second,
+        state.started_at_epoch_ms,
+        state.focus_started_at_epoch_ms,
+        state.last_observed_epoch_ms,
+    )
+    else {
+        return Err(PersistenceError::new(
+            "configured focus state is missing required session data",
+        ));
+    };
+    if focus_duration_ms == 0
+        || simulation_ticks_per_focus_second == 0
+        || state.accumulated_focus_ms > focus_duration_ms
+        || state.accumulated_break_ms > break_duration_ms
+    {
+        return Err(PersistenceError::new(
+            "focus state duration or accepted progress is invalid",
+        ));
+    }
+    let issued_numerator =
+        u128::from(state.accumulated_focus_ms) * u128::from(simulation_ticks_per_focus_second);
+    let issued_ticks = issued_numerator / 1_000;
+    let issued_remainder = issued_numerator % 1_000;
+    if issued_ticks > u128::from(MAX_JSON_SAFE_INTEGER)
+        || issued_ticks != u128::from(state.total_issued_simulation_ticks)
+        || issued_remainder != u128::from(state.simulation_tick_remainder)
+    {
+        return Err(PersistenceError::new(
+            "focus simulation tick accounting is inconsistent",
+        ));
+    }
+
+    let running = matches!(
+        state.phase,
+        FocusPhase::FocusRunning | FocusPhase::BreakRunning
+    );
+    if running != state.active_segment_started_at_epoch_ms.is_some()
+        || focus_started_at_epoch_ms != started_at_epoch_ms
+        || last_observed_epoch_ms < started_at_epoch_ms
+        || state
+            .active_segment_started_at_epoch_ms
+            .is_some_and(|started| {
+                started < started_at_epoch_ms || started > last_observed_epoch_ms
+            })
+    {
+        return Err(PersistenceError::new(
+            "focus session timestamps are inconsistent",
+        ));
+    }
+    if state
+        .focus_ended_at_epoch_ms
+        .is_some_and(|ended| ended < focus_started_at_epoch_ms || ended > last_observed_epoch_ms)
+        || state
+            .break_started_at_epoch_ms
+            .is_some_and(|started| Some(started) != state.focus_ended_at_epoch_ms)
+        || state.break_ended_at_epoch_ms.is_some_and(|ended| {
+            state
+                .break_started_at_epoch_ms
+                .is_none_or(|started| ended < started)
+        })
+        || state
+            .ended_at_epoch_ms
+            .is_some_and(|ended| ended > last_observed_epoch_ms)
+    {
+        return Err(PersistenceError::new(
+            "focus completion timestamps are inconsistent",
+        ));
+    }
+
+    match state.phase {
+        FocusPhase::FocusRunning | FocusPhase::FocusPaused => {
+            if state.focus_ended_at_epoch_ms.is_some()
+                || state.break_started_at_epoch_ms.is_some()
+                || state.outcome.is_some()
+                || state.accumulated_focus_ms >= focus_duration_ms
+            {
+                return Err(PersistenceError::new(
+                    "incomplete focus phase contains completion history",
+                ));
+            }
+        }
+        FocusPhase::BreakRunning | FocusPhase::BreakPaused => {
+            if state.focus_ended_at_epoch_ms.is_none()
+                || state.break_started_at_epoch_ms.is_none()
+                || state.outcome.is_some()
+                || break_duration_ms == 0
+                || state.accumulated_break_ms >= break_duration_ms
+            {
+                return Err(PersistenceError::new(
+                    "break phase does not retain valid planned break time",
+                ));
+            }
+        }
+        FocusPhase::FocusCancelled => {
+            if state.outcome != Some(FocusOutcome::Cancelled)
+                || state.ended_at_epoch_ms.is_none()
+                || state.focus_ended_at_epoch_ms.is_none()
+                || state.break_started_at_epoch_ms.is_some()
+                || state.break_ended_at_epoch_ms.is_some()
+                || state.ended_at_epoch_ms != state.focus_ended_at_epoch_ms
+            {
+                return Err(PersistenceError::new(
+                    "cancelled focus state has invalid completion history",
+                ));
+            }
+        }
+        FocusPhase::FocusCompleted | FocusPhase::Finished => {
+            if state.outcome != Some(FocusOutcome::Completed)
+                || state.ended_at_epoch_ms.is_none()
+                || state.focus_ended_at_epoch_ms.is_none()
+            {
+                return Err(PersistenceError::new(
+                    "completed focus state is missing completion history",
+                ));
+            }
+        }
+        FocusPhase::Idle => unreachable!("idle state returned above"),
+    }
+    if matches!(state.phase, FocusPhase::FocusCompleted)
+        && (break_duration_ms != 0 || state.ended_at_epoch_ms != state.focus_ended_at_epoch_ms)
+    {
+        return Err(PersistenceError::new(
+            "focus-completed state is invalid for the configured break",
+        ));
+    }
+    if matches!(state.phase, FocusPhase::Finished)
+        && ((break_duration_ms == 0 && state.accumulated_focus_ms != focus_duration_ms)
+            || (break_duration_ms > 0 && state.break_ended_at_epoch_ms.is_none())
+            || state.ended_at_epoch_ms
+                != if break_duration_ms > 0 {
+                    state.break_ended_at_epoch_ms
+                } else {
+                    state.focus_ended_at_epoch_ms
+                })
+    {
+        return Err(PersistenceError::new(
+            "finished focus state has inconsistent final-phase history",
+        ));
+    }
+    Ok(())
 }
 
 #[derive(Debug)]
@@ -2125,7 +2495,11 @@ mod tests {
     }
 
     fn completed_focus_state_json() -> String {
-        r#"{"version":1,"phase":"finished","focusDurationMs":100,"breakDurationMs":20,"accumulatedFocusMs":100,"accumulatedBreakMs":20,"totalIssuedSimulationTicks":1,"startedAtEpochMs":100,"endedAtEpochMs":220}"#.to_owned()
+        r#"{"version":1,"phase":"finished","focusDurationMs":100,"breakDurationMs":20,"simulationTicksPerFocusSecond":10,"accumulatedFocusMs":100,"accumulatedBreakMs":20,"totalIssuedSimulationTicks":1,"simulationTickRemainder":0,"startedAtEpochMs":100,"focusStartedAtEpochMs":100,"focusEndedAtEpochMs":200,"breakStartedAtEpochMs":200,"breakEndedAtEpochMs":220,"endedAtEpochMs":220,"activeSegmentStartedAtEpochMs":null,"lastObservedEpochMs":220,"outcome":"completed"}"#.to_owned()
+    }
+
+    fn stale_paused_focus_state_json() -> String {
+        r#"{"version":1,"phase":"focus-paused","focusDurationMs":100,"breakDurationMs":20,"simulationTicksPerFocusSecond":10,"accumulatedFocusMs":50,"accumulatedBreakMs":0,"totalIssuedSimulationTicks":0,"simulationTickRemainder":500,"startedAtEpochMs":100,"focusStartedAtEpochMs":100,"focusEndedAtEpochMs":null,"breakStartedAtEpochMs":null,"breakEndedAtEpochMs":null,"endedAtEpochMs":null,"activeSegmentStartedAtEpochMs":null,"lastObservedEpochMs":150,"outcome":null}"#.to_owned()
     }
 
     fn completed_focus_session(slot_id: &str, recap_event_ids: Vec<u64>) -> FocusSession {
@@ -2642,6 +3016,79 @@ mod tests {
     }
 
     #[test]
+    fn stale_or_cross_slot_focus_checkpoint_rolls_back_the_whole_transaction() {
+        let mut database = PersistenceDatabase::in_memory().expect("database");
+        let completed = completed_focus_session("alpha", vec![7]);
+        let first = database
+            .commit_focus_checkpoint("alpha", "Alpha", &snapshot("one"), &completed)
+            .expect("completed checkpoint");
+
+        let mut stale = completed.clone();
+        stale.ended_at_ms = None;
+        stale.focused_ms = 50;
+        stale.break_ms = 0;
+        stale.issued_simulation_ticks = 0;
+        stale.status = FocusSessionStatus::Paused;
+        stale.state_json = stale_paused_focus_state_json();
+        stale.recap_event_ids.clear();
+        stale.recap_entries.clear();
+        assert!(
+            database
+                .commit_focus_checkpoint("alpha", "Alpha", &snapshot("two"), &stale)
+                .is_err()
+        );
+
+        let mut cross_slot = completed.clone();
+        cross_slot.slot_id = Some("beta".to_owned());
+        assert!(
+            database
+                .commit_focus_checkpoint("beta", "Beta", &snapshot("other"), &cross_slot)
+                .is_err()
+        );
+
+        let mut rewritten_history = completed.clone();
+        rewritten_history.recap_event_ids.clear();
+        rewritten_history.recap_entries.clear();
+        assert!(
+            database
+                .commit_focus_checkpoint("alpha", "Alpha", &snapshot("two"), &rewritten_history,)
+                .is_err()
+        );
+        assert!(database.record_focus_session(&rewritten_history).is_err());
+
+        let mut noncanonical = completed.clone();
+        noncanonical.session_id = "session-noncanonical".to_owned();
+        let mut state: serde_json::Value =
+            serde_json::from_str(&noncanonical.state_json).expect("focus state");
+        state
+            .as_object_mut()
+            .expect("focus state object")
+            .insert("unexpectedAuthority".to_owned(), true.into());
+        noncanonical.state_json = serde_json::to_string(&state).expect("focus state JSON");
+        assert!(
+            database
+                .commit_focus_checkpoint("alpha", "Alpha", &snapshot("two"), &noncanonical)
+                .is_err()
+        );
+
+        let loaded = database.load_slot("alpha").expect("load").expect("present");
+        assert_eq!(loaded.recovered_generation, first.recovered_generation);
+        assert_eq!(loaded.snapshot, first.snapshot);
+        assert_eq!(
+            database.list_focus_sessions().expect("history"),
+            vec![completed]
+        );
+        assert_eq!(
+            database.list_slots().expect("slots"),
+            vec![SaveSlotSummary {
+                slot_id: "alpha".to_owned(),
+                name: "Alpha".to_owned(),
+                head_generation: Some(1),
+            }]
+        );
+    }
+
+    #[test]
     fn inserted_generation_verification_rejects_same_length_snapshot_corruption() {
         let expected = "abcd";
         let inserted = "wxyz";
@@ -2743,6 +3190,27 @@ mod tests {
             database.list_focus_sessions().expect("list"),
             vec![session.clone()]
         );
+
+        let mut rewritten_review = session.clone();
+        rewritten_review
+            .review
+            .as_mut()
+            .expect("review")
+            .revisit_target
+            .as_mut()
+            .expect("target")
+            .label = "Renamed Hearth".to_owned();
+        assert!(
+            database
+                .commit_focus_checkpoint(
+                    "alpha",
+                    "Alpha",
+                    &snapshot("focus-review"),
+                    &rewritten_review,
+                )
+                .is_err()
+        );
+        assert!(database.record_focus_session(&rewritten_review).is_err());
 
         let mut wrong_tick = session.clone();
         wrong_tick.review.as_mut().expect("review").after.tick = 2;
@@ -2995,6 +3463,17 @@ mod tests {
         ] {
             assert!(database.save_settings(&invalid).is_err());
         }
+    }
+
+    #[test]
+    fn typed_settings_reject_unknown_command_fields() {
+        let mut value = serde_json::to_value(AppSettings::default()).expect("settings JSON");
+        value.as_object_mut().expect("settings object").insert(
+            "unexpectedAuthority".to_owned(),
+            serde_json::Value::Bool(true),
+        );
+
+        assert!(serde_json::from_value::<AppSettings>(value).is_err());
     }
 
     struct HistoricalDatabaseFile {

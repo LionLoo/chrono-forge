@@ -280,6 +280,22 @@ describe('persistence adapter', () => {
       authoritativeSession,
       [],
     );
+    const rewrittenReview: FocusSession = {
+      ...authoritativeSession,
+      review: {
+        ...authoritativeSession.review!,
+        before: {
+          ...authoritativeSession.review!.before,
+          food: authoritativeSession.review!.before.food + 1,
+        },
+      },
+    };
+    await expect(
+      previewGateway.commitFocusCheckpoint('alpha', 'Alpha', sourceSnapshot, rewrittenReview, []),
+    ).rejects.toThrow(/stale|immutable identity/i);
+    await expect(previewGateway.recordFocusSession(rewrittenReview, [])).rejects.toThrow(
+      /stale|immutable identity/i,
+    );
     await previewGateway.commitSaveSlot('alpha', 'Alpha', snapshot('two'));
     await previewGateway.commitSaveSlot('alpha', 'Alpha', snapshot('three'));
     const laterAlpha = await previewGateway.commitSaveSlot('alpha', 'Alpha', snapshot('four'));
@@ -1098,6 +1114,75 @@ describe('persistence adapter', () => {
     ).rejects.toThrow('belong to its save slot');
     expect((await gateway.loadSaveSlot('alpha'))?.recoveredGeneration).toBe(1);
     expect(await gateway.listFocusSessions(committed)).toEqual([completedSession]);
+  });
+
+  it('rejects stale and cross-slot checkpoint reuse without changing the durable head', async () => {
+    const gateway = createInMemoryPersistenceGateway();
+    const committed = await gateway.commitFocusCheckpoint(
+      'alpha',
+      'Alpha',
+      snapshot('one'),
+      completedSession,
+      [1],
+    );
+    const staleSession = focusSessionFromState(
+      completedSession.sessionId,
+      'alpha',
+      checkpointFocus(
+        startFocus(
+          createIdleFocusState(),
+          { focusDurationMs: 100, breakDurationMs: 20, simulationTicksPerFocusSecond: 100 },
+          100,
+        ),
+        150,
+      ),
+    );
+
+    await expect(
+      gateway.commitFocusCheckpoint('alpha', 'Alpha', snapshot('two'), staleSession, []),
+    ).rejects.toThrow(/stale|immutable identity/i);
+    await expect(
+      gateway.commitFocusCheckpoint(
+        'beta',
+        'Beta',
+        snapshot('other'),
+        { ...completedSession, slotId: 'beta' },
+        [1],
+      ),
+    ).rejects.toThrow(/stale|immutable identity/i);
+    const rewrittenHistory = {
+      ...completedSession,
+      recapEventIds: [],
+      recapEntries: [],
+    };
+    await expect(
+      gateway.commitFocusCheckpoint('alpha', 'Alpha', snapshot('two'), rewrittenHistory, []),
+    ).rejects.toThrow(/stale|immutable identity/i);
+    await expect(gateway.recordFocusSession(rewrittenHistory, [])).rejects.toThrow(
+      /stale|immutable identity/i,
+    );
+
+    const noncanonicalState = JSON.parse(completedSession.stateJson) as Record<string, unknown>;
+    noncanonicalState.unexpectedAuthority = true;
+    await expect(
+      gateway.commitFocusCheckpoint(
+        'alpha',
+        'Alpha',
+        snapshot('two'),
+        {
+          ...completedSession,
+          sessionId: 'session-noncanonical',
+          stateJson: JSON.stringify(noncanonicalState),
+        },
+        [1],
+      ),
+    ).rejects.toThrow(/missing or unknown fields/i);
+
+    expect(await gateway.loadSaveSlot('alpha')).toEqual(committed);
+    expect(await gateway.listFocusSessions(committed)).toEqual([completedSession]);
+    expect(await gateway.listSaveSlots()).toEqual([
+      { slotId: 'alpha', name: 'Alpha', headGeneration: 1 },
+    ]);
   });
 
   it('uses the checkpoint command only after validating the exact snapshot pair', async () => {
