@@ -141,6 +141,8 @@ Tauri keeps a strict CSP without `unsafe-eval`. PixiJS loads its statically gene
 
 Native persistence defaults to Tauri's OS-resolved application-local-data directory. For isolated installed-artifact verification, `CHRONO_FORGE_PROFILE` may select one validated 1-64 character ASCII profile name below that same application root at `profiles/<name>`. The value cannot contain separators, traversal, whitespace, or an arbitrary path; invalid values fail startup closed. This native-only boundary never exposes a filesystem path or general file access to the WebView.
 
+Installed persistence E2E assigns a fresh validated profile before launch and uses only two `desktop-e2e`-feature slot markers to inject an interrupted transaction and a corrupt newest checksum. Both branches are compiled out of production, and the production executable scan rejects either marker. The recovery phase closes the sole native window so the launcher must start a new process, then proves exact older-generation recovery through the rendered active world and raw typed IPC. After the launcher exits, the runner opens that exact profile database read-only and requires SQLite integrity, foreign-key integrity, and the exact cleaned archive shape; a failed application assertion or database check is fatal.
+
 All runtime assets are bundled locally. Tauri uses a restrictive capability list and CSP; no account or remote content is required.
 
 ## Performance budgets
