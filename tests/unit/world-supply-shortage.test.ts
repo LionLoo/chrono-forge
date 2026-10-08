@@ -24,7 +24,9 @@ describe('recorded supply shortages', () => {
     for (const severity of [0, -1, 101, 1.5, Number.NaN]) {
       expect(() => applyRecordedSupplyShortage(world, severity)).toThrow(/severity/i);
     }
-    expect(() => applyRecordedSupplyShortage({ ...world, tick: -1 }, 50)).toThrow(/invariant/i);
+    expect(() => applyRecordedSupplyShortage({ ...world, tick: -1 }, 50)).toThrow(
+      /^Civilizations authority tick must be an integer in range\.$/,
+    );
   });
 
   it('deterministically removes resources and records one immutable collapse transition', () => {

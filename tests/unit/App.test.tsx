@@ -20,8 +20,13 @@ import {
 } from '../../src/protocol';
 import type { WorldCamera } from '../../src/rendering/camera';
 import type { WorldOverlay } from '../../src/rendering/world-palette';
-import { deserializeWorldSnapshot } from '../../src/simulation/persistence';
-import type { SimulationWorkerPort } from '../../src/ui/useWorldSimulation';
+import { deserializeWorldSnapshot, serializeWorldSnapshot } from '../../src/simulation/persistence';
+import { createInitialWorld } from '../../src/simulation/world';
+import {
+  DEMO_WORLD_CONFIG,
+  DEMO_WORLD_SEED,
+  type SimulationWorkerPort,
+} from '../../src/ui/useWorldSimulation';
 import { createSimulationRuntime } from '../../src/workers/simulation-runtime';
 
 vi.mock('../../src/rendering/WorldMapCanvas', () => ({
@@ -90,40 +95,45 @@ function createFrameRemovalWorker(): {
   readonly removeFirstAgent: () => void;
   readonly workerFactory: () => SimulationWorkerPort;
 } {
-  let removeFirstAgent: (() => void) | null = null;
+  let initialFrame: WorldFrameProjection | null = null;
+  let pendingLoadRequestId: string | null = null;
+  let removalRequested = false;
+  let publishRequestedRemoval: (() => void) | null = null;
   const workerFactory = () => {
     let active = true;
+    const publishRemovedFrame = () => {
+      if (!active || !removalRequested || initialFrame === null || pendingLoadRequestId === null)
+        return;
+      const removedId = initialFrame.agentIds[0];
+      if (removedId === undefined) throw new Error('test frame has no removable agent');
+      const frame: WorldFrameProjection = {
+        ...initialFrame,
+        agentActions: initialFrame.agentActions.slice(1),
+        agentHealth: initialFrame.agentHealth.slice(1),
+        agentIds: initialFrame.agentIds.slice(1),
+        agentTiles: initialFrame.agentTiles.slice(1),
+        society: {
+          ...initialFrame.society,
+          people: initialFrame.society.people.filter((person) => person.id !== removedId),
+        },
+        stateHash: `${initialFrame.stateHash}-without-${removedId}`,
+        tick: initialFrame.tick + 1,
+      };
+      port.onmessage?.(
+        new MessageEvent('message', {
+          data: {
+            frame,
+            protocolVersion: WORKER_PROTOCOL_VERSION,
+            requestId: pendingLoadRequestId,
+            type: 'ready',
+          } satisfies WorkerToUiMessage,
+        }),
+      );
+      pendingLoadRequestId = null;
+    };
+    publishRequestedRemoval = publishRemovedFrame;
     const runtime = createSimulationRuntime((message: WorkerToUiMessage) => {
-      if (message.type === 'ready' && removeFirstAgent === null) {
-        const initialFrame = message.frame;
-        removeFirstAgent = () => {
-          const removedId = initialFrame.agentIds[0];
-          if (removedId === undefined) throw new Error('test frame has no removable agent');
-          const frame: WorldFrameProjection = {
-            ...initialFrame,
-            agentActions: initialFrame.agentActions.slice(1),
-            agentHealth: initialFrame.agentHealth.slice(1),
-            agentIds: initialFrame.agentIds.slice(1),
-            agentTiles: initialFrame.agentTiles.slice(1),
-            society: {
-              ...initialFrame.society,
-              people: initialFrame.society.people.filter((person) => person.id !== removedId),
-            },
-            stateHash: `${initialFrame.stateHash}-without-${removedId}`,
-            tick: initialFrame.tick + 1,
-          };
-          port.onmessage?.(
-            new MessageEvent('message', {
-              data: {
-                frame,
-                protocolVersion: WORKER_PROTOCOL_VERSION,
-                requestId: 'frame-removal-test',
-                type: 'ready',
-              } satisfies WorkerToUiMessage,
-            }),
-          );
-        };
-      }
+      if (message.type === 'ready' && initialFrame === null) initialFrame = message.frame;
       queueMicrotask(() => {
         if (active) port.onmessage?.(new MessageEvent('message', { data: message }));
       });
@@ -133,6 +143,11 @@ function createFrameRemovalWorker(): {
       onerror: null,
       onmessage: null,
       postMessage(message: UiToWorkerMessage) {
+        if (message.type === 'load') {
+          pendingLoadRequestId = message.requestId;
+          publishRemovedFrame();
+          return;
+        }
         runtime.handleMessage(message);
       },
       terminate() {
@@ -143,8 +158,8 @@ function createFrameRemovalWorker(): {
   };
   return {
     removeFirstAgent() {
-      if (removeFirstAgent === null) throw new Error('test worker is not ready');
-      removeFirstAgent();
+      removalRequested = true;
+      publishRequestedRemoval?.();
     },
     workerFactory,
   };
@@ -368,12 +383,13 @@ describe('deterministic world lab', () => {
   it('clears a map selection when the next valid Worker frame removes that object', async () => {
     const user = userEvent.setup();
     const controlledWorker = createFrameRemovalWorker();
-    render(
-      <App
-        persistence={createPreviewPersistence()}
-        workerFactory={controlledWorker.workerFactory}
-      />,
+    const persistence = createPreviewPersistence();
+    await persistence.gateway.commitSaveSlot(
+      'primary',
+      'Founding world',
+      serializeWorldSnapshot(createInitialWorld(DEMO_WORLD_SEED, DEMO_WORLD_CONFIG)),
     );
+    render(<App persistence={persistence} workerFactory={controlledWorker.workerFactory} />);
     await screen.findByText('Worker projection ready · autonomous world active');
 
     const inspector = screen.getByRole('combobox', { name: 'Inspect map object' });
