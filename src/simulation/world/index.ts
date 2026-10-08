@@ -2605,7 +2605,10 @@ function civilizationEventDetails(
 
 function reconcileCivilizationResidencies(state: WorldState): CivilizationsState {
   const primarySettlementId = state.civilizations.settlements[0]!.id;
-  const residencyTick = state.civilizations.tick;
+  // Residency records describe factual person/household transitions produced by the world pulse,
+  // not the last annual civilizations update. Using the subsystem tick can predate a birth,
+  // household formation, or death by as much as one civil year.
+  const residencyTick = state.tick;
   const peopleById = new Map(
     state.civilization.society.people.map((person) => [person.id, person]),
   );
@@ -3381,7 +3384,7 @@ export function isWalkableTile(state: WorldState, index: number): boolean {
 
 export function assertWorldInvariants(state: WorldState): void {
   assertCivilizationInvariants(state.civilization, settlementTerrain(state));
-  assertCivilizationsInvariants(state.civilizations);
+  assertCivilizationsInvariants(state.civilizations, state.tick);
   assertDevelopmentInvariants(state.development);
   assertSpaceInvariants(state.space);
   assertPopulationScaleInvariants(state.populationScale);
@@ -3704,7 +3707,7 @@ export function canonicalWorldJson(state: WorldState): string {
       y: chunk.y,
     })),
     civilization: civilizationDto(state.civilization),
-    civilizations: civilizationsDto(state.civilizations),
+    civilizations: civilizationsDto(state.civilizations, state.tick),
     config: {
       chunkSize: state.config.chunkSize,
       height: state.config.height,

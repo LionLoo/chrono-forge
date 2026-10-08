@@ -133,9 +133,9 @@ export const WORLD_SNAPSHOT_FORMAT = 'chrono-forge-world';
 // A strict persisted-payload shape change must increment all three values and retain a
 // parser for the prior format below. This keeps development saves from silently being
 // reinterpreted as a newer schema.
-export const WORLD_SNAPSHOT_FORMAT_VERSION = 13;
-export const WORLD_ENGINE_VERSION = 13;
-export const WORLD_CONTENT_VERSION = 13;
+export const WORLD_SNAPSHOT_FORMAT_VERSION = 14;
+export const WORLD_ENGINE_VERSION = 14;
+export const WORLD_CONTENT_VERSION = 14;
 
 const WORLD_SNAPSHOT_VERSION_SIX = 6;
 const WORLD_SNAPSHOT_VERSION_SEVEN = 7;
@@ -145,6 +145,7 @@ const WORLD_SNAPSHOT_VERSION_TEN = 10;
 const WORLD_SNAPSHOT_VERSION_ELEVEN = 11;
 const WORLD_SNAPSHOT_VERSION_TWELVE = 12;
 const WORLD_SNAPSHOT_VERSION_THIRTEEN = 13;
+const WORLD_SNAPSHOT_VERSION_FOURTEEN = 14;
 const MAX_WORLD_TILES = 1_000_000;
 const MAX_WORLD_SNAPSHOT_BYTES = 50 * 1024 * 1024;
 const MAX_EVENT_KIND_LENGTH = 64;
@@ -1001,6 +1002,8 @@ function parseCivilizations(
   };
   const nullableInteger = (candidate: unknown, name: string): number | null =>
     candidate === null ? null : safeInteger(candidate, name, 0, tick);
+  const nullableResidencyInteger = (candidate: unknown, name: string): number | null =>
+    candidate === null ? null : safeInteger(candidate, name, 0, worldTick);
   const parseReserves = (candidate: unknown, name: string): CommunityReserves => {
     if (!isRecord(candidate)) throw new Error(`${name} must be an object.`);
     assertExactKeys(candidate, ['food', 'metal', 'stone', 'timber', 'water'], name);
@@ -1186,8 +1189,8 @@ function parseCivilizations(
         ) as Residency['subjectKind'],
         subjectId: safeInteger(candidate.subjectId, `${name} subject`, 1),
         settlementId: safeInteger(candidate.settlementId, `${name} settlement`, 1),
-        startedTick: safeInteger(candidate.startedTick, `${name} started tick`, 0, tick),
-        endedTick: nullableInteger(candidate.endedTick, `${name} ended tick`),
+        startedTick: safeInteger(candidate.startedTick, `${name} started tick`, 0, worldTick),
+        endedTick: nullableResidencyInteger(candidate.endedTick, `${name} ended tick`),
       });
     }),
   );
@@ -1370,7 +1373,7 @@ function parseCivilizations(
     tileOwners,
     operationCount: safeInteger(value.operationCount, 'Civilizations operation count'),
   });
-  assertCivilizationsInvariants(state);
+  assertCivilizationsInvariants(state, worldTick);
   return state;
 }
 
@@ -5456,6 +5459,135 @@ function deserializeVersionTwelve(envelope: UnknownRecord): WorldState {
   return world;
 }
 
+function householdFormationTicks(world: WorldState): ReadonlyMap<number, number> {
+  const formations = new Map<number, number>();
+  for (const history of world.civilization.society.interpersonal.householdHistories)
+    for (const interval of history.intervals) {
+      if (interval.startTick === null) continue;
+      const prior = formations.get(interval.householdId);
+      if (prior === undefined || interval.startTick < prior)
+        formations.set(interval.householdId, interval.startTick);
+    }
+  return formations;
+}
+
+function assertCurrentResidencyLifecycles(world: WorldState): void {
+  const people = new Map(
+    world.civilization.society.people.map((person) => [person.id, person] as const),
+  );
+  const households = new Set(
+    world.civilization.society.households.map((household) => household.id),
+  );
+  const formations = householdFormationTicks(world);
+  const activePeople = new Map<number, number>();
+  const deathClosures = new Set<number>();
+  for (const residency of world.civilizations.residencies) {
+    if (residency.subjectKind === 'household') {
+      const formationTick = formations.get(residency.subjectId);
+      if (
+        !households.has(residency.subjectId) ||
+        (formationTick !== undefined && residency.startedTick < formationTick)
+      )
+        throw new Error('Household residency predates or lost its factual household.');
+      continue;
+    }
+    const person = people.get(residency.subjectId);
+    if (
+      person === undefined ||
+      residency.startedTick < person.birthTick ||
+      (!person.alive &&
+        (residency.startedTick > person.deathTick ||
+          (residency.endedTick !== null && residency.endedTick > person.deathTick)))
+    )
+      throw new Error('Person residency falls outside its factual lifetime.');
+    if (residency.endedTick === null)
+      activePeople.set(residency.subjectId, (activePeople.get(residency.subjectId) ?? 0) + 1);
+    if (!person.alive && residency.endedTick === person.deathTick) deathClosures.add(person.id);
+  }
+  for (const person of people.values()) {
+    const activeCount = activePeople.get(person.id) ?? 0;
+    if (
+      (person.alive && activeCount !== 1) ||
+      (!person.alive && (activeCount !== 0 || !deathClosures.has(person.id)))
+    )
+      throw new Error('Person residency does not match its factual life status.');
+  }
+}
+
+/** Repairs only residence timestamps that can be proven against saved life/household authority. */
+function upgradeLegacyResidencyLifecycles(world: WorldState): WorldState {
+  const people = new Map(
+    world.civilization.society.people.map((person) => [person.id, person] as const),
+  );
+  const formations = householdFormationTicks(world);
+  const latestDeadResidencyId = new Map<number, number>();
+  for (const person of people.values()) {
+    if (person.alive) continue;
+    const latest = world.civilizations.residencies
+      .filter(
+        (residency) => residency.subjectKind === 'person' && residency.subjectId === person.id,
+      )
+      .sort(
+        (left, right) =>
+          (left.endedTick ?? world.tick) - (right.endedTick ?? world.tick) ||
+          left.startedTick - right.startedTick ||
+          left.id - right.id,
+      )
+      .at(-1);
+    if (latest !== undefined) latestDeadResidencyId.set(person.id, latest.id);
+  }
+  const residencies = Object.freeze(
+    world.civilizations.residencies.map((residency) => {
+      if (residency.subjectKind === 'household') {
+        const formationTick = formations.get(residency.subjectId);
+        if (formationTick === undefined || residency.startedTick >= formationTick) return residency;
+        if (
+          formationTick - residency.startedTick > world.config.societyYearTicks ||
+          (residency.endedTick !== null && residency.endedTick < formationTick)
+        )
+          throw new Error('Legacy household residency is outside the repairable stale boundary.');
+        return Object.freeze({
+          ...residency,
+          startedTick: formationTick,
+        });
+      }
+      const person = people.get(residency.subjectId);
+      if (person === undefined) return residency;
+      let startedTick = residency.startedTick;
+      let endedTick = residency.endedTick;
+      if (startedTick < person.birthTick) {
+        if (
+          person.birthTick - startedTick > world.config.societyYearTicks ||
+          (endedTick !== null && endedTick < person.birthTick)
+        )
+          throw new Error('Legacy person residency is outside the repairable birth boundary.');
+        startedTick = person.birthTick;
+      }
+      if (!person.alive) {
+        if (startedTick > person.deathTick || endedTick === null || endedTick > person.deathTick)
+          throw new Error('Legacy person residency is inconsistent with the factual death.');
+        if (latestDeadResidencyId.get(person.id) === residency.id) {
+          if (person.deathTick - endedTick > world.config.societyYearTicks)
+            throw new Error('Legacy death residency is outside the repairable stale boundary.');
+          endedTick = person.deathTick;
+        }
+      }
+      if (endedTick !== null && endedTick < startedTick)
+        throw new Error('Legacy person residency has an impossible interval.');
+      return startedTick === residency.startedTick && endedTick === residency.endedTick
+        ? residency
+        : Object.freeze({ ...residency, startedTick, endedTick });
+    }),
+  );
+  const upgraded: WorldState = Object.freeze({
+    ...world,
+    civilizations: Object.freeze({ ...world.civilizations, residencies }),
+  });
+  assertCurrentResidencyLifecycles(upgraded);
+  assertWorldInvariants(upgraded);
+  return upgraded;
+}
+
 /** Parses the strict v13 payload with audited factual event descriptions. */
 function deserializeVersionThirteen(envelope: UnknownRecord): WorldState {
   assertExactKeys(
@@ -5477,6 +5609,40 @@ function deserializeVersionThirteen(envelope: UnknownRecord): WorldState {
   const world = parseVersionTenWorldPayload(envelope.payload, true);
   assertCurrentContentNames(world);
   assertWorldEventDescriptions(world);
+  const canonical = canonicalWorldJson(world);
+  if (canonical !== payloadJson) {
+    let difference = 0;
+    while (difference < canonical.length && canonical[difference] === payloadJson[difference])
+      difference += 1;
+    throw new Error(
+      `World snapshot payload is not canonical at byte ${difference}: ${payloadJson.slice(difference, difference + 80)} != ${canonical.slice(difference, difference + 80)}.`,
+    );
+  }
+  return world;
+}
+
+/** Parses the strict v14 payload with factual residency lifecycle timestamps. */
+function deserializeVersionFourteen(envelope: UnknownRecord): WorldState {
+  assertExactKeys(
+    envelope,
+    ['checksum', 'contentVersion', 'engineVersion', 'format', 'formatVersion', 'payload'],
+    'World snapshot envelope',
+  );
+  if (
+    envelope.formatVersion !== WORLD_SNAPSHOT_VERSION_FOURTEEN ||
+    envelope.engineVersion !== WORLD_SNAPSHOT_VERSION_FOURTEEN ||
+    envelope.contentVersion !== WORLD_SNAPSHOT_VERSION_FOURTEEN ||
+    typeof envelope.checksum !== 'string'
+  ) {
+    throw new Error('World snapshot version metadata is invalid.');
+  }
+  const payloadJson = JSON.stringify(envelope.payload);
+  if (hashCanonicalJson(payloadJson) !== envelope.checksum)
+    throw new Error('World snapshot checksum does not match its payload.');
+  const world = parseVersionTenWorldPayload(envelope.payload, true);
+  assertCurrentContentNames(world);
+  assertWorldEventDescriptions(world);
+  assertCurrentResidencyLifecycles(world);
   const canonical = canonicalWorldJson(world);
   if (canonical !== payloadJson) {
     let difference = 0;
@@ -5580,6 +5746,7 @@ function canonicalVersionTwoWorldJson(state: VersionTwoWorldState): string {
 export function serializeWorldSnapshot(state: WorldState): string {
   assertCurrentContentNames(state);
   assertWorldEventDescriptions(state);
+  assertCurrentResidencyLifecycles(state);
   const payloadJson = canonicalWorldJson(state);
   const checksum = hashCanonicalJson(payloadJson);
   return `{"checksum":"${checksum}","contentVersion":${WORLD_CONTENT_VERSION},"engineVersion":${WORLD_ENGINE_VERSION},"format":"${WORLD_SNAPSHOT_FORMAT}","formatVersion":${WORLD_SNAPSHOT_FORMAT_VERSION},"payload":${payloadJson}}`;
@@ -5592,88 +5759,117 @@ export function migrateWorldSnapshot(snapshot: string): string {
   if (formatVersion > WORLD_SNAPSHOT_FORMAT_VERSION) {
     throw new Error(`World snapshot version ${formatVersion} is newer than this application.`);
   }
+  if (formatVersion === WORLD_SNAPSHOT_VERSION_FOURTEEN) {
+    return serializeWorldSnapshot(deserializeVersionFourteen(envelope));
+  }
   if (formatVersion === WORLD_SNAPSHOT_VERSION_THIRTEEN) {
-    return serializeWorldSnapshot(deserializeVersionThirteen(envelope));
+    return serializeWorldSnapshot(
+      upgradeLegacyResidencyLifecycles(deserializeVersionThirteen(envelope)),
+    );
   }
   if (formatVersion === WORLD_SNAPSHOT_VERSION_TWELVE) {
     return serializeWorldSnapshot(
-      upgradeLegacyWorldEventDescriptions(deserializeVersionTwelve(envelope)),
+      upgradeLegacyResidencyLifecycles(
+        upgradeLegacyWorldEventDescriptions(deserializeVersionTwelve(envelope)),
+      ),
     );
   }
   if (formatVersion === WORLD_SNAPSHOT_VERSION_ELEVEN) {
     return serializeWorldSnapshot(
-      upgradeLegacyWorldEventDescriptions(
-        upgradeSettlementDevelopment(deserializeVersionEleven(envelope)),
+      upgradeLegacyResidencyLifecycles(
+        upgradeLegacyWorldEventDescriptions(
+          upgradeSettlementDevelopment(deserializeVersionEleven(envelope)),
+        ),
       ),
     );
   }
   if (formatVersion === WORLD_SNAPSHOT_VERSION_TEN) {
     return serializeWorldSnapshot(
-      upgradeLegacyWorldEventDescriptions(
-        upgradeSettlementDevelopment(upgradeVersionTenContent(deserializeVersionTen(envelope))),
+      upgradeLegacyResidencyLifecycles(
+        upgradeLegacyWorldEventDescriptions(
+          upgradeSettlementDevelopment(upgradeVersionTenContent(deserializeVersionTen(envelope))),
+        ),
       ),
     );
   }
   if (formatVersion === WORLD_SNAPSHOT_VERSION_NINE) {
     return serializeWorldSnapshot(
-      upgradeLegacyWorldEventDescriptions(
-        upgradeSettlementDevelopment(deserializeVersionNine(envelope)),
+      upgradeLegacyResidencyLifecycles(
+        upgradeLegacyWorldEventDescriptions(
+          upgradeSettlementDevelopment(deserializeVersionNine(envelope)),
+        ),
       ),
     );
   }
   if (formatVersion === WORLD_SNAPSHOT_VERSION_EIGHT) {
     return serializeWorldSnapshot(
-      upgradeLegacyWorldEventDescriptions(
-        upgradeSettlementDevelopment(deserializeVersionEight(envelope)),
+      upgradeLegacyResidencyLifecycles(
+        upgradeLegacyWorldEventDescriptions(
+          upgradeSettlementDevelopment(deserializeVersionEight(envelope)),
+        ),
       ),
     );
   }
   if (formatVersion === WORLD_SNAPSHOT_VERSION_SEVEN) {
     return serializeWorldSnapshot(
-      upgradeLegacyWorldEventDescriptions(
-        upgradeSettlementDevelopment(deserializeVersionSeven(envelope)),
+      upgradeLegacyResidencyLifecycles(
+        upgradeLegacyWorldEventDescriptions(
+          upgradeSettlementDevelopment(deserializeVersionSeven(envelope)),
+        ),
       ),
     );
   }
   if (formatVersion === WORLD_SNAPSHOT_VERSION_SIX) {
     return serializeWorldSnapshot(
-      upgradeLegacyWorldEventDescriptions(
-        upgradeSettlementDevelopment(deserializeVersionSix(envelope)),
+      upgradeLegacyResidencyLifecycles(
+        upgradeLegacyWorldEventDescriptions(
+          upgradeSettlementDevelopment(deserializeVersionSix(envelope)),
+        ),
       ),
     );
   }
   if (formatVersion === 5) {
     return serializeWorldSnapshot(
-      upgradeLegacyWorldEventDescriptions(
-        upgradeSettlementDevelopment(deserializeVersionFive(envelope)),
+      upgradeLegacyResidencyLifecycles(
+        upgradeLegacyWorldEventDescriptions(
+          upgradeSettlementDevelopment(deserializeVersionFive(envelope)),
+        ),
       ),
     );
   }
   if (formatVersion === 4) {
     return serializeWorldSnapshot(
-      upgradeLegacyWorldEventDescriptions(
-        upgradeSettlementDevelopment(deserializeVersionFour(envelope)),
+      upgradeLegacyResidencyLifecycles(
+        upgradeLegacyWorldEventDescriptions(
+          upgradeSettlementDevelopment(deserializeVersionFour(envelope)),
+        ),
       ),
     );
   }
   if (formatVersion === 3) {
     return serializeWorldSnapshot(
-      upgradeLegacyWorldEventDescriptions(
-        upgradeSettlementDevelopment(deserializeVersionThree(envelope)),
+      upgradeLegacyResidencyLifecycles(
+        upgradeLegacyWorldEventDescriptions(
+          upgradeSettlementDevelopment(deserializeVersionThree(envelope)),
+        ),
       ),
     );
   }
   if (formatVersion === 2) {
     return serializeWorldSnapshot(
-      upgradeLegacyWorldEventDescriptions(
-        upgradeSettlementDevelopment(upgradeVersionTwo(deserializeVersionTwo(envelope))),
+      upgradeLegacyResidencyLifecycles(
+        upgradeLegacyWorldEventDescriptions(
+          upgradeSettlementDevelopment(upgradeVersionTwo(deserializeVersionTwo(envelope))),
+        ),
       ),
     );
   }
   if (formatVersion === 1) {
     return serializeWorldSnapshot(
-      upgradeLegacyWorldEventDescriptions(
-        upgradeSettlementDevelopment(upgradeLegacyWorld(deserializeVersionOne(envelope))),
+      upgradeLegacyResidencyLifecycles(
+        upgradeLegacyWorldEventDescriptions(
+          upgradeSettlementDevelopment(upgradeLegacyWorld(deserializeVersionOne(envelope))),
+        ),
       ),
     );
   }
@@ -5704,12 +5900,14 @@ export function migrateWorldSnapshot(snapshot: string): string {
     throw new Error('Legacy world snapshot payload is not canonical.');
   }
   return serializeWorldSnapshot(
-    upgradeLegacyWorldEventDescriptions(upgradeSettlementDevelopment(upgradeLegacyWorld(world))),
+    upgradeLegacyResidencyLifecycles(
+      upgradeLegacyWorldEventDescriptions(upgradeSettlementDevelopment(upgradeLegacyWorld(world))),
+    ),
   );
 }
 
 /** Loads and validates a supported snapshot without mutating its input. */
 export function deserializeWorldSnapshot(snapshot: string): WorldState {
   const migrated = migrateWorldSnapshot(snapshot);
-  return deserializeVersionThirteen(parseEnvelope(migrated));
+  return deserializeVersionFourteen(parseEnvelope(migrated));
 }

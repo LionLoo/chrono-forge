@@ -901,6 +901,114 @@ describe('versioned world snapshots', () => {
     expect(() => assertWorldEventDescriptions(loaded)).not.toThrow();
   });
 
+  it('migrates v13 residency timestamps to factual life and household boundaries only', () => {
+    const source = stepWorld(
+      createInitialWorld([7, 11, 13, 17], { societyYearTicks: ACCELERATED_YEAR_TICKS }),
+      300_000,
+    );
+    const envelope = JSON.parse(serializeWorldSnapshot(source)) as {
+      checksum: string;
+      contentVersion: number;
+      engineVersion: number;
+      formatVersion: number;
+      payload: {
+        civilization: {
+          society: {
+            people: {
+              alive: boolean;
+              birthTick: number;
+              deathTick: number;
+              id: number;
+              origin: string;
+            }[];
+            interpersonal: {
+              householdHistories: {
+                intervals: { householdId: number; startTick: number | null }[];
+              }[];
+            };
+          };
+        };
+        civilizations: {
+          residencies: {
+            endedTick: number | null;
+            startedTick: number;
+            subjectId: number;
+            subjectKind: string;
+          }[];
+        };
+      };
+    };
+    const people = envelope.payload.civilization.society.people;
+    const residencies = envelope.payload.civilizations.residencies;
+    const child = people.find((person) => person.alive && person.origin === 'birth');
+    const deceased = people.find((person) => !person.alive);
+    const formedHousehold = envelope.payload.civilization.society.interpersonal.householdHistories
+      .flatMap((history) => history.intervals)
+      .find((interval) => interval.startTick !== null && interval.startTick > 0);
+    expect(child).toBeDefined();
+    expect(deceased).toBeDefined();
+    expect(formedHousehold).toBeDefined();
+
+    const childResidence = residencies.find(
+      (residency) =>
+        residency.subjectKind === 'person' &&
+        residency.subjectId === child!.id &&
+        residency.startedTick === child!.birthTick,
+    );
+    const deathResidence = residencies.find(
+      (residency) =>
+        residency.subjectKind === 'person' &&
+        residency.subjectId === deceased!.id &&
+        residency.endedTick === deceased!.deathTick,
+    );
+    const householdResidence = residencies.find(
+      (residency) =>
+        residency.subjectKind === 'household' &&
+        residency.subjectId === formedHousehold!.householdId &&
+        residency.startedTick === formedHousehold!.startTick,
+    );
+    expect(childResidence).toBeDefined();
+    expect(deathResidence).toBeDefined();
+    expect(householdResidence).toBeDefined();
+
+    childResidence!.startedTick -= ACCELERATED_YEAR_TICKS;
+    deathResidence!.endedTick = deceased!.deathTick - ACCELERATED_YEAR_TICKS;
+    householdResidence!.startedTick = formedHousehold!.startTick! - ACCELERATED_YEAR_TICKS;
+    envelope.contentVersion = 13;
+    envelope.engineVersion = 13;
+    envelope.formatVersion = 13;
+    envelope.checksum = hashCanonicalJson(JSON.stringify(envelope.payload));
+
+    const migrated = migrateWorldSnapshot(JSON.stringify(envelope));
+    const loaded = deserializeWorldSnapshot(migrated);
+
+    expect(canonicalWorldJson(loaded)).toBe(canonicalWorldJson(source));
+    expect(hashWorldState(loaded)).toBe(hashWorldState(source));
+    expect(migrateWorldSnapshot(migrated)).toBe(migrated);
+
+    envelope.contentVersion = WORLD_SNAPSHOT_FORMAT_VERSION;
+    envelope.engineVersion = WORLD_SNAPSHOT_FORMAT_VERSION;
+    envelope.formatVersion = WORLD_SNAPSHOT_FORMAT_VERSION;
+    expect(() => deserializeWorldSnapshot(JSON.stringify(envelope))).toThrow(/residency/i);
+
+    envelope.contentVersion = 13;
+    envelope.engineVersion = 13;
+    envelope.formatVersion = 13;
+    deathResidence!.endedTick = deceased!.deathTick + 1;
+    envelope.checksum = hashCanonicalJson(JSON.stringify(envelope.payload));
+    expect(() => migrateWorldSnapshot(JSON.stringify(envelope))).toThrow(/factual death/i);
+
+    deathResidence!.endedTick = deceased!.deathTick - ACCELERATED_YEAR_TICKS;
+    childResidence!.startedTick = child!.birthTick - ACCELERATED_YEAR_TICKS - 1;
+    envelope.checksum = hashCanonicalJson(JSON.stringify(envelope.payload));
+    expect(() => migrateWorldSnapshot(JSON.stringify(envelope))).toThrow(/birth boundary/i);
+
+    childResidence!.startedTick = child!.birthTick - ACCELERATED_YEAR_TICKS;
+    deathResidence!.endedTick = null;
+    envelope.checksum = hashCanonicalJson(JSON.stringify(envelope.payload));
+    expect(() => migrateWorldSnapshot(JSON.stringify(envelope))).toThrow(/factual death/i);
+  }, 30_000);
+
   it.each([
     ['mid-flight', m9E2eArchives.midFlightPackage],
     ['contacted', m9E2eArchives.contactedPackage],
