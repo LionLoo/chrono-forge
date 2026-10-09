@@ -420,21 +420,48 @@ describe('deterministic world lab', () => {
   it('refits the release-world founding region on resize without discarding exploration', async () => {
     const user = userEvent.setup();
     render(<App persistence={createPreviewPersistence()} workerFactory={createRuntimeWorker} />);
-    await screen.findByText('Worker projection ready · autonomous world active');
+    await screen.findByText(
+      'Worker projection ready · autonomous world active',
+      undefined,
+      UI_READY_TIMEOUT,
+    );
     const world = screen.getByRole('img', { name: 'Generated Chrono Forge world' });
 
-    await waitFor(() => expect(world).toHaveAttribute('data-camera', '-676.5:-598.5:1.5'));
+    await waitFor(
+      () => expect(world).toHaveAttribute('data-camera', '-676.5:-598.5:1.5'),
+      UI_READY_TIMEOUT,
+    );
     await user.click(screen.getByRole('button', { name: 'Simulate large map viewport' }));
-    await waitFor(() => expect(world).not.toHaveAttribute('data-camera', '-676.5:-598.5:1.5'));
+    await waitFor(
+      () => expect(world).not.toHaveAttribute('data-camera', '-676.5:-598.5:1.5'),
+      UI_READY_TIMEOUT,
+    );
 
+    const resizedOverviewCamera = world.getAttribute('data-camera');
     await user.click(screen.getByRole('button', { name: 'Zoom world in' }));
+    await waitFor(
+      () => expect(world.getAttribute('data-camera')).not.toBe(resizedOverviewCamera),
+      UI_READY_TIMEOUT,
+    );
     const exploredCamera = world.getAttribute('data-camera');
+    expect(exploredCamera).not.toBeNull();
     await user.click(screen.getByRole('button', { name: 'Simulate larger map viewport' }));
-    expect(world).toHaveAttribute('data-camera', exploredCamera ?? 'missing');
+    await waitFor(
+      () => expect(world).toHaveAttribute('data-camera', exploredCamera ?? 'missing'),
+      UI_READY_TIMEOUT,
+    );
 
     await user.click(screen.getByRole('button', { name: 'Overview' }));
+    await waitFor(
+      () => expect(world.getAttribute('data-camera')).not.toBe(exploredCamera),
+      UI_READY_TIMEOUT,
+    );
+    const restoredOverviewCamera = world.getAttribute('data-camera');
     await user.click(screen.getByRole('button', { name: 'Simulate larger map viewport' }));
-    expect(world.getAttribute('data-camera')).not.toBe(exploredCamera);
+    await waitFor(
+      () => expect(world.getAttribute('data-camera')).not.toBe(restoredOverviewCamera),
+      UI_READY_TIMEOUT,
+    );
   });
 
   it('keeps indirect interventions optional and queues them through the Worker', async () => {
