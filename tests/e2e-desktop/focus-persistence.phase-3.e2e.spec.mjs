@@ -465,9 +465,8 @@ describe('native focus persistence phase 3', () => {
 
     expect([...invoked].sort()).toEqual([...REGISTERED_COMMANDS].sort());
 
-    // Closing the only native window terminates the embedded desktop process. The launcher then
-    // starts a new process for phase 4, so recovery is proved across a cold application launch
-    // rather than across two WebDriver sessions attached to one process.
-    await browser.closeWindow();
+    // The native runner ends this launcher after the assertions finish, then starts phase 4 in a
+    // second launcher against the same isolated profile. That preserves a real cold application
+    // boundary without terminating the embedded WebDriver before normal session teardown.
   }).timeout(360_000);
 });

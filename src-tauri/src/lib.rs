@@ -32,6 +32,31 @@ fn persistence_directory(base: &Path, profile: Option<&OsStr>) -> Result<PathBuf
     Ok(base.join("profiles").join(profile))
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WindowLifecycleEvent {
+    CloseRequested,
+    Destroyed,
+    Other,
+}
+
+impl From<&tauri::WindowEvent> for WindowLifecycleEvent {
+    fn from(event: &tauri::WindowEvent) -> Self {
+        match event {
+            tauri::WindowEvent::CloseRequested { .. } => Self::CloseRequested,
+            tauri::WindowEvent::Destroyed => Self::Destroyed,
+            _ => Self::Other,
+        }
+    }
+}
+
+fn should_exit_after_window_event(window_label: &str, event: WindowLifecycleEvent) -> bool {
+    window_label == "main"
+        && matches!(
+            event,
+            WindowLifecycleEvent::CloseRequested | WindowLifecycleEvent::Destroyed
+        )
+}
+
 #[derive(Debug, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 struct AppInfo {
@@ -90,12 +115,7 @@ pub fn run() {
             Ok(())
         })
         .on_window_event(|window, event| {
-            if window.label() == "main"
-                && matches!(
-                    event,
-                    tauri::WindowEvent::CloseRequested { .. } | tauri::WindowEvent::Destroyed
-                )
-            {
+            if should_exit_after_window_event(window.label(), event.into()) {
                 window.app_handle().exit(0);
             }
         })
@@ -123,7 +143,10 @@ pub fn run() {
 mod tests {
     use std::{ffi::OsStr, path::Path};
 
-    use super::{AppInfo, app_info, persistence_directory};
+    use super::{
+        AppInfo, WindowLifecycleEvent, app_info, persistence_directory,
+        should_exit_after_window_event,
+    };
 
     #[test]
     fn app_info_reports_local_first_identity() {
@@ -172,5 +195,41 @@ mod tests {
                 "profile {invalid:?} must be rejected",
             );
         }
+    }
+
+    #[test]
+    fn only_player_window_close_or_destruction_exits_the_process() {
+        assert!(should_exit_after_window_event(
+            "main",
+            WindowLifecycleEvent::CloseRequested,
+        ));
+        assert!(should_exit_after_window_event(
+            "main",
+            WindowLifecycleEvent::Destroyed,
+        ));
+        assert!(!should_exit_after_window_event(
+            "persistence-broker",
+            WindowLifecycleEvent::CloseRequested,
+        ));
+        assert!(!should_exit_after_window_event(
+            "persistence-broker",
+            WindowLifecycleEvent::Destroyed,
+        ));
+        assert!(!should_exit_after_window_event(
+            "main",
+            WindowLifecycleEvent::Other,
+        ));
+    }
+
+    #[test]
+    fn tauri_window_events_map_to_the_lifecycle_boundary() {
+        assert_eq!(
+            WindowLifecycleEvent::from(&tauri::WindowEvent::Destroyed),
+            WindowLifecycleEvent::Destroyed,
+        );
+        assert_eq!(
+            WindowLifecycleEvent::from(&tauri::WindowEvent::Focused(false)),
+            WindowLifecycleEvent::Other,
+        );
     }
 }

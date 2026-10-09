@@ -15,6 +15,34 @@ import {
 } from '../../scripts/run-native-e2e-ci.mjs';
 
 const success = Object.freeze({ code: 0, output: '' });
+const beforeRelaunchArgs = [
+  'exec',
+  '--',
+  'wdio',
+  'run',
+  'wdio.conf.mjs',
+  '--spec',
+  './tests/e2e-desktop/focus-persistence.phase-1.e2e.spec.mjs',
+  '--spec',
+  './tests/e2e-desktop/focus-persistence.phase-2.e2e.spec.mjs',
+  '--spec',
+  './tests/e2e-desktop/focus-persistence.phase-3.e2e.spec.mjs',
+];
+const afterRelaunchArgs = [
+  'exec',
+  '--',
+  'wdio',
+  'run',
+  'wdio.conf.mjs',
+  '--spec',
+  './tests/e2e-desktop/focus-persistence.phase-4.e2e.spec.mjs',
+];
+const confirmedInfrastructureOutputs = [
+  'Error: Script execution timed out\n    at DirectEvalClient.eval',
+  '[native-e2e-infrastructure] tauri-direct-eval-timeout\nTimeoutError: The operation was aborted due to timeout',
+  'WARN webdriver: WebDriverError: Script execution timed out when running "execute/sync" with method "POST"',
+  'WARN webdriver: WebDriverError: Session f0c679fc-44c5-49fc-8618-5c3f3ad7d899 not found when running "execute/sync" with method "POST"',
+];
 
 function commandResult(code: number, output: string): NativeE2eCommandResult {
   return { code, output };
@@ -73,17 +101,21 @@ describe('native CI E2E infrastructure classification', () => {
     const run = vi
       .fn<(args: string[]) => Promise<NativeE2eCommandResult>>()
       .mockResolvedValueOnce(success)
+      .mockResolvedValueOnce(success)
       .mockResolvedValueOnce(
         commandResult(1, 'Error: Script execution timed out\n    at DirectEvalClient.eval'),
       )
+      .mockResolvedValueOnce(success)
       .mockResolvedValueOnce(success);
     const logger = { error: vi.fn(), warn: vi.fn() };
     const verifyDatabase = vi.fn().mockResolvedValue(undefined);
 
     await expect(runNativeE2eCi(run, logger, verifyDatabase)).resolves.toBe(0);
     expect(run).toHaveBeenNthCalledWith(1, ['run', 'build:e2e:desktop']);
-    expect(run).toHaveBeenNthCalledWith(2, ['exec', '--', 'wdio', 'run', 'wdio.conf.mjs']);
-    expect(run).toHaveBeenNthCalledWith(3, ['exec', '--', 'wdio', 'run', 'wdio.conf.mjs']);
+    expect(run).toHaveBeenNthCalledWith(2, beforeRelaunchArgs);
+    expect(run).toHaveBeenNthCalledWith(3, afterRelaunchArgs);
+    expect(run).toHaveBeenNthCalledWith(4, beforeRelaunchArgs);
+    expect(run).toHaveBeenNthCalledWith(5, afterRelaunchArgs);
     expect(logger.warn).toHaveBeenCalledOnce();
     expect(logger.error).not.toHaveBeenCalled();
     expect(verifyDatabase).toHaveBeenCalledOnce();
@@ -93,20 +125,41 @@ describe('native CI E2E infrastructure classification', () => {
     const run = vi
       .fn<(args: string[]) => Promise<NativeE2eCommandResult>>()
       .mockResolvedValueOnce(success)
+      .mockResolvedValueOnce(success)
       .mockResolvedValueOnce(commandResult(7, 'expected paused session to exist'));
     const logger = { error: vi.fn(), warn: vi.fn() };
     const verifyDatabase = vi.fn().mockResolvedValue(undefined);
 
     await expect(runNativeE2eCi(run, logger, verifyDatabase)).resolves.toBe(7);
-    expect(run).toHaveBeenCalledTimes(2);
+    expect(run).toHaveBeenCalledTimes(3);
     expect(logger.warn).not.toHaveBeenCalled();
     expect(logger.error).toHaveBeenCalledOnce();
     expect(verifyDatabase).not.toHaveBeenCalled();
   });
 
+  it.each(confirmedInfrastructureOutputs)(
+    'does not let a recovered pre-relaunch signature mask a phase-4 assertion failure: %s',
+    async (recoveredOutput) => {
+      const run = vi
+        .fn<(args: string[]) => Promise<NativeE2eCommandResult>>()
+        .mockResolvedValueOnce(success)
+        .mockResolvedValueOnce(commandResult(0, recoveredOutput))
+        .mockResolvedValueOnce(commandResult(7, 'expected recovered generation 1 to equal 2'));
+      const logger = { error: vi.fn(), warn: vi.fn() };
+      const verifyDatabase = vi.fn().mockResolvedValue(undefined);
+
+      await expect(runNativeE2eCi(run, logger, verifyDatabase)).resolves.toBe(7);
+      expect(run).toHaveBeenCalledTimes(3);
+      expect(logger.warn).not.toHaveBeenCalled();
+      expect(logger.error).toHaveBeenCalledOnce();
+      expect(verifyDatabase).not.toHaveBeenCalled();
+    },
+  );
+
   it('fails after the single bounded retry', async () => {
     const run = vi
       .fn<(args: string[]) => Promise<NativeE2eCommandResult>>()
+      .mockResolvedValueOnce(success)
       .mockResolvedValueOnce(success)
       .mockResolvedValueOnce(
         commandResult(
@@ -114,12 +167,13 @@ describe('native CI E2E infrastructure classification', () => {
           '[native-e2e-infrastructure] tauri-direct-eval-timeout\nTimeoutError: The operation was aborted due to timeout',
         ),
       )
+      .mockResolvedValueOnce(success)
       .mockResolvedValueOnce(commandResult(9, 'expected 1 to equal 2'));
     const logger = { error: vi.fn(), warn: vi.fn() };
     const verifyDatabase = vi.fn().mockResolvedValue(undefined);
 
     await expect(runNativeE2eCi(run, logger, verifyDatabase)).resolves.toBe(9);
-    expect(run).toHaveBeenCalledTimes(3);
+    expect(run).toHaveBeenCalledTimes(5);
     expect(logger.warn).toHaveBeenCalledOnce();
     expect(logger.error).toHaveBeenCalledOnce();
     expect(verifyDatabase).not.toHaveBeenCalled();
@@ -136,7 +190,8 @@ describe('native E2E SQLite integrity gate', () => {
 
     await expect(runNativeE2eSingleAttempt(run, logger, verifyDatabase)).resolves.toBe(1);
     expect(run).toHaveBeenNthCalledWith(1, ['run', 'build:e2e:desktop']);
-    expect(run).toHaveBeenNthCalledWith(2, ['exec', '--', 'wdio', 'run', 'wdio.conf.mjs']);
+    expect(run).toHaveBeenNthCalledWith(2, beforeRelaunchArgs);
+    expect(run).toHaveBeenNthCalledWith(3, afterRelaunchArgs);
     expect(verifyDatabase).toHaveBeenCalledOnce();
     expect(logger.error).toHaveBeenCalledWith('[native-e2e-integrity] integrity fault');
     expect(logger.warn).not.toHaveBeenCalled();

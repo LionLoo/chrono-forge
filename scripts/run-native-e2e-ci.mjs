@@ -8,6 +8,14 @@ const npmCliPath = process.env.npm_execpath;
 const PROFILE_ENVIRONMENT_VARIABLE = 'CHRONO_FORGE_PROFILE';
 const E2E_APPLICATION_IDENTIFIER = 'com.lionloo.chronoforge.e2e';
 const NATIVE_TEST_TIMEOUT_PATTERN = /Timeout of \d+ms exceeded\. The execution in the test /u;
+const PRE_RELAUNCH_SPECS = Object.freeze([
+  './tests/e2e-desktop/focus-persistence.phase-1.e2e.spec.mjs',
+  './tests/e2e-desktop/focus-persistence.phase-2.e2e.spec.mjs',
+  './tests/e2e-desktop/focus-persistence.phase-3.e2e.spec.mjs',
+]);
+const POST_RELAUNCH_SPECS = Object.freeze([
+  './tests/e2e-desktop/focus-persistence.phase-4.e2e.spec.mjs',
+]);
 let generatedProfileSequence = 0;
 
 const CONFIRMED_INFRASTRUCTURE_FAILURES = Object.freeze([
@@ -198,6 +206,31 @@ function runNpm(args) {
   });
 }
 
+function wdioArgs(specs) {
+  return [
+    'exec',
+    '--',
+    'wdio',
+    'run',
+    'wdio.conf.mjs',
+    ...specs.flatMap((spec) => ['--spec', spec]),
+  ];
+}
+
+async function runNativeE2eAttempt(run) {
+  const beforeRelaunch = await run(wdioArgs(PRE_RELAUNCH_SPECS));
+  if (beforeRelaunch.code !== 0) return beforeRelaunch;
+
+  // Ending the first WDIO launcher cleanly deletes its WebDriver session before the Tauri
+  // service stops the embedded app. The second launcher then proves phase 4 against a real
+  // cold process while retaining the same isolated SQLite profile.
+  const afterRelaunch = await run(wdioArgs(POST_RELAUNCH_SPECS));
+  // Return only the command that controls this attempt's outcome. In particular, a recovered
+  // warning from the successful first launcher must never classify an unrelated phase-4
+  // assertion failure as retryable infrastructure.
+  return afterRelaunch;
+}
+
 export async function runNativeE2eCi(
   run = runNpm,
   logger = console,
@@ -211,7 +244,7 @@ export async function runNativeE2eCi(
     return build.code;
   }
 
-  const firstAttempt = await run(['exec', '--', 'wdio', 'run', 'wdio.conf.mjs']);
+  const firstAttempt = await runNativeE2eAttempt(run);
   if (firstAttempt.code === 0) {
     try {
       await verifyDatabase();
@@ -236,7 +269,7 @@ export async function runNativeE2eCi(
     `[native-e2e-ci] The first native suite attempt failed through confirmed infrastructure (${confirmedFailures.join(', ')}). Retrying the complete unchanged suite once with fresh launcher-owned sessions.`,
   );
   if (run === runNpm) useFreshNativeE2eProfile();
-  const secondAttempt = await run(['exec', '--', 'wdio', 'run', 'wdio.conf.mjs']);
+  const secondAttempt = await runNativeE2eAttempt(run);
   if (secondAttempt.code !== 0) {
     logger.error('[native-e2e-ci] The single bounded infrastructure retry also failed.');
     return secondAttempt.code;
@@ -262,7 +295,7 @@ export async function runNativeE2eSingleAttempt(
   }
   const build = await run(['run', 'build:e2e:desktop']);
   if (build.code !== 0) return build.code;
-  const attempt = await run(['exec', '--', 'wdio', 'run', 'wdio.conf.mjs']);
+  const attempt = await runNativeE2eAttempt(run);
   if (attempt.code !== 0) return attempt.code;
   try {
     await verifyDatabase();
