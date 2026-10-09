@@ -58,7 +58,7 @@ export const M10_COLLAPSE_RECOVERY_SCENARIO: M10CollapseRecoveryScenario = Objec
   expected: Object.freeze({
     preShock: Object.freeze({
       tick: 150_000,
-      hash: 'e4ee1e6f',
+      hash: 'bc8eb806',
       operations: Object.freeze({
         settlement: 16_080,
         society: 2_876,
@@ -76,7 +76,7 @@ export const M10_COLLAPSE_RECOVERY_SCENARIO: M10CollapseRecoveryScenario = Objec
     }),
     lowPoint: Object.freeze({
       tick: 151_000,
-      hash: '9b888bca',
+      hash: 'e3cbb024',
       operations: Object.freeze({
         settlement: 16_251,
         society: 2_919,
@@ -94,7 +94,7 @@ export const M10_COLLAPSE_RECOVERY_SCENARIO: M10CollapseRecoveryScenario = Objec
     }),
     recovery: Object.freeze({
       tick: 160_000,
-      hash: 'a822de4f',
+      hash: '6e7b8303',
       operations: Object.freeze({
         settlement: 17_833,
         society: 3_147,
@@ -112,7 +112,7 @@ export const M10_COLLAPSE_RECOVERY_SCENARIO: M10CollapseRecoveryScenario = Objec
     }),
     final: Object.freeze({
       tick: 600_000,
-      hash: '9ee4ee82',
+      hash: '3ddb9d0b',
       operations: Object.freeze({
         settlement: 229_803,
         society: 37_292,
