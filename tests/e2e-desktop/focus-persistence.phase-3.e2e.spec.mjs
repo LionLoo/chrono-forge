@@ -37,6 +37,23 @@ async function invokeOutcome(command, arguments_ = undefined) {
   );
 }
 
+async function brokerConfirmationOutcome(identity) {
+  return browser.execute(async (requestedIdentity) => {
+    try {
+      if (globalThis.__chronoForgeE2EConfirmSemanticSave === undefined) {
+        throw new Error('semantic confirmation test bridge is unavailable');
+      }
+      await globalThis.__chronoForgeE2EConfirmSemanticSave(requestedIdentity);
+      return { ok: true };
+    } catch (error) {
+      return {
+        ok: false,
+        message: error instanceof Error ? error.message : String(error),
+      };
+    }
+  }, identity);
+}
+
 describe('native focus persistence phase 3', () => {
   it('fails closed across the complete installed Tauri command boundary', async () => {
     await $('#focus-title').waitForDisplayed();
@@ -133,7 +150,7 @@ describe('native focus persistence phase 3', () => {
     await reject(
       'confirm_semantically_valid_save_generation',
       { slotId: 'primary', generation: 0, checksum: 'not-a-checksum' },
-      /malformed|checksum|generation/i,
+      /isolated persistence validator/i,
     );
     await reject(
       'export_save_generation',
@@ -199,11 +216,13 @@ describe('native focus persistence phase 3', () => {
       checksum: firstProbeCommit.checksum,
       focusSession: null,
     });
-    await invoke('confirm_semantically_valid_save_generation', {
+    invoked.add('confirm_semantically_valid_save_generation');
+    const confirmedCheckpoint = await brokerConfirmationOutcome({
       slotId: 'ipc-probe',
       generation: checkpointCommit.headGeneration,
       checksum: checkpointCommit.checksum,
     });
+    expect(confirmedCheckpoint.ok).toBe(true);
     invoked.add('export_save_generation');
     invoked.add('import_save_slot');
     const imported = await executeTauri(async ({ core }, generation) => {
@@ -334,6 +353,65 @@ describe('native focus persistence phase 3', () => {
       /unknown field|unexpectedAuthority|settings/i,
     );
 
+    const retentionSeed = await invokeWithPrimarySnapshot('commit_save_slot', {
+      slotId: 'ipc-semantic-retention',
+      name: 'Semantic retention probe',
+    });
+    const confirmedSeed = await brokerConfirmationOutcome({
+      slotId: 'ipc-semantic-retention',
+      generation: retentionSeed.headGeneration,
+      checksum: retentionSeed.checksum,
+    });
+    expect(confirmedSeed.ok).toBe(true);
+    const invalidSnapshot = JSON.stringify({
+      format: 'chrono-forge-world',
+      formatVersion: 14,
+      payload: { tick: 1, eventLog: [] },
+    });
+    let newestInvalid;
+    for (let index = 0; index < 3; index += 1) {
+      newestInvalid = await invoke('commit_save_slot', {
+        slotId: 'ipc-semantic-retention',
+        name: 'Semantic retention probe',
+        snapshot: invalidSnapshot,
+      });
+      await reject(
+        'confirm_semantically_valid_save_generation',
+        {
+          slotId: 'ipc-semantic-retention',
+          generation: newestInvalid.headGeneration,
+          checksum: newestInvalid.checksum,
+        },
+        /isolated persistence validator/i,
+      );
+    }
+    const rejectedByCanonicalBroker = await brokerConfirmationOutcome({
+      slotId: 'ipc-semantic-retention',
+      generation: newestInvalid.headGeneration,
+      checksum: newestInvalid.checksum,
+    });
+    expect(rejectedByCanonicalBroker.ok).toBe(false);
+    expect(rejectedByCanonicalBroker.message).toMatch(/canonical snapshot validation/i);
+    let beforeGeneration = newestInvalid.headGeneration + 1;
+    let retainedCanonical = null;
+    while (beforeGeneration > 1) {
+      const page = await invoke('load_save_slot_fallback_candidates', {
+        slotId: 'ipc-semantic-retention',
+        beforeGeneration,
+      });
+      const candidate = page?.candidates[0];
+      if (candidate?.recoveredGeneration === retentionSeed.headGeneration) {
+        retainedCanonical = candidate;
+        break;
+      }
+      beforeGeneration = page?.nextBeforeGeneration ?? 1;
+    }
+    expect(retainedCanonical).toMatchObject({
+      recoveredGeneration: retentionSeed.headGeneration,
+      checksum: retentionSeed.checksum,
+      snapshot: primary.snapshot,
+    });
+
     const firstRecoveryCommit = await invokeWithPrimarySnapshot('commit_save_slot', {
       slotId: 'ipc-corrupt-recovery',
       name: 'IPC recovery',
@@ -354,6 +432,7 @@ describe('native focus persistence phase 3', () => {
     const slotsAfterFailures = await invoke('list_save_slots');
     expect(slotsAfterFailures.map(({ slotId }) => slotId)).toContain('ipc-probe');
     expect(slotsAfterFailures.map(({ slotId }) => slotId)).toContain('ipc-corrupt-recovery');
+    expect(slotsAfterFailures.map(({ slotId }) => slotId)).toContain('ipc-semantic-retention');
     expect(slotsAfterFailures.map(({ slotId }) => slotId)).not.toContain('ipc-cross-slot');
     expect(slotsAfterFailures.map(({ slotId }) => slotId)).not.toContain(
       'ipc-interrupted-checkpoint',

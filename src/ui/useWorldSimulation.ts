@@ -30,6 +30,8 @@ export const DEMO_WORLD_CONFIG: WorldConfig = Object.freeze({
   societyYearTicks: 100_000,
 });
 
+export const ADVANCE_RESPONSE_TIMEOUT_MS = 10_000;
+
 export interface SimulationWorkerPort {
   onerror: ((event: ErrorEvent) => void) | null;
   onmessage: ((event: MessageEvent<WorkerToUiMessage>) => void) | null;
@@ -110,7 +112,8 @@ interface PendingFocusCheckpointRequest {
 }
 
 export interface WorldSimulationView {
-  readonly advanceTicks: (ticks: number) => void;
+  /** Returns false when an earlier authoritative advance is still outstanding. */
+  readonly advanceTicks: (ticks: number) => boolean | void;
   readonly error: string | null;
   readonly events: readonly WorkerEvent[];
   /** The latest events newly recorded after an authoritative advance, excluding load history. */
@@ -187,7 +190,10 @@ export function useWorldSimulation(
   const frameRef = useRef<WorldFrameProjection | null>(null);
   const workerRef = useRef<SimulationWorkerPort | null>(null);
   const requestSequenceRef = useRef(0);
-  const pendingAdvanceRequestIdsRef = useRef(new Set<string>());
+  const pendingAdvanceRequestsRef = useRef(
+    new Map<string, ReturnType<typeof globalThis.setTimeout> | null>(),
+  );
+  const failWorkerRef = useRef<((reason: Error) => void) | null>(null);
   const pendingSavesRef = useRef(new Map<string, PendingSaveRequest>());
   const pendingFocusCheckpointsRef = useRef(new Map<string, PendingFocusCheckpointRequest>());
   const pendingLoadsRef = useRef(new Map<string, PendingVoidRequest>());
@@ -220,7 +226,7 @@ export function useWorldSimulation(
     }
 
     workerRef.current = worker;
-    const pendingAdvanceRequestIds = pendingAdvanceRequestIdsRef.current;
+    const pendingAdvanceRequests = pendingAdvanceRequestsRef.current;
     const pendingSaves = pendingSavesRef.current;
     const pendingFocusCheckpoints = pendingFocusCheckpointsRef.current;
     const pendingLoads = pendingLoadsRef.current;
@@ -276,7 +282,10 @@ export function useWorldSimulation(
       pendingLoads.clear();
       pendingOffline.clear();
       pendingCommands.clear();
-      pendingAdvanceRequestIds.clear();
+      for (const timeout of pendingAdvanceRequests.values()) {
+        if (timeout !== null) globalThis.clearTimeout(timeout);
+      }
+      pendingAdvanceRequests.clear();
     };
     const failWorker = (reason: Error) => {
       rejectAll(reason);
@@ -286,6 +295,7 @@ export function useWorldSimulation(
       worker.terminate();
       setError(reason.message);
     };
+    failWorkerRef.current = failWorker;
     const applyFrame = (
       nextFrame: WorldFrameProjection,
       replaceEvents: boolean,
@@ -356,7 +366,12 @@ export function useWorldSimulation(
         }
         case 'frameDelta': {
           try {
-            const isExpectedAdvance = pendingAdvanceRequestIds.delete(message.requestId);
+            const isExpectedAdvance = pendingAdvanceRequests.has(message.requestId);
+            const advanceTimeout = pendingAdvanceRequests.get(message.requestId);
+            if (advanceTimeout !== undefined && advanceTimeout !== null) {
+              globalThis.clearTimeout(advanceTimeout);
+            }
+            pendingAdvanceRequests.delete(message.requestId);
             const pendingOfflineRequest = pendingOffline.get(message.requestId);
             if (!isExpectedAdvance && pendingOfflineRequest === undefined) {
               throw new Error('The simulation worker sent an unexpected frame delta.');
@@ -497,6 +512,7 @@ export function useWorldSimulation(
       disposed = true;
       const reason = new Error('The simulation worker was closed before the request completed.');
       rejectAll(reason);
+      if (failWorkerRef.current === failWorker) failWorkerRef.current = null;
       workerRef.current = null;
       worker.onmessage = null;
       worker.onerror = null;
@@ -513,12 +529,16 @@ export function useWorldSimulation(
   }, []);
 
   const advanceTicks = useCallback(
-    (ticks: number) => {
+    (ticks: number): boolean => {
       assertNonNegativeSafeInteger(ticks, 'Advance ticks');
       const worker = workerRef.current;
-      if (worker === null) return;
+      if (worker === null) return false;
+      // Deltas are base-tick ordered. Never enqueue a second advance behind an unacknowledged
+      // one: focus time must remain available for an exact retry instead of outrunning Worker
+      // authority or growing an unbounded request/message queue.
+      if (pendingAdvanceRequestsRef.current.size > 0) return false;
       const requestId = nextRequestId('advance');
-      pendingAdvanceRequestIdsRef.current.add(requestId);
+      pendingAdvanceRequestsRef.current.set(requestId, null);
       try {
         postWorkerMessage(
           worker,
@@ -531,9 +551,21 @@ export function useWorldSimulation(
           activityRecorderRef.current,
         );
       } catch (error) {
-        pendingAdvanceRequestIdsRef.current.delete(requestId);
+        pendingAdvanceRequestsRef.current.delete(requestId);
         throw error;
       }
+      if (pendingAdvanceRequestsRef.current.has(requestId)) {
+        const timeout = globalThis.setTimeout(() => {
+          if (!pendingAdvanceRequestsRef.current.has(requestId)) return;
+          failWorkerRef.current?.(
+            new Error(
+              `The simulation worker did not answer an advance request within ${ADVANCE_RESPONSE_TIMEOUT_MS} ms.`,
+            ),
+          );
+        }, ADVANCE_RESPONSE_TIMEOUT_MS);
+        pendingAdvanceRequestsRef.current.set(requestId, timeout);
+      }
+      return true;
     },
     [nextRequestId],
   );

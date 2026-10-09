@@ -4,11 +4,12 @@ use std::{
 };
 
 use serde::Serialize;
-use tauri::Manager;
+use tauri::{Manager, WebviewUrl, WebviewWindowBuilder};
 
 mod persistence;
 
 const PROFILE_ENVIRONMENT_VARIABLE: &str = "CHRONO_FORGE_PROFILE";
+const PERSISTENCE_BROKER_LABEL: &str = "persistence-broker";
 
 fn persistence_directory(base: &Path, profile: Option<&OsStr>) -> Result<PathBuf, String> {
     let Some(profile) = profile else {
@@ -68,7 +69,35 @@ pub fn run() {
             app.manage(persistence::PersistenceState::open_app_local_data(
                 &app_local_data,
             )?);
+            WebviewWindowBuilder::new(
+                app,
+                PERSISTENCE_BROKER_LABEL,
+                WebviewUrl::App("index.html?persistence-broker=1".into()),
+            )
+            .title("Chrono Forge persistence validator")
+            .visible(false)
+            .skip_taskbar(true)
+            .build()?;
+            // Keep the player-facing window last so desktop automation and accessibility tools
+            // attach to the game rather than the deliberately hidden validation compartment.
+            WebviewWindowBuilder::new(app, "main", WebviewUrl::App("index.html".into()))
+                .title("Chrono Forge")
+                .inner_size(1440.0, 900.0)
+                .min_inner_size(1024.0, 720.0)
+                .center()
+                .resizable(true)
+                .build()?;
             Ok(())
+        })
+        .on_window_event(|window, event| {
+            if window.label() == "main"
+                && matches!(
+                    event,
+                    tauri::WindowEvent::CloseRequested { .. } | tauri::WindowEvent::Destroyed
+                )
+            {
+                window.app_handle().exit(0);
+            }
         })
         .invoke_handler(tauri::generate_handler![
             app_info,

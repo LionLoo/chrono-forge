@@ -15,18 +15,7 @@
       "capabilities": ["default"],
       "csp": "default-src 'self'; img-src 'self' asset: http://asset.localhost data:; style-src 'self'; font-src 'self'; connect-src ipc: http://ipc.localhost; worker-src 'self' blob:"
     },
-    "windows": [
-      {
-        "label": "main",
-        "title": "Chrono Forge",
-        "width": 1440,
-        "height": 900,
-        "minWidth": 1024,
-        "minHeight": 720,
-        "center": true,
-        "resizable": true
-      }
-    ]
+    "windows": []
   },
   "bundle": {
     "active": true,

@@ -135,6 +135,11 @@ export type TauriInvoke = <Result>(
   arguments_?: Readonly<Record<string, unknown>>,
 ) => Promise<Result>;
 
+export type NativeSemanticSaveConfirmer = (
+  invoke: TauriInvoke,
+  loaded: LoadedSave,
+) => Promise<void>;
+
 interface ValidatedSnapshotAuthority {
   readonly checksum: string;
   readonly snapshot: string;
@@ -164,17 +169,23 @@ function rememberValidatedLoadedSave(
 }
 
 async function confirmNativeSemanticSave(invoke: TauriInvoke, loaded: LoadedSave): Promise<void> {
+  const result = await invoke<unknown>('confirm_semantically_valid_save_generation', {
+    slotId: loaded.slotId,
+    generation: loaded.recoveredGeneration,
+    checksum: loaded.checksum,
+  });
+  if (result !== null && result !== undefined) {
+    throw new TypeError('confirm_semantically_valid_save_generation returned an unexpected result');
+  }
+}
+
+async function confirmSemanticSaveBestEffort(
+  confirmSemanticSave: NativeSemanticSaveConfirmer,
+  invoke: TauriInvoke,
+  loaded: LoadedSave,
+): Promise<void> {
   try {
-    const result = await invoke<unknown>('confirm_semantically_valid_save_generation', {
-      slotId: loaded.slotId,
-      generation: loaded.recoveredGeneration,
-      checksum: loaded.checksum,
-    });
-    if (result !== null && result !== undefined) {
-      throw new TypeError(
-        'confirm_semantically_valid_save_generation returned an unexpected result',
-      );
-    }
+    await confirmSemanticSave(invoke, loaded);
   } catch {
     // Confirmation and pruning are best effort after the durable generation is committed. A
     // failure retains extra immutable generations; it must not turn a successful save into a
@@ -260,7 +271,10 @@ export function latestSnapshotEventId(save: LoadedSave): number {
 }
 
 /** Creates the production gateway without importing Tauri into browser builds. */
-export function createTauriPersistenceGateway(invoke: TauriInvoke): PersistenceGateway {
+export function createTauriPersistenceGateway(
+  invoke: TauriInvoke,
+  confirmSemanticSave: NativeSemanticSaveConfirmer = confirmNativeSemanticSave,
+): PersistenceGateway {
   return {
     async listSaveSlots() {
       const result = await invoke<unknown>('list_save_slots');
@@ -279,7 +293,7 @@ export function createTauriPersistenceGateway(invoke: TauriInvoke): PersistenceG
         await invoke<unknown>('commit_save_slot', { slotId, name, snapshot }),
         { slotId, name, snapshot, world: snapshotWorld, focusSession: null },
       );
-      await confirmNativeSemanticSave(invoke, loaded);
+      await confirmSemanticSaveBestEffort(confirmSemanticSave, invoke, loaded);
       return loaded;
     },
     async commitFocusCheckpoint(slotId, name, snapshot, session, sourceEventIds, workerAuthority) {
@@ -298,7 +312,7 @@ export function createTauriPersistenceGateway(invoke: TauriInvoke): PersistenceG
           focusSession: session,
         },
       );
-      await confirmNativeSemanticSave(invoke, loaded);
+      await confirmSemanticSaveBestEffort(confirmSemanticSave, invoke, loaded);
       return loaded;
     },
     async deleteSaveSlot(slotId) {
@@ -331,7 +345,7 @@ export function createTauriPersistenceGateway(invoke: TauriInvoke): PersistenceG
       const loaded = parseLoadedSave(
         await invoke<unknown>('import_save_slot', { package: savePackage }),
       );
-      await confirmNativeSemanticSave(invoke, loaded);
+      await confirmSemanticSaveBestEffort(confirmSemanticSave, invoke, loaded);
       return loaded;
     },
     async recordFocusSession(session, sourceEventIds) {

@@ -56,8 +56,20 @@ export const config = {
     timeout: 120_000,
   },
   before: async (_capabilities, _specs, session) => {
-    const activeWindow = await session.getWindowHandle();
-    await session.switchToWindow(activeWindow);
+    await session.waitUntil(
+      async () => {
+        for (const handle of await session.getWindowHandles()) {
+          await session.switchToWindow(handle);
+          const search = await session.execute(() => globalThis.location.search);
+          if (!new URLSearchParams(search).has('persistence-broker')) return true;
+        }
+        return false;
+      },
+      {
+        timeout: 20_000,
+        timeoutMsg: 'The visible Chrono Forge window is unavailable.',
+      },
+    );
   },
   beforeCommand: (commandName) => {
     commandTracker.beforeCommand(commandName);

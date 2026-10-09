@@ -766,15 +766,15 @@ function FocusWorkspace({
   );
 
   const advanceFocusTicks = useCallback(
-    (ticks: number): void => {
+    (ticks: number): boolean => {
       const currentWorkspace = getCurrentWorkspace();
       if (
         currentWorkspace !== null &&
         currentWorkspace.activeSave.slotId !== activeSaveRef.current.slotId
       ) {
-        return;
+        return false;
       }
-      simulation.advanceTicks(ticks);
+      return simulation.advanceTicks(ticks) !== false;
     },
     [getCurrentWorkspace, simulation],
   );

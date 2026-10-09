@@ -32,7 +32,9 @@ describe('focus controller', () => {
         clock: controlled.clock,
         slotId: 'slot-a',
         createSessionId: () => 'session-a',
-        onSimulationTicks: (count) => ticks.push(count),
+        onSimulationTicks: (count) => {
+          ticks.push(count);
+        },
         onSessionState: (session) => sessions.push(session),
       }),
     );
@@ -64,7 +66,9 @@ describe('focus controller', () => {
         clock: controlled.clock,
         slotId: null,
         createSessionId: () => 'session-a',
-        onSimulationTicks: (count) => ticks.push(count),
+        onSimulationTicks: (count) => {
+          ticks.push(count);
+        },
       }),
     );
 
@@ -111,7 +115,9 @@ describe('focus controller', () => {
         clock: controlled.clock,
         slotId: 'slot-a',
         createSessionId: () => 'session-break',
-        onSimulationTicks: (count) => ticks.push(count),
+        onSimulationTicks: (count) => {
+          ticks.push(count);
+        },
       }),
     );
 
@@ -134,7 +140,9 @@ describe('focus controller', () => {
         clock: controlled.clock,
         slotId: null,
         createSessionId: () => 'session-sleep',
-        onSimulationTicks: (count) => ticks.push(count),
+        onSimulationTicks: (count) => {
+          ticks.push(count);
+        },
       }),
     );
     act(() => result.current.start({ ...configuration, focusDurationMs: 60_000 }));
@@ -159,7 +167,9 @@ describe('focus controller', () => {
         clock: controlled.clock,
         initialSession: { ...restored, focusedMs: 0 },
         slotId: 'slot-a',
-        onSimulationTicks: (count) => ticks.push(count),
+        onSimulationTicks: (count) => {
+          ticks.push(count);
+        },
       }),
     );
 
@@ -179,7 +189,9 @@ describe('focus controller', () => {
           clock: controlled.clock,
           slotId: null,
           createSessionId: () => 'strict-session',
-          onSimulationTicks: (count) => ticks.push(count),
+          onSimulationTicks: (count) => {
+            ticks.push(count);
+          },
         }),
       { wrapper: StrictMode },
     );
@@ -231,6 +243,39 @@ describe('focus controller', () => {
     expect(sessions.at(-1)).toMatchObject({ focusedMs: 1_000, issuedSimulationTicks: 10 });
   });
 
+  it('keeps the exact elapsed interval available while Worker advance backpressure is active', () => {
+    const controlled = createClock();
+    const ticks: number[] = [];
+    let acceptsAdvance = false;
+    const { result } = renderHook(() =>
+      useFocusController({
+        clock: controlled.clock,
+        slotId: 'slot-a',
+        createSessionId: () => 'backpressure-session',
+        onSimulationTicks: (count) => {
+          ticks.push(count);
+          return acceptsAdvance;
+        },
+      }),
+    );
+    act(() => result.current.start(configuration));
+    controlled.set(1_000);
+
+    act(() => result.current.checkpoint());
+    expect(result.current.state).toMatchObject({
+      accumulatedFocusMs: 0,
+      totalIssuedSimulationTicks: 0,
+    });
+
+    acceptsAdvance = true;
+    act(() => result.current.checkpoint());
+    expect(result.current.state).toMatchObject({
+      accumulatedFocusMs: 1_000,
+      totalIssuedSimulationTicks: 10,
+    });
+    expect(ticks).toEqual([10, 10]);
+  });
+
   it('freezes automatic and manual elapsed-time transitions while simulation is suspended', () => {
     const controlled = createClock();
     const ticks: number[] = [];
@@ -240,7 +285,9 @@ describe('focus controller', () => {
           clock: controlled.clock,
           slotId: null,
           createSessionId: () => 'suspended-session',
-          onSimulationTicks: (count) => ticks.push(count),
+          onSimulationTicks: (count) => {
+            ticks.push(count);
+          },
           suspended,
         }),
       { initialProps: { suspended: false } },
@@ -269,7 +316,9 @@ describe('focus controller', () => {
         clock: controlled.clock,
         slotId: null,
         createSessionId: () => 'idle-session',
-        onSimulationTicks: (count) => ticks.push(count),
+        onSimulationTicks: (count) => {
+          ticks.push(count);
+        },
       }),
     );
 

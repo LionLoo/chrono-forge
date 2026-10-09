@@ -1,5 +1,6 @@
 import { invoke, isTauri } from '@tauri-apps/api/core';
 
+import { confirmSemanticSaveThroughBroker } from './persistence-broker';
 import {
   createInMemoryPersistenceGateway,
   createTauriPersistenceGateway,
@@ -32,7 +33,10 @@ export function createRuntimePersistence(
   const detectTauri = dependencies.detectTauri ?? isTauri;
   if (detectTauri()) {
     return {
-      gateway: createTauriPersistenceGateway(dependencies.invokeTauri ?? invokeTauri),
+      gateway: createTauriPersistenceGateway(
+        dependencies.invokeTauri ?? invokeTauri,
+        confirmSemanticSaveThroughBroker,
+      ),
       mode: 'native',
     };
   }

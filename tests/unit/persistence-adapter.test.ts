@@ -475,6 +475,64 @@ describe('persistence adapter', () => {
     ]);
   });
 
+  it('does not retry durable writes when semantic confirmation is temporarily unavailable', async () => {
+    const invokeMock = vi.fn(async (command: string) => {
+      await Promise.resolve();
+      if (command === 'import_save_slot') {
+        return {
+          slotId: 'alpha',
+          name: 'Alpha',
+          headGeneration: 3,
+          recoveredGeneration: 3,
+          recoveredFromCorruption: false,
+          savedAtMs: 3_000,
+          focusSession: null,
+          snapshot: snapshot('one'),
+          checksum: snapshotOneChecksum,
+        };
+      }
+      if (command !== 'commit_save_slot' && command !== 'commit_focus_checkpoint') {
+        throw new Error(`unexpected ${command}`);
+      }
+      return {
+        slotId: 'alpha',
+        name: 'Alpha',
+        headGeneration: command === 'commit_save_slot' ? 1 : 2,
+        savedAtMs: command === 'commit_save_slot' ? 1_000 : 2_000,
+        checksum: snapshotOneChecksum,
+      };
+    });
+    const invoke: TauriInvoke = <Result>(command: string) => invokeMock(command) as Promise<Result>;
+    const unavailableConfirmation = vi.fn().mockRejectedValue(new Error('broker unavailable'));
+    const gateway = createTauriPersistenceGateway(invoke, unavailableConfirmation);
+    const savePackage = JSON.stringify({
+      format: 'chrono-forge-save-export',
+      version: 1,
+      slotId: 'alpha',
+      name: 'Alpha',
+      snapshot: snapshot('one'),
+      checksum: snapshotOneChecksum,
+    });
+
+    await expect(gateway.commitSaveSlot('alpha', 'Alpha', snapshot('one'))).resolves.toMatchObject({
+      recoveredGeneration: 1,
+      checksum: snapshotOneChecksum,
+    });
+    await expect(
+      gateway.commitFocusCheckpoint('alpha', 'Alpha', snapshot('one'), completedSession, [1]),
+    ).resolves.toMatchObject({ recoveredGeneration: 2, focusSession: completedSession });
+    await expect(gateway.importSaveSlot(savePackage)).resolves.toMatchObject({
+      recoveredGeneration: 3,
+      checksum: snapshotOneChecksum,
+    });
+    expect(invokeMock.mock.calls.map(([command]) => command)).toEqual([
+      'commit_save_slot',
+      'commit_focus_checkpoint',
+      'import_save_slot',
+    ]);
+    expect(unavailableConfirmation).toHaveBeenCalledTimes(3);
+  });
+
   it('rejects a malformed native commit receipt without echoing the snapshot', async () => {
     const gateway = createTauriPersistenceGateway(async () => {
       await Promise.resolve();

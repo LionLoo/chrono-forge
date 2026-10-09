@@ -2309,11 +2309,13 @@ pub fn commit_focus_checkpoint(
 
 #[tauri::command]
 pub fn confirm_semantically_valid_save_generation(
+    window: tauri::WebviewWindow,
     state: State<'_, PersistenceState>,
     slot_id: String,
     generation: i64,
     checksum: String,
 ) -> std::result::Result<(), String> {
+    validate_semantic_confirmation_caller(window.label()).map_err(|error| error.to_string())?;
     let head_generation = state
         .lock()
         .and_then(|mut database| {
@@ -2321,6 +2323,15 @@ pub fn confirm_semantically_valid_save_generation(
         })
         .map_err(|error| error.to_string())?;
     state.defer_prune(slot_id, head_generation);
+    Ok(())
+}
+
+fn validate_semantic_confirmation_caller(label: &str) -> Result<()> {
+    if label != "persistence-broker" {
+        return Err(PersistenceError::new(
+            "semantic save confirmation requires the isolated persistence validator",
+        ));
+    }
     Ok(())
 }
 
@@ -2403,6 +2414,17 @@ pub fn save_settings(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn semantic_confirmation_requires_the_isolated_validator() {
+        assert!(validate_semantic_confirmation_caller("persistence-broker").is_ok());
+        assert!(
+            validate_semantic_confirmation_caller("main")
+                .expect_err("the visible webview must not authorize pruning")
+                .to_string()
+                .contains("isolated persistence validator")
+        );
+    }
 
     fn snapshot(value: &str) -> String {
         format!(

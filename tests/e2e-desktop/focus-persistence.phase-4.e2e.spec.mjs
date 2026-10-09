@@ -46,18 +46,36 @@ describe('native focus persistence phase 4', () => {
       const corruptHead = await core.invoke('load_save_slot_candidates', {
         slotId: 'ipc-corrupt-recovery',
       });
+      const invalidSemanticHead = await core.invoke('load_save_slot_candidates', {
+        slotId: 'ipc-semantic-retention',
+      });
+      const retainedSemanticSeed = await core.invoke('load_save_slot_fallback_candidates', {
+        slotId: 'ipc-semantic-retention',
+        beforeGeneration: 2,
+      });
       const recovered = await core.invoke('load_save_slot_fallback_candidates', {
         slotId: 'ipc-corrupt-recovery',
         beforeGeneration: corruptHead.nextBeforeGeneration,
       });
       const history = await core.invoke('list_focus_sessions');
       const settings = await core.invoke('load_settings');
-      return { slots, primary, probe, corruptHead, recovered, history, settings };
+      return {
+        slots,
+        primary,
+        probe,
+        corruptHead,
+        recovered,
+        invalidSemanticHead,
+        retainedSemanticSeed,
+        history,
+        settings,
+      };
     });
 
     expect(evidence.slots.map(({ slotId }) => slotId)).toContain('primary');
     expect(evidence.slots.map(({ slotId }) => slotId)).toContain('ipc-probe');
     expect(evidence.slots.map(({ slotId }) => slotId)).toContain('ipc-corrupt-recovery');
+    expect(evidence.slots.map(({ slotId }) => slotId)).toContain('ipc-semantic-retention');
     expect(evidence.slots.map(({ slotId }) => slotId)).not.toContain('ipc-cross-slot');
     expect(evidence.slots.map(({ slotId }) => slotId)).not.toContain('ipc-import');
     expect(evidence.primary?.candidates[0]?.focusSession).toMatchObject({
@@ -82,6 +100,12 @@ describe('native focus persistence phase 4', () => {
         status: 'completed',
       },
     });
+    expect(evidence.invalidSemanticHead?.candidates[0]?.snapshot).toContain('"formatVersion":14');
+    expect(evidence.retainedSemanticSeed?.candidates[0]).toMatchObject({
+      recoveredGeneration: 1,
+      checksum: evidence.primary?.candidates[0]?.checksum,
+      snapshot: evidence.primary?.candidates[0]?.snapshot,
+    });
     const probeRecord = evidence.history.find(
       ({ session }) => session.sessionId === 'ipc-probe-session',
     );
@@ -100,12 +124,16 @@ describe('native focus persistence phase 4', () => {
       return {
         probe: await core.invoke('delete_save_slot', { slotId: 'ipc-probe' }),
         recovery: await core.invoke('delete_save_slot', { slotId: 'ipc-corrupt-recovery' }),
+        semanticRetention: await core.invoke('delete_save_slot', {
+          slotId: 'ipc-semantic-retention',
+        }),
       };
     });
-    expect(cleanup).toEqual({ probe: true, recovery: true });
+    expect(cleanup).toEqual({ probe: true, recovery: true, semanticRetention: true });
     const finalSlots = await executeTauri(async ({ core }) => core.invoke('list_save_slots'));
     expect(finalSlots.map(({ slotId }) => slotId)).not.toContain('ipc-probe');
     expect(finalSlots.map(({ slotId }) => slotId)).not.toContain('ipc-corrupt-recovery');
+    expect(finalSlots.map(({ slotId }) => slotId)).not.toContain('ipc-semantic-retention');
     expect(finalSlots.map(({ slotId }) => slotId)).toContain('primary');
   }).timeout(180_000);
 });
