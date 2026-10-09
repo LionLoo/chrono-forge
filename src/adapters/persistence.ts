@@ -285,7 +285,13 @@ export function createTauriPersistenceGateway(
     },
     async loadSaveSlot(slotId) {
       validateIdentifier(slotId, 'slot ID');
-      return loadNativeSemanticSave(invoke, slotId);
+      const loaded = await loadNativeSemanticSave(invoke, slotId);
+      if (loaded !== null) {
+        // Successful canonical recovery should establish a native retention baseline, especially
+        // for schema-v8 migrations whose existing rows intentionally begin unverified.
+        await confirmSemanticSaveBestEffort(confirmSemanticSave, invoke, loaded);
+      }
+      return loaded;
     },
     async commitSaveSlot(slotId, name, snapshot) {
       const snapshotWorld = validateCommit(slotId, name, snapshot);

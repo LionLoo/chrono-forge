@@ -29,6 +29,7 @@ const MAX_FOCUS_REVISIT_LABEL_BYTES: usize = 80;
 const MAX_JSON_SAFE_INTEGER: u64 = 9_007_199_254_740_991;
 const MAX_FOCUS_STATE_BYTES: usize = 64 * 1024;
 const RETAINED_GENERATIONS: i64 = 3;
+const RETAINED_UNVERIFIED_GENERATIONS: i64 = 3;
 const SAVE_CANDIDATE_SCAN_ROWS_PER_PAGE: i64 = 1;
 #[cfg(feature = "desktop-e2e")]
 const E2E_INTERRUPTED_CHECKPOINT_SLOT: &str = "ipc-interrupted-checkpoint";
@@ -837,6 +838,27 @@ impl PersistenceDatabase {
              ON CONFLICT(slot_id) DO UPDATE SET name = excluded.name",
             params![slot_id, name],
         )?;
+        let has_semantically_verified_generation = transaction.query_row(
+            "SELECT EXISTS(
+                 SELECT 1 FROM save_generations
+                 WHERE slot_id = ?1 AND semantically_verified = 1
+             )",
+            [slot_id],
+            |row| row.get::<_, bool>(0),
+        )?;
+        let unverified_generation_count = transaction.query_row(
+            "SELECT COUNT(*) FROM save_generations
+             WHERE slot_id = ?1 AND semantically_verified = 0",
+            [slot_id],
+            |row| row.get::<_, i64>(0),
+        )?;
+        if !has_semantically_verified_generation
+            && unverified_generation_count >= RETAINED_UNVERIFIED_GENERATIONS
+        {
+            return Err(PersistenceError::new(
+                "save slot requires semantic validation before another generation can be committed",
+            ));
+        }
         let prior_generation: Option<i64> = transaction.query_row(
             "SELECT MAX(generation) FROM save_generations WHERE slot_id = ?1",
             [slot_id],
@@ -908,6 +930,12 @@ impl PersistenceDatabase {
             "UPDATE save_slots SET head_generation = ?2 WHERE slot_id = ?1",
             params![slot_id, next_generation],
         )?;
+        if has_semantically_verified_generation {
+            // Semantic confirmation is deliberately best-effort after a durable commit so a
+            // broker timeout cannot invite a duplicate write. Once a confirmed recovery baseline
+            // exists, retain only the newest bounded unverified tail around that baseline.
+            prune_unverified_generations(&transaction, slot_id)?;
+        }
         transaction.commit()?;
 
         Ok(LoadedSave {
@@ -970,6 +998,9 @@ impl PersistenceDatabase {
              WHERE slot_id = ?1 AND generation = ?2",
             params![slot_id, generation],
         )?;
+        // Confirmation establishes a canonical recovery baseline, so migrated or outage-era
+        // unverified material can now be bounded without risking the only recoverable generation.
+        prune_unverified_generations(&transaction, slot_id)?;
         let head_generation = transaction
             .query_row(
                 "SELECT head_generation FROM save_slots WHERE slot_id = ?1",
@@ -1345,6 +1376,25 @@ impl PersistenceDatabase {
         )?;
         Ok(settings.clone())
     }
+}
+
+fn prune_unverified_generations(
+    transaction: &rusqlite::Transaction<'_>,
+    slot_id: &str,
+) -> Result<()> {
+    transaction.execute(
+        "DELETE FROM save_generations
+         WHERE slot_id = ?1
+           AND semantically_verified = 0
+           AND generation NOT IN (
+               SELECT generation FROM save_generations
+               WHERE slot_id = ?1 AND semantically_verified = 0
+               ORDER BY generation DESC
+               LIMIT ?2
+           )",
+        params![slot_id, RETAINED_UNVERIFIED_GENERATIONS],
+    )?;
+    Ok(())
 }
 
 fn upsert_focus_session(
@@ -2612,6 +2662,149 @@ mod tests {
     }
 
     #[test]
+    fn unavailable_semantic_broker_bounds_sustained_autosaves_and_preserves_recovery() {
+        let mut database = PersistenceDatabase::in_memory().expect("database");
+        let baseline = commit_semantically_verified_slot(
+            &mut database,
+            "alpha",
+            "Alpha",
+            &snapshot("confirmed-baseline"),
+        );
+        for generation in 2..=21 {
+            database
+                .commit_slot(
+                    "alpha",
+                    "Alpha",
+                    &snapshot(&format!("unconfirmed-{generation}")),
+                )
+                .expect("durable autosave while broker is unavailable");
+        }
+
+        let retained: Vec<(i64, i64)> = database
+            .connection
+            .prepare(
+                "SELECT generation, semantically_verified FROM save_generations
+                 WHERE slot_id = 'alpha' ORDER BY generation",
+            )
+            .expect("retained statement")
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+            .expect("retained query")
+            .collect::<std::result::Result<_, _>>()
+            .expect("retained generations");
+        assert_eq!(retained, vec![(1, 1), (19, 0), (20, 0), (21, 0)]);
+
+        database
+            .connection
+            .execute(
+                "UPDATE save_generations SET checksum = 'corrupt'
+                 WHERE slot_id = 'alpha' AND semantically_verified = 0",
+                [],
+            )
+            .expect("corrupt unconfirmed tail");
+        let candidates = collect_candidate_pages(&database, "alpha");
+        assert_eq!(
+            candidates
+                .iter()
+                .map(|candidate| candidate.recovered_generation)
+                .collect::<Vec<_>>(),
+            vec![baseline.recovered_generation],
+        );
+        assert_eq!(candidates[0].snapshot, baseline.snapshot);
+    }
+
+    #[test]
+    fn all_unverified_migrated_slot_refuses_to_delete_its_only_recovery_candidate() {
+        let mut database = PersistenceDatabase::in_memory().expect("database");
+        let baseline = database
+            .commit_slot("alpha", "Alpha", &snapshot("migrated-baseline"))
+            .expect("unverified migrated baseline");
+        for generation in 2..=5 {
+            let invalid_snapshot = format!(r#"{{"hello":"invalid-{generation}"}}"#);
+            database
+                .connection
+                .execute(
+                    "INSERT INTO save_generations
+                     (slot_id, generation, saved_at_ms, focus_session_json, snapshot, checksum)
+                     VALUES ('alpha', ?1, ?2, NULL, ?3, 'corrupt')",
+                    params![generation, generation * 1_000, invalid_snapshot],
+                )
+                .expect("migrated unverified generation");
+        }
+        database
+            .connection
+            .execute(
+                "UPDATE save_slots SET head_generation = 5 WHERE slot_id = 'alpha'",
+                [],
+            )
+            .expect("migrated head");
+
+        let error = database
+            .commit_slot("alpha", "Alpha", &snapshot("must-not-displace-baseline"))
+            .expect_err("an all-unverified backlog must fail closed");
+        assert!(error.to_string().contains("requires semantic validation"));
+        let unchanged_generations: Vec<i64> = database
+            .connection
+            .prepare(
+                "SELECT generation FROM save_generations
+                 WHERE slot_id = 'alpha' ORDER BY generation",
+            )
+            .expect("generation statement")
+            .query_map([], |row| row.get(0))
+            .expect("generation query")
+            .collect::<std::result::Result<_, _>>()
+            .expect("unchanged generations");
+        assert_eq!(unchanged_generations, vec![1, 2, 3, 4, 5]);
+        assert_eq!(
+            database
+                .load_slot("alpha")
+                .expect("recover migrated slot")
+                .expect("migrated slot")
+                .recovered_generation,
+            baseline.recovered_generation,
+        );
+
+        database
+            .confirm_semantically_valid_generation(
+                "alpha",
+                baseline.recovered_generation,
+                &baseline.checksum,
+            )
+            .expect("confirm recovered migrated baseline");
+        let after_confirmation: Vec<(i64, i64)> = database
+            .connection
+            .prepare(
+                "SELECT generation, semantically_verified FROM save_generations
+                 WHERE slot_id = 'alpha' ORDER BY generation",
+            )
+            .expect("confirmed statement")
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+            .expect("confirmed query")
+            .collect::<std::result::Result<_, _>>()
+            .expect("confirmed generations");
+        assert_eq!(after_confirmation, vec![(1, 1), (3, 0), (4, 0), (5, 0)]);
+
+        let newest = database
+            .commit_slot("alpha", "Alpha", &snapshot("post-confirmation"))
+            .expect("commit after baseline confirmation");
+        database
+            .connection
+            .execute(
+                "UPDATE save_generations SET checksum = 'corrupt'
+                 WHERE slot_id = 'alpha' AND generation = ?1",
+                [newest.recovered_generation],
+            )
+            .expect("corrupt newest generation");
+        assert_eq!(
+            database
+                .load_slot("alpha")
+                .expect("recover confirmed baseline")
+                .expect("slot after confirmation")
+                .recovered_generation,
+            baseline.recovered_generation,
+        );
+    }
+
+    #[test]
     fn unconfirmed_semantic_failures_cannot_displace_the_last_recoverable_generation() {
         let mut database = PersistenceDatabase::in_memory().expect("database");
         let oldest = commit_semantically_verified_slot(
@@ -2709,13 +2902,27 @@ mod tests {
     fn candidate_pages_bound_scans_across_corrupt_rows_without_deleting_evidence() {
         let mut database = PersistenceDatabase::in_memory().expect("database");
         commit_semantically_verified_slot(&mut database, "alpha", "Alpha", &snapshot("one"));
-        database
+        let second = database
             .commit_slot("alpha", "Alpha", &snapshot("two"))
             .expect("second generation");
         database
+            .confirm_semantically_valid_generation(
+                "alpha",
+                second.recovered_generation,
+                &second.checksum,
+            )
+            .expect("confirm second generation");
+        let third = database
             .commit_slot("alpha", "Alpha", &snapshot("three"))
             .expect("third generation");
         database
+            .confirm_semantically_valid_generation(
+                "alpha",
+                third.recovered_generation,
+                &third.checksum,
+            )
+            .expect("confirm third generation");
+        let fourth = database
             .commit_focus_checkpoint(
                 "alpha",
                 "Alpha",
@@ -2723,6 +2930,13 @@ mod tests {
                 &completed_focus_session("alpha", vec![7]),
             )
             .expect("fourth generation");
+        database
+            .confirm_semantically_valid_generation(
+                "alpha",
+                fourth.recovered_generation,
+                &fourth.checksum,
+            )
+            .expect("confirm fourth generation");
         database
             .commit_slot("alpha", "Alpha", r#"{"hello":"world-five"}"#)
             .expect("checksum-valid semantic failure");

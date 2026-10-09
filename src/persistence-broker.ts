@@ -15,7 +15,11 @@ import { createTauriPersistenceGateway, type TauriInvoke } from './adapters/pers
 
 const MAIN_WINDOW_LABEL = 'main';
 const invokeTauri: TauriInvoke = (command, arguments_) => invoke(command, arguments_);
-const gateway = createTauriPersistenceGateway(invokeTauri);
+// validateAndConfirmSemanticSave performs the single exact identity-bound confirmation after the
+// broker gateway loads and canonically parses the requested generation. Disable the gateway's
+// ordinary post-load confirmation here to avoid recursion or confirming a fallback before the
+// requested identity has been compared.
+const gateway = createTauriPersistenceGateway(invokeTauri, () => Promise.resolve());
 
 export async function startPersistenceBroker(): Promise<void> {
   await listen<ReturnType<typeof brokerEnvelope<null>>>(PERSISTENCE_BROKER_PING_EVENT, (event) => {

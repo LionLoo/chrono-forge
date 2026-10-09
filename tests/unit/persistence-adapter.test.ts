@@ -729,6 +729,7 @@ describe('persistence adapter', () => {
           1,
         ) as never;
       }
+      if (command === 'confirm_semantically_valid_save_generation') return null as never;
       throw new Error('unexpected command');
     });
 
@@ -743,6 +744,14 @@ describe('persistence adapter', () => {
       {
         command: 'load_save_slot_fallback_candidates',
         arguments_: { beforeGeneration: 2, slotId: 'alpha' },
+      },
+      {
+        command: 'confirm_semantically_valid_save_generation',
+        arguments_: {
+          checksum: recoveredChecksum,
+          generation: 1,
+          slotId: 'alpha',
+        },
       },
     ]);
     const reloaded = deserializeWorldSnapshot(recovered!.snapshot);
@@ -861,6 +870,7 @@ describe('persistence adapter', () => {
       if (command === 'load_save_slot_candidates') {
         return nativeSaveCandidatePage([], 4) as never;
       }
+      if (command === 'confirm_semantically_valid_save_generation') return null as never;
       if (command !== 'load_save_slot_fallback_candidates') {
         throw new Error(`unexpected ${command}`);
       }
@@ -933,6 +943,11 @@ describe('persistence adapter', () => {
       { beforeGeneration: 4, slotId: 'alpha' },
       { beforeGeneration: 3, slotId: 'alpha' },
       { beforeGeneration: 2, slotId: 'alpha' },
+      {
+        checksum: checksumOf(recoveredSnapshot),
+        generation: 1,
+        slotId: 'alpha',
+      },
     ]);
   });
 
