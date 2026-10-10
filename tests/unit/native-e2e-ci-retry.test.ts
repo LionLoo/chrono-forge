@@ -204,7 +204,7 @@ describe('native E2E SQLite integrity gate', () => {
         platform: 'win32',
       }),
     ).toBe(
-      path.join(
+      path.win32.join(
         'C:\\Users\\tester\\AppData\\Local',
         'com.lionloo.chronoforge.e2e',
         'profiles',
