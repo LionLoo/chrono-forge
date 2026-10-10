@@ -8,10 +8,13 @@ use std::{
     error::Error,
     fmt::{Display, Formatter, Write},
     fs,
-    path::{Path, PathBuf},
+    path::Path,
     sync::Mutex,
     time::{SystemTime, UNIX_EPOCH},
 };
+
+#[cfg(test)]
+use std::path::PathBuf;
 
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 use serde::{Deserialize, Serialize};
@@ -31,6 +34,7 @@ const MAX_FOCUS_STATE_BYTES: usize = 64 * 1024;
 const RETAINED_GENERATIONS: i64 = 3;
 const RETAINED_UNVERIFIED_GENERATIONS: i64 = 3;
 const SAVE_CANDIDATE_SCAN_ROWS_PER_PAGE: i64 = 1;
+const MAX_VERIFIED_RETENTION_SCAN_ROWS: usize = 8;
 #[cfg(feature = "desktop-e2e")]
 const E2E_INTERRUPTED_CHECKPOINT_SLOT: &str = "ipc-interrupted-checkpoint";
 #[cfg(feature = "desktop-e2e")]
@@ -338,7 +342,6 @@ struct SaveExportEnvelope {
 
 pub struct PersistenceState {
     database: Mutex<PersistenceDatabase>,
-    database_path: PathBuf,
 }
 
 impl PersistenceState {
@@ -348,7 +351,6 @@ impl PersistenceState {
         let database = PersistenceDatabase::open(&database_path)?;
         Ok(Self {
             database: Mutex::new(database),
-            database_path,
         })
     }
 
@@ -356,19 +358,6 @@ impl PersistenceState {
         self.database
             .lock()
             .map_err(|_| PersistenceError::new("persistence database lock was poisoned"))
-    }
-
-    fn defer_prune(&self, slot_id: String, head_generation: i64) {
-        let database_path = self.database_path.clone();
-        let _ = std::thread::Builder::new()
-            .name("chrono-forge-save-retention".to_owned())
-            .spawn(move || {
-                let Ok(mut database) = PersistenceDatabase::open_existing_for_prune(&database_path)
-                else {
-                    return;
-                };
-                let _ = database.prune_old_generations(&slot_id, head_generation);
-            });
     }
 }
 
@@ -382,15 +371,6 @@ impl PersistenceDatabase {
         let mut database = Self { connection };
         database.migrate()?;
         Ok(database)
-    }
-
-    fn open_existing_for_prune(path: &Path) -> Result<Self> {
-        let connection = Connection::open(path)?;
-        connection.execute_batch(
-            "PRAGMA foreign_keys = ON;
-             PRAGMA busy_timeout = 5000;",
-        )?;
-        Ok(Self { connection })
     }
 
     #[cfg(test)]
@@ -998,9 +978,6 @@ impl PersistenceDatabase {
              WHERE slot_id = ?1 AND generation = ?2",
             params![slot_id, generation],
         )?;
-        // Confirmation establishes a canonical recovery baseline, so migrated or outage-era
-        // unverified material can now be bounded without risking the only recoverable generation.
-        prune_unverified_generations(&transaction, slot_id)?;
         let head_generation = transaction
             .query_row(
                 "SELECT head_generation FROM save_slots WHERE slot_id = ?1",
@@ -1008,56 +985,16 @@ impl PersistenceDatabase {
                 |row| row.get::<_, Option<i64>>(0),
             )?
             .ok_or_else(|| PersistenceError::new("save slot has no head generation"))?;
+        // The parser confirmation and both retention tails form one durable invariant. If pruning
+        // fails, the marker rolls back and the post-commit TypeScript caller keeps the save while
+        // treating confirmation as best-effort; no partially confirmed unbounded set is exposed.
+        prune_verified_generations(&transaction, slot_id, head_generation)?;
+        // Confirmation establishes a canonical recovery baseline. Verified pruning may also
+        // demote checksum/structure-corrupt legacy markers, so bound the complete unverified tail
+        // only after that pass and never risk deleting the sole canonical baseline.
+        prune_unverified_generations(&transaction, slot_id)?;
         transaction.commit()?;
         Ok(head_generation)
-    }
-
-    fn prune_old_generations(&mut self, slot_id: &str, head_generation: i64) -> Result<()> {
-        let transaction = self
-            .connection
-            .transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let oldest_retained_verified_generation = {
-            let mut statement = transaction.prepare(
-                "SELECT generation, snapshot, checksum, saved_at_ms, focus_session_json
-                 FROM save_generations
-                 WHERE slot_id = ?1 AND generation <= ?2 AND semantically_verified = 1
-                 ORDER BY generation DESC",
-            )?;
-            let mut rows = statement.query(params![slot_id, head_generation])?;
-            let mut verified_count = 0;
-            let mut oldest_retained = None;
-            while let Some(row) = rows.next()? {
-                let generation = row.get::<_, i64>(0)?;
-                let snapshot = row.get::<_, String>(1)?;
-                let checksum = row.get::<_, String>(2)?;
-                let saved_at_ms = row.get::<_, i64>(3)?;
-                let focus_session_json = row.get::<_, Option<String>>(4)?;
-                if validate_snapshot(&snapshot).is_ok()
-                    && checksum == sha256_hex(&snapshot)
-                    && saved_at_ms >= 0
-                    && parse_focus_checkpoint(slot_id, &snapshot, focus_session_json.as_deref())
-                        .is_ok()
-                {
-                    verified_count += 1;
-                    if verified_count == RETAINED_GENERATIONS {
-                        oldest_retained = Some(generation);
-                        break;
-                    }
-                }
-            }
-            oldest_retained
-        };
-        if let Some(oldest_retained) = oldest_retained_verified_generation {
-            // Only generations explicitly confirmed after the TypeScript canonical parser accepts
-            // them can establish the cutoff. JSON/checksum-valid but semantically invalid rows may
-            // remain as evidence, but they can never displace the three recoverable generations.
-            transaction.execute(
-                "DELETE FROM save_generations WHERE slot_id = ?1 AND generation < ?2",
-                params![slot_id, oldest_retained],
-            )?;
-        }
-        transaction.commit()?;
-        Ok(())
     }
 
     fn delete_slot(&mut self, slot_id: &str) -> Result<bool> {
@@ -1376,6 +1313,73 @@ impl PersistenceDatabase {
         )?;
         Ok(settings.clone())
     }
+}
+
+fn prune_verified_generations(
+    transaction: &rusqlite::Transaction<'_>,
+    slot_id: &str,
+    head_generation: i64,
+) -> Result<()> {
+    let (oldest_retained_verified_generation, invalid_verified_generations) = {
+        let mut statement = transaction.prepare(
+            "SELECT generation, snapshot, checksum, saved_at_ms, focus_session_json
+             FROM save_generations
+             WHERE slot_id = ?1 AND generation <= ?2 AND semantically_verified = 1
+             ORDER BY generation DESC",
+        )?;
+        let mut rows = statement.query(params![slot_id, head_generation])?;
+        let mut verified_count = 0;
+        let mut oldest_retained = None;
+        let mut invalid_verified = Vec::new();
+        let mut scanned_rows = 0;
+        while let Some(row) = rows.next()? {
+            if scanned_rows == MAX_VERIFIED_RETENTION_SCAN_ROWS {
+                return Err(PersistenceError::new(
+                    "verified save retention exceeded its bounded validation budget",
+                ));
+            }
+            scanned_rows += 1;
+            let generation = row.get::<_, i64>(0)?;
+            let snapshot = row.get::<_, String>(1)?;
+            let checksum = row.get::<_, String>(2)?;
+            let saved_at_ms = row.get::<_, i64>(3)?;
+            let focus_session_json = row.get::<_, Option<String>>(4)?;
+            if validate_snapshot(&snapshot).is_ok()
+                && checksum == sha256_hex(&snapshot)
+                && saved_at_ms >= 0
+                && parse_focus_checkpoint(slot_id, &snapshot, focus_session_json.as_deref()).is_ok()
+            {
+                verified_count += 1;
+                if verified_count == RETAINED_GENERATIONS {
+                    oldest_retained = Some(generation);
+                    break;
+                }
+            } else {
+                invalid_verified.push(generation);
+            }
+        }
+        (oldest_retained, invalid_verified)
+    };
+    for generation in invalid_verified_generations {
+        // A row whose bytes no longer satisfy native checksum/structure validation cannot remain a
+        // trusted semantic marker. Demotion preserves the newest bounded corrupt evidence while
+        // preventing it from displacing a confirmed canonical recovery baseline.
+        transaction.execute(
+            "UPDATE save_generations SET semantically_verified = 0
+             WHERE slot_id = ?1 AND generation = ?2",
+            params![slot_id, generation],
+        )?;
+    }
+    if let Some(oldest_retained) = oldest_retained_verified_generation {
+        // Only generations explicitly confirmed after the TypeScript canonical parser accepts
+        // them can establish the cutoff. Invalid rows are demoted before this cutoff and can never
+        // displace the three recoverable generations.
+        transaction.execute(
+            "DELETE FROM save_generations WHERE slot_id = ?1 AND generation < ?2",
+            params![slot_id, oldest_retained],
+        )?;
+    }
+    Ok(())
 }
 
 fn prune_unverified_generations(
@@ -2366,13 +2370,12 @@ pub fn confirm_semantically_valid_save_generation(
     checksum: String,
 ) -> std::result::Result<(), String> {
     validate_semantic_confirmation_caller(window.label()).map_err(|error| error.to_string())?;
-    let head_generation = state
+    state
         .lock()
         .and_then(|mut database| {
             database.confirm_semantically_valid_generation(&slot_id, generation, &checksum)
         })
         .map_err(|error| error.to_string())?;
-    state.defer_prune(slot_id, head_generation);
     Ok(())
 }
 
@@ -2483,16 +2486,13 @@ mod tests {
     }
 
     fn confirm_and_prune(database: &mut PersistenceDatabase, loaded: &LoadedSave) {
-        let head_generation = database
+        database
             .confirm_semantically_valid_generation(
                 &loaded.slot_id,
                 loaded.recovered_generation,
                 &loaded.checksum,
             )
-            .expect("semantic confirmation");
-        database
-            .prune_old_generations(&loaded.slot_id, head_generation)
-            .expect("retention prune");
+            .expect("atomic semantic confirmation and retention prune");
     }
 
     fn commit_semantically_verified_slot(
@@ -2643,7 +2643,7 @@ mod tests {
     }
 
     #[test]
-    fn retention_keeps_the_newest_three_verified_generations() {
+    fn semantic_confirmation_synchronously_keeps_the_newest_three_verified_generations() {
         let mut database = PersistenceDatabase::in_memory().expect("database");
         for value in ["one", "two", "three", "four"] {
             commit_semantically_verified_slot(&mut database, "alpha", "Alpha", &snapshot(value));
@@ -2659,6 +2659,66 @@ mod tests {
             .collect::<std::result::Result<_, _>>()
             .expect("generations");
         assert_eq!(generations, vec![2, 3, 4]);
+    }
+
+    #[test]
+    fn semantic_confirmation_normalizes_six_corrupt_legacy_markers_above_a_valid_baseline() {
+        let mut database = PersistenceDatabase::in_memory().expect("database");
+        let baseline = commit_semantically_verified_slot(
+            &mut database,
+            "alpha",
+            "Alpha",
+            &snapshot("baseline"),
+        );
+        for generation in 2..=7 {
+            let committed = database
+                .commit_slot("alpha", "Alpha", &snapshot(&format!("legacy-{generation}")))
+                .expect("legacy generation");
+            assert_eq!(committed.recovered_generation, generation);
+            database
+                .connection
+                .execute(
+                    "UPDATE save_generations SET semantically_verified = 1
+                     WHERE slot_id = 'alpha' AND generation = ?1",
+                    [generation],
+                )
+                .expect("simulate pre-fix confirmed generation with interrupted prune");
+        }
+        database
+            .connection
+            .execute(
+                "UPDATE save_generations SET checksum = 'corrupt'
+                 WHERE slot_id = 'alpha' AND generation > 1",
+                [],
+            )
+            .expect("corrupt six newer legacy generations");
+
+        database
+            .confirm_semantically_valid_generation(
+                "alpha",
+                baseline.recovered_generation,
+                &baseline.checksum,
+            )
+            .expect("confirm and normalize the valid baseline");
+
+        let generations: Vec<(i64, i64)> = database
+            .connection
+            .prepare(
+                "SELECT generation, semantically_verified FROM save_generations
+                 WHERE slot_id = 'alpha' ORDER BY generation",
+            )
+            .expect("generation statement")
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+            .expect("generation query")
+            .collect::<std::result::Result<_, _>>()
+            .expect("normalized generations");
+        assert_eq!(generations, vec![(1, 1), (5, 0), (6, 0), (7, 0)]);
+        let recovered = database
+            .load_slot("alpha")
+            .expect("load normalized slot")
+            .expect("normalized slot");
+        assert_eq!(recovered.recovered_generation, 1);
+        assert_eq!(recovered.snapshot, baseline.snapshot);
     }
 
     #[test]
@@ -2922,7 +2982,7 @@ mod tests {
                 &third.checksum,
             )
             .expect("confirm third generation");
-        let fourth = database
+        database
             .commit_focus_checkpoint(
                 "alpha",
                 "Alpha",
@@ -2930,13 +2990,6 @@ mod tests {
                 &completed_focus_session("alpha", vec![7]),
             )
             .expect("fourth generation");
-        database
-            .confirm_semantically_valid_generation(
-                "alpha",
-                fourth.recovered_generation,
-                &fourth.checksum,
-            )
-            .expect("confirm fourth generation");
         database
             .commit_slot("alpha", "Alpha", r#"{"hello":"world-five"}"#)
             .expect("checksum-valid semantic failure");

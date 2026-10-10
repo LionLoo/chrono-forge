@@ -152,6 +152,11 @@ interface NativeSaveCandidatePage {
 }
 
 const SAVE_CANDIDATE_PAGE_SIZE = 1;
+const RETAINED_UNVERIFIED_GENERATIONS = 3;
+// Atomic native retention keeps at most the two three-generation tails. Two extra pages allow a
+// pre-fix interrupted-prune archive to recover and normalize; larger historical/tampered archives
+// fail closed without deleting evidence instead of parsing forever.
+const MAX_SAVE_CANDIDATE_PAGES = RETAINED_GENERATIONS + RETAINED_UNVERIFIED_GENERATIONS + 2;
 const MAX_REPORTED_SAVE_VALIDATION_FAILURES = 8;
 
 const validatedLoadedSaves = new WeakMap<LoadedSave, ValidatedSnapshotAuthority>();
@@ -208,7 +213,9 @@ async function loadNativeSemanticSave(
   let page = parseNativeSaveCandidatePage(initial, 'load_save_slot_candidates');
   const failures: string[] = [];
   let omittedFailureCount = 0;
+  let terminalFailure: string | null = null;
   let beforeGeneration: number | null = null;
+  let scannedPageCount = 1;
   const reportFailure = (message: string) => {
     if (failures.length < MAX_REPORTED_SAVE_VALIDATION_FAILURES) failures.push(message);
     else omittedFailureCount += 1;
@@ -232,6 +239,10 @@ async function loadNativeSemanticSave(
       reportFailure('save candidate cursor did not move to an older generation');
       break;
     }
+    if (scannedPageCount >= MAX_SAVE_CANDIDATE_PAGES) {
+      terminalFailure = `save recovery exceeded bounded ${MAX_SAVE_CANDIDATE_PAGES}-page validation budget`;
+      break;
+    }
     beforeGeneration = nextBeforeGeneration;
     try {
       const fallback = await invoke<unknown>('load_save_slot_fallback_candidates', {
@@ -243,6 +254,7 @@ async function loadNativeSemanticSave(
         break;
       }
       page = parseNativeSaveCandidatePage(fallback, 'load_save_slot_fallback_candidates');
+      scannedPageCount += 1;
     } catch (error) {
       reportFailure(
         `fallback query failed: ${error instanceof Error ? error.message : 'unknown error'}`,
@@ -251,8 +263,9 @@ async function loadNativeSemanticSave(
     }
   }
   const omitted = omittedFailureCount === 0 ? '' : `; ${omittedFailureCount} more failures omitted`;
+  const terminal = terminalFailure === null ? '' : `; ${terminalFailure}`;
   throw new Error(
-    `save slot has no semantically valid generation: ${failures.join('; ')}${omitted}`,
+    `save slot has no semantically valid generation: ${failures.join('; ')}${omitted}${terminal}`,
   );
 }
 

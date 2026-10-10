@@ -951,6 +951,122 @@ describe('persistence adapter', () => {
     ]);
   });
 
+  it('bounds an arbitrarily long semantic-recovery chain to eight native pages', async () => {
+    const calls: { command: string; arguments_: Readonly<Record<string, unknown>> }[] = [];
+    const gateway = createTauriPersistenceGateway(async (command, arguments_ = {}) => {
+      await Promise.resolve();
+      calls.push({ command, arguments_ });
+      if (
+        command !== 'load_save_slot_candidates' &&
+        command !== 'load_save_slot_fallback_candidates'
+      ) {
+        throw new Error(`unexpected ${command}`);
+      }
+      const generation =
+        command === 'load_save_slot_candidates' ? 32 : Number(arguments_.beforeGeneration) - 1;
+      const malformedSnapshot = JSON.stringify({ generation });
+      return nativeSaveCandidatePage(
+        [
+          {
+            slotId: 'alpha',
+            name: 'Alpha',
+            headGeneration: 32,
+            recoveredGeneration: generation,
+            recoveredFromCorruption: generation !== 32,
+            savedAtMs: generation * 1_000,
+            focusSession: null,
+            snapshot: malformedSnapshot,
+            checksum: checksumOf(malformedSnapshot),
+          },
+        ],
+        generation,
+      ) as never;
+    });
+
+    await expect(gateway.loadSaveSlot('alpha')).rejects.toThrow(
+      'save recovery exceeded bounded 8-page validation budget',
+    );
+    expect(calls).toEqual([
+      { command: 'load_save_slot_candidates', arguments_: { slotId: 'alpha' } },
+      {
+        command: 'load_save_slot_fallback_candidates',
+        arguments_: { beforeGeneration: 32, slotId: 'alpha' },
+      },
+      {
+        command: 'load_save_slot_fallback_candidates',
+        arguments_: { beforeGeneration: 31, slotId: 'alpha' },
+      },
+      {
+        command: 'load_save_slot_fallback_candidates',
+        arguments_: { beforeGeneration: 30, slotId: 'alpha' },
+      },
+      {
+        command: 'load_save_slot_fallback_candidates',
+        arguments_: { beforeGeneration: 29, slotId: 'alpha' },
+      },
+      {
+        command: 'load_save_slot_fallback_candidates',
+        arguments_: { beforeGeneration: 28, slotId: 'alpha' },
+      },
+      {
+        command: 'load_save_slot_fallback_candidates',
+        arguments_: { beforeGeneration: 27, slotId: 'alpha' },
+      },
+      {
+        command: 'load_save_slot_fallback_candidates',
+        arguments_: { beforeGeneration: 26, slotId: 'alpha' },
+      },
+    ]);
+  });
+
+  it('recovers a seventh confirmed baseline beneath six corrupt legacy generations', async () => {
+    const recoveredSnapshot = snapshot('one');
+    const recoveredChecksum = checksumOf(recoveredSnapshot);
+    const calls: { command: string; arguments_: Readonly<Record<string, unknown>> }[] = [];
+    const gateway = createTauriPersistenceGateway(async (command, arguments_ = {}) => {
+      await Promise.resolve();
+      calls.push({ command, arguments_ });
+      if (command === 'confirm_semantically_valid_save_generation') return null as never;
+      if (
+        command !== 'load_save_slot_candidates' &&
+        command !== 'load_save_slot_fallback_candidates'
+      ) {
+        throw new Error(`unexpected ${command}`);
+      }
+      const generation =
+        command === 'load_save_slot_candidates' ? 7 : Number(arguments_.beforeGeneration) - 1;
+      const candidateSnapshot =
+        generation === 1 ? recoveredSnapshot : JSON.stringify({ generation });
+      return nativeSaveCandidatePage(
+        [
+          {
+            slotId: 'alpha',
+            name: 'Alpha',
+            headGeneration: 7,
+            recoveredGeneration: generation,
+            recoveredFromCorruption: generation !== 7,
+            savedAtMs: generation * 1_000,
+            focusSession: null,
+            snapshot: candidateSnapshot,
+            checksum: checksumOf(candidateSnapshot),
+          },
+        ],
+        generation,
+      ) as never;
+    });
+
+    await expect(gateway.loadSaveSlot('alpha')).resolves.toMatchObject({
+      recoveredGeneration: 1,
+      recoveredFromCorruption: true,
+      snapshot: recoveredSnapshot,
+    });
+    expect(calls).toHaveLength(8);
+    expect(calls.at(-1)).toEqual({
+      command: 'confirm_semantically_valid_save_generation',
+      arguments_: { checksum: recoveredChecksum, generation: 1, slotId: 'alpha' },
+    });
+  });
+
   it('fails closed when native recovery repeats a fallback cursor', async () => {
     const malformed = '{"hello":"world"}';
     const calls: { command: string; arguments_: Readonly<Record<string, unknown>> }[] = [];
