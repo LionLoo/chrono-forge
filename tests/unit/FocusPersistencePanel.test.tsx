@@ -380,10 +380,15 @@ describe('FocusPersistencePanel offline progression', () => {
     expect(second.performOfflineCatchUp).not.toHaveBeenCalled();
   });
 
-  it('reloads a manual save with the exact matching active focus checkpoint', async () => {
+  it('reloads active focus with exact fractional tick carry and no offline replay', async () => {
     const user = userEvent.setup();
     let nowMs = 1_000;
     const gateway = createInMemoryPersistenceGateway(() => nowMs);
+    await gateway.saveSettings({
+      ...DEFAULT_APP_SETTINGS,
+      focusToSimRatio: 7,
+      offlineProgressionEnabled: true,
+    });
     const first = createStatefulSimulation();
     const firstRender = render(
       <FocusPersistencePanel
@@ -395,24 +400,28 @@ describe('FocusPersistencePanel offline progression', () => {
     );
 
     await user.click(await screen.findByRole('button', { name: 'Start focus' }));
-    nowMs += 10_000;
+    nowMs += 10_500;
     act(() => {
       document.dispatchEvent(new Event('visibilitychange'));
     });
-    await waitFor(() => expect(first.currentTick()).toBe(100));
+    await waitFor(() => expect(first.currentTick()).toBe(73));
     await user.click(screen.getByRole('button', { name: 'Save now' }));
     await screen.findByText('World saved manually.');
 
     const checkpoint = await gateway.loadSaveSlot('primary');
-    expect(deserializeWorldSnapshot(checkpoint!.snapshot).tick).toBe(100);
+    expect(deserializeWorldSnapshot(checkpoint!.snapshot).tick).toBe(73);
     expect(checkpoint?.focusSession).toMatchObject({
-      issuedSimulationTicks: 100,
+      focusedMs: 10_500,
+      issuedSimulationTicks: 73,
       status: 'active',
       review: {
         version: 1,
         before: { tick: 0 },
-        after: { tick: 100 },
+        after: { tick: 73 },
       },
+    });
+    expect(JSON.parse(checkpoint!.focusSession!.stateJson)).toMatchObject({
+      simulationTickRemainder: 500,
     });
     const checkpointRequests = vi.mocked(first.simulation.requestFocusCheckpoint).mock.calls.length;
     const durableGeneration = checkpoint!.headGeneration;
@@ -434,18 +443,19 @@ describe('FocusPersistencePanel offline progression', () => {
     );
 
     await screen.findByRole('button', { name: 'Pause' });
-    expect(restored.currentTick()).toBe(100);
+    expect(restored.currentTick()).toBe(73);
+    expect(restored.simulation.performOfflineCatchUp).not.toHaveBeenCalled();
     act(() => {
       document.dispatchEvent(new Event('visibilitychange'));
     });
     expect(restored.advanceTicks).not.toHaveBeenCalled();
-    nowMs += 1_000;
+    nowMs += 500;
     await user.click(screen.getByRole('button', { name: 'Pause' }));
-    await waitFor(() => expect(restored.currentTick()).toBe(110));
+    await waitFor(() => expect(restored.currentTick()).toBe(77));
     await waitFor(async () =>
       expect((await gateway.loadSaveSlot('primary'))?.focusSession?.review).toMatchObject({
         before: { tick: 0 },
-        after: { tick: 110 },
+        after: { tick: 77 },
       }),
     );
   });

@@ -31,7 +31,7 @@ export const M6_SCENARIOS: readonly M6Scenario[] = Object.freeze([
     seed: Object.freeze([7, 11, 13, 17] as const),
     yearTicks: 5_000,
     checkpointYears: Object.freeze([5, 25, 60, 120] as const),
-    expectedHashes: Object.freeze(['b1b31224', '0dc1e8de', '9c77c57c', 'fff02954'] as const),
+    expectedHashes: Object.freeze(['b1b31224', '06e506ef', '2182b552', 'd2181c3a'] as const),
     expectedOperations: Object.freeze({
       settlement: 203_284,
       society: 39_118,
@@ -46,7 +46,7 @@ export const M6_SCENARIOS: readonly M6Scenario[] = Object.freeze([
     seed: Object.freeze([19, 23, 29, 31] as const),
     yearTicks: 5_000,
     checkpointYears: Object.freeze([5, 25, 60, 120] as const),
-    expectedHashes: Object.freeze(['508eaa50', '688e29f1', '5f2ed79c', '840b131d'] as const),
+    expectedHashes: Object.freeze(['508eaa50', '9483c5c5', '1c5d4e12', 'fbf7a773'] as const),
     expectedOperations: Object.freeze({
       settlement: 128_649,
       society: 20_902,
@@ -61,7 +61,7 @@ export const M6_SCENARIOS: readonly M6Scenario[] = Object.freeze([
     seed: Object.freeze([37, 41, 43, 47] as const),
     yearTicks: 5_000,
     checkpointYears: Object.freeze([5, 25, 60, 120] as const),
-    expectedHashes: Object.freeze(['6f7060df', '9331b225', 'c50938c9', 'fa497da4'] as const),
+    expectedHashes: Object.freeze(['6f7060df', 'c9b0bbf1', 'afcfa13d', 'c13123f9'] as const),
     expectedOperations: Object.freeze({
       settlement: 187_113,
       society: 33_573,
@@ -76,7 +76,7 @@ export const M6_SCENARIOS: readonly M6Scenario[] = Object.freeze([
     seed: Object.freeze([53, 59, 61, 67] as const),
     yearTicks: 5_000,
     checkpointYears: Object.freeze([5, 25, 60, 120] as const),
-    expectedHashes: Object.freeze(['1f00e88e', 'd4095b1d', '9e721fb8', '9197a26b'] as const),
+    expectedHashes: Object.freeze(['59cd9799', 'bdaee725', '31fdc103', '43a1bd16'] as const),
     expectedOperations: Object.freeze({
       settlement: 160_433,
       society: 24_235,

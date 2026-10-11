@@ -951,7 +951,9 @@ export function advanceCivilizations(
   state: CivilizationsState,
   context: CivilizationsContext,
 ): CivilizationAdvanceResult {
-  assertCivilizationsInvariants(state);
+  // World residency reconciliation may have recorded same-pulse person/household facts after the
+  // last annual civilizations tick. The incoming annual context is the enclosing authority bound.
+  assertCivilizationsInvariants(state, context.tick);
   validateContext(state, context);
   const rng = new Xoshiro128StarStar(state.rng);
   const events: CivilizationEventDraft[] = [];
@@ -1806,8 +1808,12 @@ export function selectConflictTargetCivilization(
   return selectRelationshipInfluenced(candidates, (candidate) => candidate.civilizationId);
 }
 
-export function assertCivilizationsInvariants(state: CivilizationsState): void {
+export function assertCivilizationsInvariants(
+  state: CivilizationsState,
+  authorityTick = state.tick,
+): void {
   validateInteger(state.tick, 'Civilizations tick');
+  validateInteger(authorityTick, 'Civilizations authority tick', state.tick);
   validateInteger(state.nextEntityId, 'Civilizations next entity id', 1);
   validateInteger(state.operationCount, 'Civilizations operation count');
   if (
@@ -1962,7 +1968,7 @@ export function assertCivilizationsInvariants(state: CivilizationsState): void {
     const settlement = state.settlements.find(
       (candidate) => candidate.id === residency.settlementId,
     );
-    if (settlement === undefined || residency.startedTick > state.tick)
+    if (settlement === undefined || residency.startedTick > authorityTick)
       throw new Error('Residency reference is invalid.');
     validateInteger(residency.subjectId, 'Residency subject', 1);
     const key = `${residency.subjectKind}:${residency.subjectId}`;
@@ -1974,7 +1980,7 @@ export function assertCivilizationsInvariants(state: CivilizationsState): void {
       if (activeResidencyKeys.has(key))
         throw new Error('A subject may have only one active residency.');
       activeResidencyKeys.add(key);
-    } else if (residency.endedTick < residency.startedTick || residency.endedTick > state.tick)
+    } else if (residency.endedTick < residency.startedTick || residency.endedTick > authorityTick)
       throw new Error('Residency lifecycle is invalid.');
   }
   const actualPopulation = new Map<number, number>();
@@ -2054,8 +2060,11 @@ export function assertCivilizationsInvariants(state: CivilizationsState): void {
 }
 
 /** Stable canonical DTO for snapshots, hashing, and read-only Worker projections. */
-export function civilizationsDto(state: CivilizationsState): Readonly<Record<string, unknown>> {
-  assertCivilizationsInvariants(state);
+export function civilizationsDto(
+  state: CivilizationsState,
+  authorityTick = state.tick,
+): Readonly<Record<string, unknown>> {
+  assertCivilizationsInvariants(state, authorityTick);
   return frozen({
     civilizations: state.civilizations.map((civilization) => ({
       ...civilization,

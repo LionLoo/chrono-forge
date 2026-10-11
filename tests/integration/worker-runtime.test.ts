@@ -11,8 +11,14 @@ import {
   estimateFrameDeltaPayloadBytes,
   frameDeltaTransferables,
 } from '../../src/protocol/frame-delta';
-import { serializeWorldSnapshot } from '../../src/simulation/persistence';
-import { appendWorldEvent, createInitialWorld, stepWorld } from '../../src/simulation/world';
+import { deserializeWorldSnapshot, serializeWorldSnapshot } from '../../src/simulation/persistence';
+import { ACCELERATED_YEAR_TICKS } from '../../src/simulation/society';
+import {
+  appendWorldEvent,
+  canonicalWorldJson,
+  createInitialWorld,
+  stepWorld,
+} from '../../src/simulation/world';
 import {
   createSimulationRuntime,
   MAX_OFFLINE_CATCH_UP_MILLISECONDS,
@@ -21,6 +27,7 @@ import {
   OFFLINE_CATCH_UP_POLICY_VERSION,
   projectWorldFrame,
 } from '../../src/workers/simulation-runtime';
+import { createM9MatureWorld } from '../fixtures/m9-space-world';
 
 function messageOfType<TType extends WorkerToUiMessage['type']>(
   messages: readonly WorkerToUiMessage[],
@@ -480,6 +487,124 @@ describe('simulation worker runtime', () => {
     expect(ready.frame.settlementSummary).toStrictEqual(expected.settlementSummary);
     expect(restoredEvents).toStrictEqual(expectedEvents);
   });
+
+  it('preserves mature M9 authority across load, boundary advance, save, history, and reload', () => {
+    const source = stepWorld(createM9MatureWorld(), ACCELERATED_YEAR_TICKS * 5);
+    const directBeforeBoundary = stepWorld(source, ACCELERATED_YEAR_TICKS - 1);
+    const directAtBoundary = stepWorld(directBeforeBoundary, 1);
+    const expected = stepWorld(directAtBoundary, 1);
+    const expectedSnapshot = serializeWorldSnapshot(expected);
+    const boundaryBaselineEventId = directBeforeBoundary.eventLog.at(-1)?.id ?? 0;
+    const expectedBoundaryEvents = directAtBoundary.eventLog
+      .filter((event) => event.id > boundaryBaselineEventId)
+      .map((event) => ({
+        id: event.id,
+        tick: event.tick,
+        type: event.kind,
+        summary: event.summary,
+        subjectKind: event.subjectKind,
+        subjectId: event.subjectId,
+        targetKind: event.targetKind,
+        targetId: event.targetId,
+        tileIndex: event.tileIndex,
+        amount: event.amount,
+      }));
+    const expectedTimelineOffset = Math.floor((directAtBoundary.eventLog.length - 1) / 8) * 8;
+    const expectedTimeline = directAtBoundary.eventLog
+      .slice(expectedTimelineOffset, expectedTimelineOffset + 8)
+      .map((event) => ({ id: event.id, tick: event.tick, summary: event.summary }));
+    const responses: WorkerToUiMessage[] = [];
+    const runtime = createSimulationRuntime((message) => responses.push(message));
+
+    runtime.handleMessage({
+      type: 'load',
+      protocolVersion: WORKER_PROTOCOL_VERSION,
+      requestId: 'm9-boundary-load',
+      snapshot: serializeWorldSnapshot(source),
+    });
+    runtime.handleMessage({
+      type: 'advanceTicks',
+      protocolVersion: WORKER_PROTOCOL_VERSION,
+      requestId: 'm9-boundary-before',
+      ticks: ACCELERATED_YEAR_TICKS - 1,
+    });
+    runtime.handleMessage({
+      type: 'requestSave',
+      protocolVersion: WORKER_PROTOCOL_VERSION,
+      requestId: 'm9-boundary-save-before',
+    });
+    const beforeBoundary = lastMessageOfType(responses, 'saveSnapshot');
+    expect(beforeBoundary.snapshot).toBe(serializeWorldSnapshot(directBeforeBoundary));
+
+    runtime.handleMessage({
+      type: 'load',
+      protocolVersion: WORKER_PROTOCOL_VERSION,
+      requestId: 'm9-boundary-reload-before',
+      snapshot: beforeBoundary.snapshot,
+    });
+    runtime.handleMessage({
+      type: 'advanceTicks',
+      protocolVersion: WORKER_PROTOCOL_VERSION,
+      requestId: 'm9-boundary-cross',
+      ticks: 1,
+    });
+    const boundaryBatch = responses.find(
+      (message): message is Extract<WorkerToUiMessage, { type: 'eventBatch' }> =>
+        message.type === 'eventBatch' && message.requestId === 'm9-boundary-cross',
+    );
+    expect(boundaryBatch?.events).toStrictEqual(expectedBoundaryEvents);
+    expect(boundaryBatch?.events.map((event) => event.type)).toEqual(
+      expect.arrayContaining(['mission-arrived', 'cargo-arrived', 'communication-delivered']),
+    );
+
+    runtime.handleMessage({
+      type: 'requestTimelinePage',
+      protocolVersion: WORKER_PROTOCOL_VERSION,
+      requestId: 'm9-boundary-history',
+      offset: Number.MAX_SAFE_INTEGER,
+    });
+    const boundaryTimeline = responses.find(
+      (message): message is Extract<WorkerToUiMessage, { type: 'timelinePage' }> =>
+        message.type === 'timelinePage' && message.requestId === 'm9-boundary-history',
+    );
+    expect(boundaryTimeline).toStrictEqual({
+      type: 'timelinePage',
+      protocolVersion: WORKER_PROTOCOL_VERSION,
+      requestId: 'm9-boundary-history',
+      offset: expectedTimelineOffset,
+      total: directAtBoundary.eventLog.length,
+      timeline: expectedTimeline,
+    });
+    runtime.handleMessage({
+      type: 'requestSave',
+      protocolVersion: WORKER_PROTOCOL_VERSION,
+      requestId: 'm9-boundary-save-at',
+    });
+    const atBoundary = lastMessageOfType(responses, 'saveSnapshot');
+    runtime.handleMessage({
+      type: 'load',
+      protocolVersion: WORKER_PROTOCOL_VERSION,
+      requestId: 'm9-boundary-reload-at',
+      snapshot: atBoundary.snapshot,
+    });
+    runtime.handleMessage({
+      type: 'advanceTicks',
+      protocolVersion: WORKER_PROTOCOL_VERSION,
+      requestId: 'm9-boundary-after',
+      ticks: 1,
+    });
+    runtime.handleMessage({
+      type: 'requestSave',
+      protocolVersion: WORKER_PROTOCOL_VERSION,
+      requestId: 'm9-boundary-save-after',
+    });
+
+    const finalSnapshot = lastMessageOfType(responses, 'saveSnapshot').snapshot;
+    const finalWorld = deserializeWorldSnapshot(finalSnapshot);
+    expect(finalSnapshot).toBe(expectedSnapshot);
+    expect(canonicalWorldJson(finalWorld)).toBe(canonicalWorldJson(expected));
+    expect(reconstructedFrame(responses)).toStrictEqual(projectWorldFrame(expected));
+  }, 60_000);
 
   it('performs deterministic bounded offline catch-up and emits only factual event ids', () => {
     const responses: WorkerToUiMessage[] = [];

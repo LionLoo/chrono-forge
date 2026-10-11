@@ -73,9 +73,14 @@ async function expectExactProductionBoundary() {
   ) {
     throw new Error('production binary contains a WebdriverIO test plugin');
   }
+  for (const marker of ['ipc-interrupted-checkpoint', 'ipc-corrupt-recovery']) {
+    if (binary.includes(Buffer.from(marker))) {
+      throw new Error(`production binary contains desktop E2E fault hook: ${marker}`);
+    }
+  }
 }
 
 await expectExactProductionBoundary();
 console.log(
-  'Production artifact boundary verified: no WDIO bridge, capability, or global Tauri API.',
+  'Production artifact boundary verified: no WDIO bridge, capability, fault hooks, or global Tauri API.',
 );

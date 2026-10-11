@@ -16,10 +16,9 @@ const SCENARIOS = [
   {
     name: 'concord-orbit',
     seed: [7, 11, 13, 17] as const,
-    // The first two M10-expanded hashes remain unchanged. The later two renew
-    // after the M10 lifecycle fix prevents estranged kin from oscillating into
-    // rivalry/enmity, removing six invalid society transition operations.
-    expectedHashes: ['0dc1e8de', '1f538887', '8c38c58c', 'c9f18ba4'],
+    // Renewed after M10.7 corrected residency lifecycle timestamps without
+    // changing the locked operation totals or any physical space outcome.
+    expectedHashes: ['06e506ef', '82e8a8d7', '84fae30d', '745e2dee'],
     expectedOperations: {
       settlement: 587_432,
       society: 113_552,
@@ -33,8 +32,9 @@ const SCENARIOS = [
   {
     name: 'contested-frontier',
     seed: [37, 41, 43, 47] as const,
-    // Renewed for M10's intentional persisted name/culture/celestial-content expansion.
-    expectedHashes: ['9331b225', '780acdb6', '8ce47f15', '3748a1d3'],
+    // Renewed after M10.7 corrected residency lifecycle timestamps without
+    // changing the locked operation totals or any physical space outcome.
+    expectedHashes: ['c9b0bbf1', '4f8b36dd', 'b5f639a7', '90bdebe4'],
     expectedOperations: {
       settlement: 571_260,
       society: 111_345,

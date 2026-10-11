@@ -1,10 +1,22 @@
 import { spawn } from 'node:child_process';
+import { existsSync } from 'node:fs';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import path from 'node:path';
 
 const repositoryRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const npmCliPath = process.env.npm_execpath;
+const PROFILE_ENVIRONMENT_VARIABLE = 'CHRONO_FORGE_PROFILE';
+const E2E_APPLICATION_IDENTIFIER = 'com.lionloo.chronoforge.e2e';
 const NATIVE_TEST_TIMEOUT_PATTERN = /Timeout of \d+ms exceeded\. The execution in the test /u;
+const PRE_RELAUNCH_SPECS = Object.freeze([
+  './tests/e2e-desktop/focus-persistence.phase-1.e2e.spec.mjs',
+  './tests/e2e-desktop/focus-persistence.phase-2.e2e.spec.mjs',
+  './tests/e2e-desktop/focus-persistence.phase-3.e2e.spec.mjs',
+]);
+const POST_RELAUNCH_SPECS = Object.freeze([
+  './tests/e2e-desktop/focus-persistence.phase-4.e2e.spec.mjs',
+]);
+let generatedProfileSequence = 0;
 
 const CONFIRMED_INFRASTRUCTURE_FAILURES = Object.freeze([
   Object.freeze({
@@ -69,6 +81,105 @@ export function confirmedNativeE2eInfrastructureFailures(output) {
   );
 }
 
+export function nativeE2eDatabasePath(
+  profile,
+  { environment = process.env, platform = process.platform } = {},
+) {
+  if (!/^[A-Za-z0-9_-]{1,64}$/u.test(profile)) {
+    throw new Error('native E2E profile name is invalid');
+  }
+  const pathApi = platform === 'win32' ? path.win32 : path.posix;
+  let localDataRoot;
+  if (platform === 'win32') {
+    localDataRoot = environment.LOCALAPPDATA;
+  } else if (platform === 'darwin') {
+    localDataRoot =
+      environment.HOME === undefined
+        ? undefined
+        : pathApi.join(environment.HOME, 'Library', 'Application Support');
+  } else {
+    localDataRoot =
+      environment.XDG_DATA_HOME ??
+      (environment.HOME === undefined
+        ? undefined
+        : pathApi.join(environment.HOME, '.local', 'share'));
+  }
+  if (localDataRoot === undefined || localDataRoot.length === 0) {
+    throw new Error('native E2E application-local-data root is unavailable');
+  }
+  return pathApi.join(
+    localDataRoot,
+    E2E_APPLICATION_IDENTIFIER,
+    'profiles',
+    profile,
+    'chrono-forge.sqlite3',
+  );
+}
+
+export async function verifyNativeE2eDatabase({
+  databasePath = undefined,
+  profile = process.env[PROFILE_ENVIRONMENT_VARIABLE],
+} = {}) {
+  if (profile === undefined && databasePath === undefined) {
+    throw new Error('native E2E profile is unavailable for SQLite integrity verification');
+  }
+  const resolvedPath = databasePath ?? nativeE2eDatabasePath(profile, { environment: process.env });
+  if (!existsSync(resolvedPath)) {
+    throw new Error(`native E2E SQLite database does not exist: ${resolvedPath}`);
+  }
+  const { DatabaseSync } = await import('node:sqlite');
+  const database = new DatabaseSync(resolvedPath, { readOnly: true });
+  try {
+    const integrityRows = database.prepare('PRAGMA integrity_check').all();
+    if (integrityRows.length !== 1 || integrityRows[0]?.integrity_check !== 'ok') {
+      throw new Error(`SQLite integrity_check failed: ${JSON.stringify(integrityRows)}`);
+    }
+    const foreignKeyRows = database.prepare('PRAGMA foreign_key_check').all();
+    if (foreignKeyRows.length !== 0) {
+      throw new Error(`SQLite foreign_key_check failed: ${JSON.stringify(foreignKeyRows)}`);
+    }
+    const counts = database
+      .prepare(
+        `SELECT
+           (SELECT COUNT(*) FROM save_slots) AS slots,
+           (SELECT COUNT(*) FROM save_generations) AS generations,
+           (SELECT COUNT(*) FROM focus_sessions) AS sessions`,
+      )
+      .get();
+    if (counts?.slots !== 3 || counts.generations !== 7 || counts.sessions !== 2) {
+      throw new Error(`unexpected post-cleanup SQLite counts: ${JSON.stringify(counts)}`);
+    }
+    const settings = database.prepare('SELECT active_slot_id FROM app_settings').get();
+    if (settings?.active_slot_id !== 'm9-contacted') {
+      throw new Error(`unexpected post-cleanup active slot: ${JSON.stringify(settings)}`);
+    }
+    const slots = database
+      .prepare('SELECT slot_id, head_generation FROM save_slots ORDER BY slot_id ASC')
+      .all();
+    const expectedSlots = [
+      { slot_id: 'm9-contacted', head_generation: 2 },
+      { slot_id: 'm9-mid-flight', head_generation: 2 },
+      { slot_id: 'primary', head_generation: 5 },
+    ];
+    if (JSON.stringify(slots) !== JSON.stringify(expectedSlots)) {
+      throw new Error(`unexpected post-cleanup save slots: ${JSON.stringify(slots)}`);
+    }
+    console.log(
+      `[native-e2e-integrity] integrity_check=ok foreign_key_check=ok slots=3 generations=7 sessions=2 database=${resolvedPath}`,
+    );
+    return Object.freeze({ databasePath: resolvedPath, generations: 7, sessions: 2, slots: 3 });
+  } finally {
+    database.close();
+  }
+}
+
+function useFreshNativeE2eProfile() {
+  generatedProfileSequence += 1;
+  const profile = `wdio-${process.pid}-${Date.now()}-${generatedProfileSequence}`;
+  process.env[PROFILE_ENVIRONMENT_VARIABLE] = profile;
+  return profile;
+}
+
 function runNpm(args) {
   return new Promise((resolve, reject) => {
     if (npmCliPath === undefined) {
@@ -95,14 +206,56 @@ function runNpm(args) {
   });
 }
 
-export async function runNativeE2eCi(run = runNpm, logger = console) {
+function wdioArgs(specs) {
+  return [
+    'exec',
+    '--',
+    'wdio',
+    'run',
+    'wdio.conf.mjs',
+    ...specs.flatMap((spec) => ['--spec', spec]),
+  ];
+}
+
+async function runNativeE2eAttempt(run) {
+  const beforeRelaunch = await run(wdioArgs(PRE_RELAUNCH_SPECS));
+  if (beforeRelaunch.code !== 0) return beforeRelaunch;
+
+  // Ending the first WDIO launcher cleanly deletes its WebDriver session before the Tauri
+  // service stops the embedded app. The second launcher then proves phase 4 against a real
+  // cold process while retaining the same isolated SQLite profile.
+  const afterRelaunch = await run(wdioArgs(POST_RELAUNCH_SPECS));
+  // Return only the command that controls this attempt's outcome. In particular, a recovered
+  // warning from the successful first launcher must never classify an unrelated phase-4
+  // assertion failure as retryable infrastructure.
+  return afterRelaunch;
+}
+
+export async function runNativeE2eCi(
+  run = runNpm,
+  logger = console,
+  verifyDatabase = verifyNativeE2eDatabase,
+) {
+  if (run === runNpm && process.env[PROFILE_ENVIRONMENT_VARIABLE] === undefined) {
+    useFreshNativeE2eProfile();
+  }
   const build = await run(['run', 'build:e2e:desktop']);
   if (build.code !== 0) {
     return build.code;
   }
 
-  const firstAttempt = await run(['exec', '--', 'wdio', 'run', 'wdio.conf.mjs']);
-  if (firstAttempt.code === 0) return 0;
+  const firstAttempt = await runNativeE2eAttempt(run);
+  if (firstAttempt.code === 0) {
+    try {
+      await verifyDatabase();
+      return 0;
+    } catch (error) {
+      logger.error(
+        `[native-e2e-integrity] ${error instanceof Error ? error.message : 'unknown SQLite verification failure'}`,
+      );
+      return 1;
+    }
+  }
 
   const confirmedFailures = confirmedNativeE2eInfrastructureFailures(firstAttempt.output);
   if (confirmedFailures.length === 0) {
@@ -115,14 +268,49 @@ export async function runNativeE2eCi(run = runNpm, logger = console) {
   logger.warn(
     `[native-e2e-ci] The first native suite attempt failed through confirmed infrastructure (${confirmedFailures.join(', ')}). Retrying the complete unchanged suite once with fresh launcher-owned sessions.`,
   );
-  const secondAttempt = await run(['exec', '--', 'wdio', 'run', 'wdio.conf.mjs']);
+  if (run === runNpm) useFreshNativeE2eProfile();
+  const secondAttempt = await runNativeE2eAttempt(run);
   if (secondAttempt.code !== 0) {
     logger.error('[native-e2e-ci] The single bounded infrastructure retry also failed.');
+    return secondAttempt.code;
   }
-  return secondAttempt.code;
+  try {
+    await verifyDatabase();
+    return 0;
+  } catch (error) {
+    logger.error(
+      `[native-e2e-integrity] ${error instanceof Error ? error.message : 'unknown SQLite verification failure'}`,
+    );
+    return 1;
+  }
+}
+
+export async function runNativeE2eSingleAttempt(
+  run = runNpm,
+  logger = console,
+  verifyDatabase = verifyNativeE2eDatabase,
+) {
+  if (run === runNpm && process.env[PROFILE_ENVIRONMENT_VARIABLE] === undefined) {
+    useFreshNativeE2eProfile();
+  }
+  const build = await run(['run', 'build:e2e:desktop']);
+  if (build.code !== 0) return build.code;
+  const attempt = await runNativeE2eAttempt(run);
+  if (attempt.code !== 0) return attempt.code;
+  try {
+    await verifyDatabase();
+    return 0;
+  } catch (error) {
+    logger.error(
+      `[native-e2e-integrity] ${error instanceof Error ? error.message : 'unknown SQLite verification failure'}`,
+    );
+    return 1;
+  }
 }
 
 const entryPath = process.argv[1];
 if (entryPath !== undefined && import.meta.url === pathToFileURL(path.resolve(entryPath)).href) {
-  process.exitCode = await runNativeE2eCi();
+  process.exitCode = process.argv.includes('--single-attempt')
+    ? await runNativeE2eSingleAttempt()
+    : await runNativeE2eCi();
 }

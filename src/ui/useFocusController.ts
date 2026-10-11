@@ -27,7 +27,8 @@ export interface UseFocusControllerOptions {
   readonly clock: FocusClock;
   readonly initialSession?: FocusSession | null;
   readonly slotId: string | null;
-  readonly onSimulationTicks: (ticks: number) => void;
+  /** False means Worker backpressure rejected this transition before it became accepted time. */
+  readonly onSimulationTicks: (ticks: number) => boolean | void;
   readonly onSessionState?: (session: FocusSession) => void;
   readonly checkpointIntervalMs?: number;
   readonly createSessionId?: () => string;
@@ -152,10 +153,13 @@ export function useFocusController(options: UseFocusControllerOptions): FocusCon
       const next = operation(previous, clock.now());
       if (next === previous) return;
 
+      const issuedDelta = next.totalIssuedSimulationTicks - previous.totalIssuedSimulationTicks;
+      if (issuedDelta > 0 && onSimulationTicks(issuedDelta) === false) return;
+      // The Worker owns world authority. Do not commit accepted focus time locally until the
+      // corresponding tick command has crossed that boundary successfully; a synchronous
+      // dispatch failure must leave the same elapsed interval available for an exact retry.
       stateRef.current = next;
       setState(next);
-      const issuedDelta = next.totalIssuedSimulationTicks - previous.totalIssuedSimulationTicks;
-      if (issuedDelta > 0) onSimulationTicks(issuedDelta);
       publish(next);
     },
     [clock, onSimulationTicks, publish, suspended],

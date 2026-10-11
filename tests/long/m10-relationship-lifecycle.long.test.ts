@@ -521,6 +521,14 @@ describe.sequential('M10 relationship, household, and biography evidence catalog
           ),
       ).toBe(true);
     }
+    expect(
+      world.civilizations.residencies.some(
+        (residency) =>
+          residency.subjectKind === 'household' &&
+          residency.subjectId === 4 &&
+          residency.startedTick === householdFormation!.tick,
+      ),
+    ).toBe(true);
 
     const widowhood = eventsById.get(1_192);
     const deceased = society.people.find((person) => person.id === 5)!;
@@ -541,6 +549,14 @@ describe.sequential('M10 relationship, household, and biography evidence catalog
           event.kind === 'person-died' &&
           event.subjectId === deceased.id &&
           event.tick === widowhood!.tick,
+      ),
+    ).toBe(true);
+    expect(
+      world.civilizations.residencies.some(
+        (residency) =>
+          residency.subjectKind === 'person' &&
+          residency.subjectId === deceased.id &&
+          residency.endedTick === deceased.deathTick,
       ),
     ).toBe(true);
     for (const person of [deceased, survivor]) expect(person.biographyEventIds).toContain(1_192);
@@ -566,6 +582,14 @@ describe.sequential('M10 relationship, household, and biography evidence catalog
       guardianIds: [13, 15],
     });
     expect(child.biographyEventIds).toContain(arrival.eventId);
+    expect(
+      world.civilizations.residencies.some(
+        (residency) =>
+          residency.subjectKind === 'person' &&
+          residency.subjectId === child.id &&
+          residency.startedTick === child.birthTick,
+      ),
+    ).toBe(true);
     const arrivalEvent = eventsById.get(arrival.eventId)!;
     const eligibilityEvent = eventsById.get(arrival.eligibilityEventId)!;
     expect(arrivalEvent).toMatchObject({

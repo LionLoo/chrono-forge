@@ -30,6 +30,8 @@ export const DEMO_WORLD_CONFIG: WorldConfig = Object.freeze({
   societyYearTicks: 100_000,
 });
 
+export const ADVANCE_RESPONSE_TIMEOUT_MS = 10_000;
+
 export interface SimulationWorkerPort {
   onerror: ((event: ErrorEvent) => void) | null;
   onmessage: ((event: MessageEvent<WorkerToUiMessage>) => void) | null;
@@ -58,6 +60,22 @@ function postWorkerMessage(
   });
 }
 
+function postPendingWorkerMessage<T>(
+  worker: SimulationWorkerPort,
+  message: UiToWorkerMessage,
+  pendingRequests: Map<string, T>,
+  activityRecorder: RuntimeActivityRecorder | undefined,
+): void {
+  try {
+    postWorkerMessage(worker, message, activityRecorder);
+  } catch (error) {
+    // A synchronously rejected dispatch never reached Worker authority. Remove its unreachable
+    // promise before a caller retries so it cannot leak or block ordered response correlation.
+    pendingRequests.delete(message.requestId);
+    throw error;
+  }
+}
+
 function recordRuntimeActivity(
   activityRecorder: RuntimeActivityRecorder | undefined,
   event: RuntimeActivityEvent,
@@ -72,6 +90,10 @@ function recordRuntimeActivity(
 interface PendingVoidRequest {
   readonly reject: (reason: Error) => void;
   readonly resolve: () => void;
+}
+
+interface PendingOfflineRequest extends PendingVoidRequest {
+  frameApplied: boolean;
 }
 
 interface PendingSaveRequest {
@@ -90,7 +112,8 @@ interface PendingFocusCheckpointRequest {
 }
 
 export interface WorldSimulationView {
-  readonly advanceTicks: (ticks: number) => void;
+  /** Returns false when an earlier authoritative advance is still outstanding. */
+  readonly advanceTicks: (ticks: number) => boolean | void;
   readonly error: string | null;
   readonly events: readonly WorkerEvent[];
   /** The latest events newly recorded after an authoritative advance, excluding load history. */
@@ -167,10 +190,14 @@ export function useWorldSimulation(
   const frameRef = useRef<WorldFrameProjection | null>(null);
   const workerRef = useRef<SimulationWorkerPort | null>(null);
   const requestSequenceRef = useRef(0);
+  const pendingAdvanceRequestsRef = useRef(
+    new Map<string, ReturnType<typeof globalThis.setTimeout> | null>(),
+  );
+  const failWorkerRef = useRef<((reason: Error) => void) | null>(null);
   const pendingSavesRef = useRef(new Map<string, PendingSaveRequest>());
   const pendingFocusCheckpointsRef = useRef(new Map<string, PendingFocusCheckpointRequest>());
   const pendingLoadsRef = useRef(new Map<string, PendingVoidRequest>());
-  const pendingOfflineRef = useRef(new Map<string, PendingVoidRequest>());
+  const pendingOfflineRef = useRef(new Map<string, PendingOfflineRequest>());
   const pendingCommandsRef = useRef(new Map<string, PendingVoidRequest>());
 
   useEffect(() => {
@@ -199,12 +226,14 @@ export function useWorldSimulation(
     }
 
     workerRef.current = worker;
+    const pendingAdvanceRequests = pendingAdvanceRequestsRef.current;
     const pendingSaves = pendingSavesRef.current;
     const pendingFocusCheckpoints = pendingFocusCheckpointsRef.current;
     const pendingLoads = pendingLoadsRef.current;
     const pendingOffline = pendingOfflineRef.current;
     const pendingCommands = pendingCommandsRef.current;
     const historicalEventRequestIds = new Set<string>();
+    let expectedInitializationRequestId: string | null = null;
     const rejectRequest = (
       requestId: string,
       reason: Error,
@@ -253,6 +282,10 @@ export function useWorldSimulation(
       pendingLoads.clear();
       pendingOffline.clear();
       pendingCommands.clear();
+      for (const timeout of pendingAdvanceRequests.values()) {
+        if (timeout !== null) globalThis.clearTimeout(timeout);
+      }
+      pendingAdvanceRequests.clear();
     };
     const failWorker = (reason: Error) => {
       rejectAll(reason);
@@ -262,6 +295,7 @@ export function useWorldSimulation(
       worker.terminate();
       setError(reason.message);
     };
+    failWorkerRef.current = failWorker;
     const applyFrame = (
       nextFrame: WorldFrameProjection,
       replaceEvents: boolean,
@@ -309,10 +343,21 @@ export function useWorldSimulation(
 
       switch (message.type) {
         case 'ready': {
+          const pendingLoad = pendingLoads.get(message.requestId);
+          const isExpectedInitialization = message.requestId === expectedInitializationRequestId;
+          const oldestPendingLoadRequestId = pendingLoads.keys().next().value;
+          if (
+            (expectedInitializationRequestId !== null && !isExpectedInitialization) ||
+            (!isExpectedInitialization &&
+              (pendingLoad === undefined || message.requestId !== oldestPendingLoadRequestId))
+          ) {
+            failWorker(new Error('The simulation worker sent an unexpected ready response.'));
+            return;
+          }
+          if (isExpectedInitialization) expectedInitializationRequestId = null;
           applyFrame(message.frame, true, message.requestId, 'ready');
           historicalEventRequestIds.add(message.requestId);
           setLatestRecordedEvents([]);
-          const pendingLoad = pendingLoads.get(message.requestId);
           if (pendingLoad !== undefined) {
             pendingLoads.delete(message.requestId);
             pendingLoad.resolve();
@@ -321,6 +366,16 @@ export function useWorldSimulation(
         }
         case 'frameDelta': {
           try {
+            const isExpectedAdvance = pendingAdvanceRequests.has(message.requestId);
+            const advanceTimeout = pendingAdvanceRequests.get(message.requestId);
+            if (advanceTimeout !== undefined && advanceTimeout !== null) {
+              globalThis.clearTimeout(advanceTimeout);
+            }
+            pendingAdvanceRequests.delete(message.requestId);
+            const pendingOfflineRequest = pendingOffline.get(message.requestId);
+            if (!isExpectedAdvance && pendingOfflineRequest === undefined) {
+              throw new Error('The simulation worker sent an unexpected frame delta.');
+            }
             if (frameRef.current === null)
               throw new Error('Received a frame delta before a ready frame.');
             applyFrame(
@@ -329,6 +384,7 @@ export function useWorldSimulation(
               message.requestId,
               'delta',
             );
+            if (pendingOfflineRequest !== undefined) pendingOfflineRequest.frameApplied = true;
           } catch (deltaError) {
             const reason =
               deltaError instanceof Error
@@ -398,13 +454,16 @@ export function useWorldSimulation(
           return;
         }
         case 'metrics': {
-          const pendingLoad = pendingLoads.get(message.requestId);
-          if (pendingLoad !== undefined) {
-            pendingLoads.delete(message.requestId);
-            pendingLoad.resolve();
-          }
           const pendingOfflineRequest = pendingOffline.get(message.requestId);
           if (pendingOfflineRequest !== undefined) {
+            if (!pendingOfflineRequest.frameApplied) {
+              failWorker(
+                new Error(
+                  'The simulation worker completed offline catch-up before applying its frame.',
+                ),
+              );
+              return;
+            }
             pendingOffline.delete(message.requestId);
             pendingOfflineRequest.resolve();
           }
@@ -436,6 +495,7 @@ export function useWorldSimulation(
     };
 
     const requestId = nextRequestId('initialize');
+    expectedInitializationRequestId = requestId;
     postWorkerMessage(
       worker,
       {
@@ -452,6 +512,7 @@ export function useWorldSimulation(
       disposed = true;
       const reason = new Error('The simulation worker was closed before the request completed.');
       rejectAll(reason);
+      if (failWorkerRef.current === failWorker) failWorkerRef.current = null;
       workerRef.current = null;
       worker.onmessage = null;
       worker.onerror = null;
@@ -468,21 +529,43 @@ export function useWorldSimulation(
   }, []);
 
   const advanceTicks = useCallback(
-    (ticks: number) => {
+    (ticks: number): boolean => {
       assertNonNegativeSafeInteger(ticks, 'Advance ticks');
       const worker = workerRef.current;
-      if (worker === null) return;
+      if (worker === null) return false;
+      // Deltas are base-tick ordered. Never enqueue a second advance behind an unacknowledged
+      // one: focus time must remain available for an exact retry instead of outrunning Worker
+      // authority or growing an unbounded request/message queue.
+      if (pendingAdvanceRequestsRef.current.size > 0) return false;
       const requestId = nextRequestId('advance');
-      postWorkerMessage(
-        worker,
-        {
-          type: 'advanceTicks',
-          protocolVersion: WORKER_PROTOCOL_VERSION,
-          requestId,
-          ticks,
-        },
-        activityRecorderRef.current,
-      );
+      pendingAdvanceRequestsRef.current.set(requestId, null);
+      try {
+        postWorkerMessage(
+          worker,
+          {
+            type: 'advanceTicks',
+            protocolVersion: WORKER_PROTOCOL_VERSION,
+            requestId,
+            ticks,
+          },
+          activityRecorderRef.current,
+        );
+      } catch (error) {
+        pendingAdvanceRequestsRef.current.delete(requestId);
+        throw error;
+      }
+      if (pendingAdvanceRequestsRef.current.has(requestId)) {
+        const timeout = globalThis.setTimeout(() => {
+          if (!pendingAdvanceRequestsRef.current.has(requestId)) return;
+          failWorkerRef.current?.(
+            new Error(
+              `The simulation worker did not answer an advance request within ${ADVANCE_RESPONSE_TIMEOUT_MS} ms.`,
+            ),
+          );
+        }, ADVANCE_RESPONSE_TIMEOUT_MS);
+        pendingAdvanceRequestsRef.current.set(requestId, timeout);
+      }
+      return true;
     },
     [nextRequestId],
   );
@@ -494,13 +577,14 @@ export function useWorldSimulation(
     const promise = new Promise<string>((resolve, reject) => {
       pendingSavesRef.current.set(requestId, { resolve, reject });
     });
-    postWorkerMessage(
+    postPendingWorkerMessage(
       worker,
       {
         type: 'requestSave',
         protocolVersion: WORKER_PROTOCOL_VERSION,
         requestId,
       },
+      pendingSavesRef.current,
       activityRecorderRef.current,
     );
     return promise;
@@ -517,7 +601,7 @@ export function useWorldSimulation(
       const promise = new Promise<FocusCheckpointResult>((resolve, reject) => {
         pendingFocusCheckpointsRef.current.set(requestId, { resolve, reject });
       });
-      postWorkerMessage(
+      postPendingWorkerMessage(
         worker,
         {
           type: 'requestFocusCheckpoint',
@@ -525,6 +609,7 @@ export function useWorldSimulation(
           requestId,
           baselineEventId,
         },
+        pendingFocusCheckpointsRef.current,
         activityRecorderRef.current,
       );
       return promise;
@@ -607,7 +692,7 @@ export function useWorldSimulation(
       const promise = new Promise<void>((resolve, reject) => {
         pendingLoadsRef.current.set(requestId, { resolve, reject });
       });
-      postWorkerMessage(
+      postPendingWorkerMessage(
         worker,
         {
           type: 'load',
@@ -615,6 +700,7 @@ export function useWorldSimulation(
           requestId,
           snapshot,
         },
+        pendingLoadsRef.current,
         activityRecorderRef.current,
       );
       return promise;
@@ -632,9 +718,9 @@ export function useWorldSimulation(
         return Promise.reject(new Error('The simulation worker is unavailable.'));
       const requestId = nextRequestId('offline');
       const promise = new Promise<void>((resolve, reject) => {
-        pendingOfflineRef.current.set(requestId, { resolve, reject });
+        pendingOfflineRef.current.set(requestId, { frameApplied: false, resolve, reject });
       });
-      postWorkerMessage(
+      postPendingWorkerMessage(
         worker,
         {
           type: 'performOfflineCatchUp',
@@ -644,6 +730,7 @@ export function useWorldSimulation(
           rate,
           policyVersion: OFFLINE_CATCH_UP_POLICY_VERSION,
         },
+        pendingOfflineRef.current,
         activityRecorderRef.current,
       );
       return promise;
@@ -660,7 +747,7 @@ export function useWorldSimulation(
       const promise = new Promise<void>((resolve, reject) => {
         pendingCommandsRef.current.set(requestId, { resolve, reject });
       });
-      postWorkerMessage(
+      postPendingWorkerMessage(
         worker,
         {
           type: 'queueCommand',
@@ -668,6 +755,7 @@ export function useWorldSimulation(
           requestId,
           command,
         },
+        pendingCommandsRef.current,
         activityRecorderRef.current,
       );
       return promise;

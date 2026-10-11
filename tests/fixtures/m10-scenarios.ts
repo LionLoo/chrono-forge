@@ -66,7 +66,7 @@ export const M10_SCENARIOS: readonly M10Scenario[] = Object.freeze(
 export const M10_EXPECTED_BASELINES: readonly M10Baseline[] = Object.freeze([
   {
     name: 'river-kin',
-    hash: '6536a93f',
+    hash: 'b69398d7',
     operations: {
       settlement: 53791,
       society: 9305,
@@ -78,7 +78,7 @@ export const M10_EXPECTED_BASELINES: readonly M10Baseline[] = Object.freeze([
   },
   {
     name: 'stone-weavers',
-    hash: 'e12af632',
+    hash: 'ea3de57a',
     operations: {
       settlement: 47265,
       society: 8227,
@@ -90,7 +90,7 @@ export const M10_EXPECTED_BASELINES: readonly M10Baseline[] = Object.freeze([
   },
   {
     name: 'edge-of-seed',
-    hash: '738170a2',
+    hash: 'd9d2b03e',
     operations: {
       settlement: 48065,
       society: 8171,
@@ -102,7 +102,7 @@ export const M10_EXPECTED_BASELINES: readonly M10Baseline[] = Object.freeze([
   },
   {
     name: 'lean-market',
-    hash: '1c2a1665',
+    hash: 'df44e590',
     operations: {
       settlement: 54994,
       society: 9788,
@@ -114,7 +114,7 @@ export const M10_EXPECTED_BASELINES: readonly M10Baseline[] = Object.freeze([
   },
   {
     name: 'renewed-hearth',
-    hash: 'ac4dcb9f',
+    hash: 'aed2eb65',
     operations: {
       settlement: 47149,
       society: 7997,
@@ -126,7 +126,7 @@ export const M10_EXPECTED_BASELINES: readonly M10Baseline[] = Object.freeze([
   },
   {
     name: 'concord-orbit',
-    hash: '9c77c57c',
+    hash: '2182b552',
     operations: {
       settlement: 43774,
       society: 7787,
@@ -138,7 +138,7 @@ export const M10_EXPECTED_BASELINES: readonly M10Baseline[] = Object.freeze([
   },
   {
     name: 'ore-coexistence',
-    hash: '5f2ed79c',
+    hash: '1c5d4e12',
     operations: {
       settlement: 30889,
       society: 5666,
@@ -150,7 +150,7 @@ export const M10_EXPECTED_BASELINES: readonly M10Baseline[] = Object.freeze([
   },
   {
     name: 'contested-frontier',
-    hash: 'c50938c9',
+    hash: 'afcfa13d',
     operations: {
       settlement: 46782,
       society: 8485,
@@ -162,7 +162,7 @@ export const M10_EXPECTED_BASELINES: readonly M10Baseline[] = Object.freeze([
   },
   {
     name: 'renewed-fracture',
-    hash: '9e721fb8',
+    hash: '31fdc103',
     operations: {
       settlement: 50070,
       society: 8390,
@@ -174,7 +174,7 @@ export const M10_EXPECTED_BASELINES: readonly M10Baseline[] = Object.freeze([
   },
   {
     name: 'willow-crossing',
-    hash: '60e578b4',
+    hash: '7b9df7cc',
     operations: {
       settlement: 36575,
       society: 6792,
@@ -186,7 +186,7 @@ export const M10_EXPECTED_BASELINES: readonly M10Baseline[] = Object.freeze([
   },
   {
     name: 'copper-rain',
-    hash: '7108be62',
+    hash: 'ed67999e',
     operations: {
       settlement: 58096,
       society: 10327,
@@ -198,7 +198,7 @@ export const M10_EXPECTED_BASELINES: readonly M10Baseline[] = Object.freeze([
   },
   {
     name: 'quiet-estuary',
-    hash: '953bb42e',
+    hash: 'e9e82500',
     operations: {
       settlement: 50602,
       society: 8491,
@@ -210,7 +210,7 @@ export const M10_EXPECTED_BASELINES: readonly M10Baseline[] = Object.freeze([
   },
   {
     name: 'granite-choir',
-    hash: 'b5526976',
+    hash: 'a24de268',
     operations: {
       settlement: 50744,
       society: 8605,
@@ -222,7 +222,7 @@ export const M10_EXPECTED_BASELINES: readonly M10Baseline[] = Object.freeze([
   },
   {
     name: 'reed-observatory',
-    hash: '7267378c',
+    hash: '8b7d7d20',
     operations: {
       settlement: 44442,
       society: 7566,
@@ -234,7 +234,7 @@ export const M10_EXPECTED_BASELINES: readonly M10Baseline[] = Object.freeze([
   },
   {
     name: 'amber-current',
-    hash: '8a353b11',
+    hash: '369e9499',
     operations: {
       settlement: 49086,
       society: 8386,
@@ -246,7 +246,7 @@ export const M10_EXPECTED_BASELINES: readonly M10Baseline[] = Object.freeze([
   },
   {
     name: 'winter-orchard',
-    hash: '3fb6d8bd',
+    hash: '3971e0aa',
     operations: {
       settlement: 55532,
       society: 9398,
@@ -258,7 +258,7 @@ export const M10_EXPECTED_BASELINES: readonly M10Baseline[] = Object.freeze([
   },
   {
     name: 'basalt-covenant',
-    hash: 'a43e2059',
+    hash: '7fdac669',
     operations: {
       settlement: 52515,
       society: 9102,
@@ -270,7 +270,7 @@ export const M10_EXPECTED_BASELINES: readonly M10Baseline[] = Object.freeze([
   },
   {
     name: 'moss-archive',
-    hash: '99f2eb22',
+    hash: '332532ff',
     operations: {
       settlement: 51276,
       society: 8631,
@@ -282,7 +282,7 @@ export const M10_EXPECTED_BASELINES: readonly M10Baseline[] = Object.freeze([
   },
   {
     name: 'sunward-harbor',
-    hash: '8dfc5389',
+    hash: '707ce4d7',
     operations: {
       settlement: 51172,
       society: 8877,
@@ -294,7 +294,7 @@ export const M10_EXPECTED_BASELINES: readonly M10Baseline[] = Object.freeze([
   },
   {
     name: 'thunder-library',
-    hash: '4ed1ec72',
+    hash: '79e1ca72',
     operations: {
       settlement: 53844,
       society: 9716,
@@ -306,7 +306,7 @@ export const M10_EXPECTED_BASELINES: readonly M10Baseline[] = Object.freeze([
   },
   {
     name: 'salt-lanterns',
-    hash: '7cd4b73d',
+    hash: 'a1e3796c',
     operations: {
       settlement: 52998,
       society: 8935,
@@ -318,7 +318,7 @@ export const M10_EXPECTED_BASELINES: readonly M10Baseline[] = Object.freeze([
   },
   {
     name: 'iron-pollinators',
-    hash: 'b9a7cebf',
+    hash: 'cbab7e59',
     operations: {
       settlement: 35552,
       society: 5825,
@@ -330,7 +330,7 @@ export const M10_EXPECTED_BASELINES: readonly M10Baseline[] = Object.freeze([
   },
   {
     name: 'cloud-foundry',
-    hash: '45a55877',
+    hash: '8a5a4fa6',
     operations: {
       settlement: 35662,
       society: 6107,
@@ -342,7 +342,7 @@ export const M10_EXPECTED_BASELINES: readonly M10Baseline[] = Object.freeze([
   },
   {
     name: 'night-canals',
-    hash: '67a06fee',
+    hash: '99cb1aa6',
     operations: {
       settlement: 37379,
       society: 6151,
@@ -354,7 +354,7 @@ export const M10_EXPECTED_BASELINES: readonly M10Baseline[] = Object.freeze([
   },
   {
     name: 'far-horizon',
-    hash: '4b1884a7',
+    hash: '637d3704',
     operations: {
       settlement: 54395,
       society: 9563,

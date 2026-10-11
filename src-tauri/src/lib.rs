@@ -4,11 +4,12 @@ use std::{
 };
 
 use serde::Serialize;
-use tauri::Manager;
+use tauri::{Manager, WebviewUrl, WebviewWindowBuilder};
 
 mod persistence;
 
 const PROFILE_ENVIRONMENT_VARIABLE: &str = "CHRONO_FORGE_PROFILE";
+const PERSISTENCE_BROKER_LABEL: &str = "persistence-broker";
 
 fn persistence_directory(base: &Path, profile: Option<&OsStr>) -> Result<PathBuf, String> {
     let Some(profile) = profile else {
@@ -29,6 +30,31 @@ fn persistence_directory(base: &Path, profile: Option<&OsStr>) -> Result<PathBuf
         );
     }
     Ok(base.join("profiles").join(profile))
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WindowLifecycleEvent {
+    CloseRequested,
+    Destroyed,
+    Other,
+}
+
+impl From<&tauri::WindowEvent> for WindowLifecycleEvent {
+    fn from(event: &tauri::WindowEvent) -> Self {
+        match event {
+            tauri::WindowEvent::CloseRequested { .. } => Self::CloseRequested,
+            tauri::WindowEvent::Destroyed => Self::Destroyed,
+            _ => Self::Other,
+        }
+    }
+}
+
+fn should_exit_after_window_event(window_label: &str, event: WindowLifecycleEvent) -> bool {
+    window_label == "main"
+        && matches!(
+            event,
+            WindowLifecycleEvent::CloseRequested | WindowLifecycleEvent::Destroyed
+        )
 }
 
 #[derive(Debug, Serialize, PartialEq, Eq)]
@@ -68,7 +94,30 @@ pub fn run() {
             app.manage(persistence::PersistenceState::open_app_local_data(
                 &app_local_data,
             )?);
+            WebviewWindowBuilder::new(
+                app,
+                PERSISTENCE_BROKER_LABEL,
+                WebviewUrl::App("index.html?persistence-broker=1".into()),
+            )
+            .title("Chrono Forge persistence validator")
+            .visible(false)
+            .skip_taskbar(true)
+            .build()?;
+            // Keep the player-facing window last so desktop automation and accessibility tools
+            // attach to the game rather than the deliberately hidden validation compartment.
+            WebviewWindowBuilder::new(app, "main", WebviewUrl::App("index.html".into()))
+                .title("Chrono Forge")
+                .inner_size(1440.0, 900.0)
+                .min_inner_size(1024.0, 720.0)
+                .center()
+                .resizable(true)
+                .build()?;
             Ok(())
+        })
+        .on_window_event(|window, event| {
+            if should_exit_after_window_event(window.label(), event.into()) {
+                window.app_handle().exit(0);
+            }
         })
         .invoke_handler(tauri::generate_handler![
             app_info,
@@ -94,7 +143,10 @@ pub fn run() {
 mod tests {
     use std::{ffi::OsStr, path::Path};
 
-    use super::{AppInfo, app_info, persistence_directory};
+    use super::{
+        AppInfo, WindowLifecycleEvent, app_info, persistence_directory,
+        should_exit_after_window_event,
+    };
 
     #[test]
     fn app_info_reports_local_first_identity() {
@@ -143,5 +195,41 @@ mod tests {
                 "profile {invalid:?} must be rejected",
             );
         }
+    }
+
+    #[test]
+    fn only_player_window_close_or_destruction_exits_the_process() {
+        assert!(should_exit_after_window_event(
+            "main",
+            WindowLifecycleEvent::CloseRequested,
+        ));
+        assert!(should_exit_after_window_event(
+            "main",
+            WindowLifecycleEvent::Destroyed,
+        ));
+        assert!(!should_exit_after_window_event(
+            "persistence-broker",
+            WindowLifecycleEvent::CloseRequested,
+        ));
+        assert!(!should_exit_after_window_event(
+            "persistence-broker",
+            WindowLifecycleEvent::Destroyed,
+        ));
+        assert!(!should_exit_after_window_event(
+            "main",
+            WindowLifecycleEvent::Other,
+        ));
+    }
+
+    #[test]
+    fn tauri_window_events_map_to_the_lifecycle_boundary() {
+        assert_eq!(
+            WindowLifecycleEvent::from(&tauri::WindowEvent::Destroyed),
+            WindowLifecycleEvent::Destroyed,
+        );
+        assert_eq!(
+            WindowLifecycleEvent::from(&tauri::WindowEvent::Focused(false)),
+            WindowLifecycleEvent::Other,
+        );
     }
 }

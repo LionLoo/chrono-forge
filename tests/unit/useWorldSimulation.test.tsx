@@ -1,6 +1,10 @@
 import { act, renderHook, waitFor } from '@testing-library/react';
 
-import type { UiToWorkerMessage, WorkerToUiMessage } from '../../src/protocol';
+import {
+  WORKER_PROTOCOL_VERSION,
+  type UiToWorkerMessage,
+  type WorkerToUiMessage,
+} from '../../src/protocol';
 import {
   createWorldFrameDelta,
   estimateFrameDeltaPayloadBytes,
@@ -12,6 +16,7 @@ import {
   type RuntimeActivitySample,
 } from '../../src/testing/runtime-activity';
 import {
+  ADVANCE_RESPONSE_TIMEOUT_MS,
   DEMO_WORLD_CONFIG,
   useWorldSimulation,
   type SimulationWorkerPort,
@@ -264,6 +269,113 @@ function createFalseRecoveryWorker(): SimulationWorkerPort {
   return port;
 }
 
+function createInterleavedLoadWorker(): {
+  readonly emitUnsolicitedDelta: () => void;
+  readonly emitUnsolicitedReady: () => void;
+  readonly failNextLoadDispatch: () => void;
+  readonly port: SimulationWorkerPort;
+  readonly releaseLoadReady: (position?: 'newest' | 'oldest') => void;
+} {
+  const initialWorld = createInitialWorld([23, 29, 31, 37]);
+  const initialFrame = projectWorldFrame(initialWorld);
+  const unsolicitedFrame = projectWorldFrame(stepWorld(initialWorld, 1));
+  let active = true;
+  let failNextLoadDispatch = false;
+  const pendingLoads = new Map<string, Extract<UiToWorkerMessage, { readonly type: 'load' }>>();
+  const deliver = (message: WorkerToUiMessage): void => {
+    if (active) port.onmessage?.(new MessageEvent('message', { data: message }));
+  };
+  const port: SimulationWorkerPort = {
+    onerror: null,
+    onmessage: null,
+    postMessage(message: UiToWorkerMessage) {
+      if (message.type === 'initialize') {
+        queueMicrotask(() => {
+          deliver({
+            type: 'ready',
+            protocolVersion: message.protocolVersion,
+            requestId: message.requestId,
+            frame: initialFrame,
+          });
+          deliver({
+            type: 'eventBatch',
+            protocolVersion: message.protocolVersion,
+            requestId: message.requestId,
+            events: [],
+          });
+        });
+        return;
+      }
+      if (message.type === 'load') {
+        if (failNextLoadDispatch) {
+          failNextLoadDispatch = false;
+          throw new Error('Injected load dispatch failure');
+        }
+        pendingLoads.set(message.requestId, message);
+        queueMicrotask(() =>
+          deliver({
+            type: 'metrics',
+            protocolVersion: message.protocolVersion,
+            requestId: message.requestId,
+            metrics: { tick: initialFrame.tick, runMode: 'paused', queuedCommandCount: 0 },
+          }),
+        );
+        return;
+      }
+      if (message.type === 'performOfflineCatchUp') {
+        queueMicrotask(() =>
+          deliver({
+            type: 'metrics',
+            protocolVersion: message.protocolVersion,
+            requestId: message.requestId,
+            metrics: { tick: initialFrame.tick, runMode: 'paused', queuedCommandCount: 0 },
+          }),
+        );
+      }
+    },
+    terminate() {
+      active = false;
+    },
+  };
+  return {
+    emitUnsolicitedDelta() {
+      const delta = createWorldFrameDelta(initialFrame, unsolicitedFrame);
+      deliver({
+        type: 'frameDelta',
+        protocolVersion: WORKER_PROTOCOL_VERSION,
+        requestId: 'stale-delta',
+        delta,
+        payloadBytes: estimateFrameDeltaPayloadBytes(delta),
+      });
+    },
+    emitUnsolicitedReady() {
+      deliver({
+        type: 'ready',
+        protocolVersion: WORKER_PROTOCOL_VERSION,
+        requestId: 'stale-ready',
+        frame: unsolicitedFrame,
+      });
+    },
+    failNextLoadDispatch() {
+      failNextLoadDispatch = true;
+    },
+    port,
+    releaseLoadReady(position = 'oldest') {
+      const requests = [...pendingLoads.values()];
+      const request = position === 'newest' ? requests.at(-1) : requests[0];
+      if (request === undefined) throw new Error('No load is pending.');
+      pendingLoads.delete(request.requestId);
+      const loadedWorld = deserializeWorldSnapshot(request.snapshot);
+      deliver({
+        type: 'ready',
+        protocolVersion: request.protocolVersion,
+        requestId: request.requestId,
+        frame: projectWorldFrame(loadedWorld),
+      });
+    },
+  };
+}
+
 describe('world simulation UI gateway', () => {
   it('locks the release shell to the 256 by 192 shared homeworld', () => {
     expect(DEMO_WORLD_CONFIG).toStrictEqual({
@@ -295,7 +407,9 @@ describe('world simulation UI gateway', () => {
     await act(async () => Promise.resolve());
     expect(activity.samples()).toHaveLength(idleSampleCount);
 
-    act(() => result.current.advanceTicks(1));
+    act(() => {
+      result.current.advanceTicks(1);
+    });
     const advanceRequest = activity
       .samples()
       .find(
@@ -374,6 +488,51 @@ describe('world simulation UI gateway', () => {
     expect(result.current.frame?.tick).toBe(0);
   });
 
+  it('bounds unacknowledged advances and faults after the Worker response deadline', async () => {
+    vi.useFakeTimers();
+    try {
+      const activity = createTestRuntimeActivityRecorder(() => 0);
+      const worker = createControlledRuntimeWorker();
+      const workerFactory = () => worker.port;
+      const { result } = renderHook(() => useWorldSimulation(workerFactory, activity));
+
+      await act(async () => {
+        worker.flush();
+        await Promise.resolve();
+      });
+      expect(result.current.status).toBe('ready');
+
+      expect(result.current.advanceTicks(10)).toBe(true);
+      expect(result.current.advanceTicks(20)).toBe(false);
+      expect(
+        activity
+          .samples()
+          .filter(
+            (sample) => sample.kind === 'worker-request' && sample.messageType === 'advanceTicks',
+          ),
+      ).toHaveLength(1);
+
+      act(() => {
+        vi.advanceTimersByTime(ADVANCE_RESPONSE_TIMEOUT_MS);
+      });
+      await act(async () => Promise.resolve());
+
+      expect(result.current.status).toBe('faulted');
+      expect(result.current.error).toMatch(/did not answer an advance request/i);
+      expect(result.current.frame?.tick).toBe(0);
+      expect(result.current.advanceTicks(10)).toBe(false);
+      expect(
+        activity
+          .samples()
+          .filter(
+            (sample) => sample.kind === 'worker-request' && sample.messageType === 'advanceTicks',
+          ),
+      ).toHaveLength(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('retries a failed bootstrap but cannot replace an established authoritative frame', async () => {
     let attempts = 0;
     const workerFactory = () => {
@@ -405,7 +564,9 @@ describe('world simulation UI gateway', () => {
     expect(result.current.frame?.tick).toBe(0);
     expect(activity.count('frame-applied')).toBe(1);
 
-    act(() => result.current.advanceTicks(1));
+    act(() => {
+      result.current.advanceTicks(1);
+    });
     await waitFor(() => expect(result.current.status).toBe('faulted'));
     expect(result.current.error).toMatch(/base tick/i);
     expect(result.current.frame?.tick).toBe(0);
@@ -416,7 +577,9 @@ describe('world simulation UI gateway', () => {
     const { result } = renderHook(() => useWorldSimulation(createFalseRecoveryWorker));
     await waitFor(() => expect(result.current.status).toBe('ready'));
 
-    act(() => result.current.advanceTicks(1));
+    act(() => {
+      result.current.advanceTicks(1);
+    });
     await waitFor(() => expect(result.current.status).toBe('faulted'));
     await act(async () => Promise.resolve());
 
@@ -424,6 +587,118 @@ describe('world simulation UI gateway', () => {
     expect(result.current.frame?.tick).toBe(0);
     expect(result.current.status).toBe('faulted');
     await expect(result.current.requestSave()).rejects.toThrow('unavailable');
+  });
+
+  it('does not resolve a load from an out-of-order metrics response', async () => {
+    const worker = createInterleavedLoadWorker();
+    const workerFactory = () => worker.port;
+    const { result } = renderHook(() => useWorldSimulation(workerFactory));
+    await waitFor(() => expect(result.current.status).toBe('ready'));
+    const loadedWorld = stepWorld(createInitialWorld([41, 43, 47, 53]), 10);
+    let resolved = false;
+    let loadPromise: Promise<void> | undefined;
+
+    act(() => {
+      loadPromise = result.current.loadSnapshot(serializeWorldSnapshot(loadedWorld));
+      void loadPromise.then(() => {
+        resolved = true;
+      });
+    });
+    await act(async () => Promise.resolve());
+
+    expect(resolved).toBe(false);
+    expect(result.current.frame?.tick).toBe(0);
+    act(() => worker.releaseLoadReady());
+    await act(async () => loadPromise);
+    expect(resolved).toBe(true);
+    expect(result.current.frame?.tick).toBe(10);
+  });
+
+  it('fails closed when concurrent load ready frames arrive out of order', async () => {
+    const worker = createInterleavedLoadWorker();
+    const workerFactory = () => worker.port;
+    const { result } = renderHook(() => useWorldSimulation(workerFactory));
+    await waitFor(() => expect(result.current.status).toBe('ready'));
+    const olderWorld = stepWorld(createInitialWorld([41, 43, 47, 53]), 10);
+    const newerWorld = stepWorld(createInitialWorld([59, 61, 67, 71]), 20);
+    const olderLoad = result.current.loadSnapshot(serializeWorldSnapshot(olderWorld));
+    const newerLoad = result.current.loadSnapshot(serializeWorldSnapshot(newerWorld));
+    const olderOutcome = olderLoad.then(
+      () => null,
+      (error: unknown) => error,
+    );
+    const newerOutcome = newerLoad.then(
+      () => null,
+      (error: unknown) => error,
+    );
+
+    act(() => worker.releaseLoadReady('newest'));
+
+    await waitFor(() => expect(result.current.status).toBe('faulted'));
+    expect(result.current.error).toMatch(/unexpected ready response/i);
+    expect(result.current.frame?.tick).toBe(0);
+    await expect(olderOutcome).resolves.toBeInstanceOf(Error);
+    await expect(newerOutcome).resolves.toBeInstanceOf(Error);
+  });
+
+  it('removes a synchronously rejected load before retrying the ordered boundary', async () => {
+    const worker = createInterleavedLoadWorker();
+    const workerFactory = () => worker.port;
+    const { result } = renderHook(() => useWorldSimulation(workerFactory));
+    await waitFor(() => expect(result.current.status).toBe('ready'));
+    const loadedWorld = stepWorld(createInitialWorld([41, 43, 47, 53]), 10);
+    const snapshot = serializeWorldSnapshot(loadedWorld);
+    worker.failNextLoadDispatch();
+
+    expect(() => result.current.loadSnapshot(snapshot)).toThrow('Injected load dispatch failure');
+    const retry = result.current.loadSnapshot(snapshot);
+    act(() => worker.releaseLoadReady());
+
+    await act(async () => retry);
+    expect(result.current.status).toBe('ready');
+    expect(result.current.frame?.tick).toBe(10);
+  });
+
+  it('fails closed on an unsolicited ready response without replacing authority', async () => {
+    const worker = createInterleavedLoadWorker();
+    const workerFactory = () => worker.port;
+    const { result } = renderHook(() => useWorldSimulation(workerFactory));
+    await waitFor(() => expect(result.current.status).toBe('ready'));
+
+    act(() => worker.emitUnsolicitedReady());
+
+    await waitFor(() => expect(result.current.status).toBe('faulted'));
+    expect(result.current.error).toMatch(/unexpected ready response/i);
+    expect(result.current.frame?.tick).toBe(0);
+  });
+
+  it('fails closed on a valid-looking unsolicited frame delta', async () => {
+    const worker = createInterleavedLoadWorker();
+    const workerFactory = () => worker.port;
+    const { result } = renderHook(() => useWorldSimulation(workerFactory));
+    await waitFor(() => expect(result.current.status).toBe('ready'));
+
+    act(() => worker.emitUnsolicitedDelta());
+
+    await waitFor(() => expect(result.current.status).toBe('faulted'));
+    expect(result.current.error).toMatch(/unexpected frame delta/i);
+    expect(result.current.frame?.tick).toBe(0);
+  });
+
+  it('fails closed when offline completion arrives before its authoritative frame', async () => {
+    const worker = createInterleavedLoadWorker();
+    const workerFactory = () => worker.port;
+    const { result } = renderHook(() => useWorldSimulation(workerFactory));
+    await waitFor(() => expect(result.current.status).toBe('ready'));
+
+    await act(async () => {
+      await expect(result.current.performOfflineCatchUp(1_000, 5)).rejects.toThrow(
+        'completed offline catch-up before applying its frame',
+      );
+    });
+
+    expect(result.current.status).toBe('faulted');
+    expect(result.current.frame?.tick).toBe(0);
   });
 
   it('queues a closed intervention and resolves only after Worker acceptance', async () => {
@@ -512,7 +787,9 @@ describe('world simulation UI gateway', () => {
     );
     expect(result.current.relationshipEventPage.events.length).toBeGreaterThan(0);
 
-    act(() => result.current.advanceTicks(1));
+    act(() => {
+      result.current.advanceTicks(1);
+    });
     await waitFor(() => expect(result.current.frame?.tick).toBe(120_001));
     expect(result.current.relationshipPage).toStrictEqual({
       personId: null,
@@ -639,7 +916,9 @@ describe('world simulation UI gateway', () => {
       moment: { tick: 0 },
       recapEntries: [],
     });
-    act(() => result.current.advanceTicks(100));
+    act(() => {
+      result.current.advanceTicks(100);
+    });
     await waitFor(() => expect(result.current.frame?.tick).toBe(100));
     const completed = await act(async () =>
       result.current.requestFocusCheckpoint(baseline.checkpoint.latestEventId),

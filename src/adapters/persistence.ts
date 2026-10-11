@@ -135,11 +135,29 @@ export type TauriInvoke = <Result>(
   arguments_?: Readonly<Record<string, unknown>>,
 ) => Promise<Result>;
 
+export type NativeSemanticSaveConfirmer = (
+  invoke: TauriInvoke,
+  loaded: LoadedSave,
+) => Promise<void>;
+
 interface ValidatedSnapshotAuthority {
   readonly checksum: string;
   readonly snapshot: string;
   readonly world: ReturnType<typeof deserializeWorldSnapshot>;
 }
+
+interface NativeSaveCandidatePage {
+  readonly candidates: readonly unknown[];
+  readonly nextBeforeGeneration: number | null;
+}
+
+const SAVE_CANDIDATE_PAGE_SIZE = 1;
+const RETAINED_UNVERIFIED_GENERATIONS = 3;
+// Atomic native retention keeps at most the two three-generation tails. Two extra pages allow a
+// pre-fix interrupted-prune archive to recover and normalize; larger historical/tampered archives
+// fail closed without deleting evidence instead of parsing forever.
+const MAX_SAVE_CANDIDATE_PAGES = RETAINED_GENERATIONS + RETAINED_UNVERIFIED_GENERATIONS + 2;
+const MAX_REPORTED_SAVE_VALIDATION_FAILURES = 8;
 
 const validatedLoadedSaves = new WeakMap<LoadedSave, ValidatedSnapshotAuthority>();
 
@@ -156,17 +174,23 @@ function rememberValidatedLoadedSave(
 }
 
 async function confirmNativeSemanticSave(invoke: TauriInvoke, loaded: LoadedSave): Promise<void> {
+  const result = await invoke<unknown>('confirm_semantically_valid_save_generation', {
+    slotId: loaded.slotId,
+    generation: loaded.recoveredGeneration,
+    checksum: loaded.checksum,
+  });
+  if (result !== null && result !== undefined) {
+    throw new TypeError('confirm_semantically_valid_save_generation returned an unexpected result');
+  }
+}
+
+async function confirmSemanticSaveBestEffort(
+  confirmSemanticSave: NativeSemanticSaveConfirmer,
+  invoke: TauriInvoke,
+  loaded: LoadedSave,
+): Promise<void> {
   try {
-    const result = await invoke<unknown>('confirm_semantically_valid_save_generation', {
-      slotId: loaded.slotId,
-      generation: loaded.recoveredGeneration,
-      checksum: loaded.checksum,
-    });
-    if (result !== null && result !== undefined) {
-      throw new TypeError(
-        'confirm_semantically_valid_save_generation returned an unexpected result',
-      );
-    }
+    await confirmSemanticSave(invoke, loaded);
   } catch {
     // Confirmation and pruning are best effort after the durable generation is committed. A
     // failure retains extra immutable generations; it must not turn a successful save into a
@@ -186,54 +210,63 @@ async function loadNativeSemanticSave(
 ): Promise<LoadedSave | null> {
   const initial = await invoke<unknown>('load_save_slot_candidates', { slotId });
   if (initial === null) return null;
-  if (!Array.isArray(initial) || initial.length === 0) {
-    throw new TypeError('load_save_slot_candidates returned an invalid candidate list');
-  }
+  let page = parseNativeSaveCandidatePage(initial, 'load_save_slot_candidates');
   const failures: string[] = [];
-  let oldestRejectedGeneration: number | null = null;
-  const tryCandidates = (candidates: readonly unknown[]): LoadedSave | null => {
-    for (const candidate of candidates) {
+  let omittedFailureCount = 0;
+  let terminalFailure: string | null = null;
+  let beforeGeneration: number | null = null;
+  let scannedPageCount = 1;
+  const reportFailure = (message: string) => {
+    if (failures.length < MAX_REPORTED_SAVE_VALIDATION_FAILURES) failures.push(message);
+    else omittedFailureCount += 1;
+  };
+  while (true) {
+    for (const candidate of page.candidates) {
       try {
-        return parseLoadedSave(candidate);
-      } catch (error) {
-        failures.push(error instanceof Error ? error.message : 'unknown validation error');
-        try {
-          const generation = expectPositiveInteger(
-            expectRecord(candidate, 'loaded save').recoveredGeneration,
-            'recoveredGeneration',
-          );
-          oldestRejectedGeneration =
-            oldestRejectedGeneration === null
-              ? generation
-              : Math.min(oldestRejectedGeneration, generation);
-        } catch {
-          // An untrusted malformed generation cannot establish a safe fallback boundary.
+        const loaded = parseLoadedSave(candidate);
+        if (beforeGeneration !== null && loaded.recoveredGeneration >= beforeGeneration) {
+          throw new TypeError('fallback save candidate did not precede its requested boundary');
         }
+        return loaded;
+      } catch (error) {
+        reportFailure(error instanceof Error ? error.message : 'unknown validation error');
       }
     }
-    return null;
-  };
-  const loaded = tryCandidates(initial);
-  if (loaded !== null) return loaded;
-  if (oldestRejectedGeneration !== null) {
+
+    const nextBeforeGeneration = page.nextBeforeGeneration;
+    if (nextBeforeGeneration === null) break;
+    if (beforeGeneration !== null && nextBeforeGeneration >= beforeGeneration) {
+      reportFailure('save candidate cursor did not move to an older generation');
+      break;
+    }
+    if (scannedPageCount >= MAX_SAVE_CANDIDATE_PAGES) {
+      terminalFailure = `save recovery exceeded bounded ${MAX_SAVE_CANDIDATE_PAGES}-page validation budget`;
+      break;
+    }
+    beforeGeneration = nextBeforeGeneration;
     try {
       const fallback = await invoke<unknown>('load_save_slot_fallback_candidates', {
         slotId,
-        beforeGeneration: oldestRejectedGeneration,
+        beforeGeneration,
       });
-      if (fallback !== null && Array.isArray(fallback)) {
-        const recovered = tryCandidates(fallback);
-        if (recovered !== null) return recovered;
-      } else {
-        failures.push('load_save_slot_fallback_candidates returned an invalid candidate list');
+      if (fallback === null) {
+        reportFailure('save slot disappeared during fallback recovery');
+        break;
       }
+      page = parseNativeSaveCandidatePage(fallback, 'load_save_slot_fallback_candidates');
+      scannedPageCount += 1;
     } catch (error) {
-      failures.push(
+      reportFailure(
         `fallback query failed: ${error instanceof Error ? error.message : 'unknown error'}`,
       );
+      break;
     }
   }
-  throw new Error(`save slot has no semantically valid generation: ${failures.join('; ')}`);
+  const omitted = omittedFailureCount === 0 ? '' : `; ${omittedFailureCount} more failures omitted`;
+  const terminal = terminalFailure === null ? '' : `; ${terminalFailure}`;
+  throw new Error(
+    `save slot has no semantically valid generation: ${failures.join('; ')}${omitted}${terminal}`,
+  );
 }
 
 export function latestSnapshotEventId(save: LoadedSave): number {
@@ -251,7 +284,10 @@ export function latestSnapshotEventId(save: LoadedSave): number {
 }
 
 /** Creates the production gateway without importing Tauri into browser builds. */
-export function createTauriPersistenceGateway(invoke: TauriInvoke): PersistenceGateway {
+export function createTauriPersistenceGateway(
+  invoke: TauriInvoke,
+  confirmSemanticSave: NativeSemanticSaveConfirmer = confirmNativeSemanticSave,
+): PersistenceGateway {
   return {
     async listSaveSlots() {
       const result = await invoke<unknown>('list_save_slots');
@@ -262,7 +298,13 @@ export function createTauriPersistenceGateway(invoke: TauriInvoke): PersistenceG
     },
     async loadSaveSlot(slotId) {
       validateIdentifier(slotId, 'slot ID');
-      return loadNativeSemanticSave(invoke, slotId);
+      const loaded = await loadNativeSemanticSave(invoke, slotId);
+      if (loaded !== null) {
+        // Successful canonical recovery should establish a native retention baseline, especially
+        // for schema-v8 migrations whose existing rows intentionally begin unverified.
+        await confirmSemanticSaveBestEffort(confirmSemanticSave, invoke, loaded);
+      }
+      return loaded;
     },
     async commitSaveSlot(slotId, name, snapshot) {
       const snapshotWorld = validateCommit(slotId, name, snapshot);
@@ -270,7 +312,7 @@ export function createTauriPersistenceGateway(invoke: TauriInvoke): PersistenceG
         await invoke<unknown>('commit_save_slot', { slotId, name, snapshot }),
         { slotId, name, snapshot, world: snapshotWorld, focusSession: null },
       );
-      await confirmNativeSemanticSave(invoke, loaded);
+      await confirmSemanticSaveBestEffort(confirmSemanticSave, invoke, loaded);
       return loaded;
     },
     async commitFocusCheckpoint(slotId, name, snapshot, session, sourceEventIds, workerAuthority) {
@@ -289,7 +331,7 @@ export function createTauriPersistenceGateway(invoke: TauriInvoke): PersistenceG
           focusSession: session,
         },
       );
-      await confirmNativeSemanticSave(invoke, loaded);
+      await confirmSemanticSaveBestEffort(confirmSemanticSave, invoke, loaded);
       return loaded;
     },
     async deleteSaveSlot(slotId) {
@@ -322,7 +364,7 @@ export function createTauriPersistenceGateway(invoke: TauriInvoke): PersistenceG
       const loaded = parseLoadedSave(
         await invoke<unknown>('import_save_slot', { package: savePackage }),
       );
-      await confirmNativeSemanticSave(invoke, loaded);
+      await confirmSemanticSaveBestEffort(confirmSemanticSave, invoke, loaded);
       return loaded;
     },
     async recordFocusSession(session, sourceEventIds) {
@@ -379,6 +421,57 @@ interface InMemorySlot {
   name: string;
   headGeneration: number;
   readonly generations: InMemoryGeneration[];
+}
+
+function stableComparisonJson(value: unknown): string {
+  if (Array.isArray(value)) {
+    return `[${value.map((entry) => stableComparisonJson(entry)).join(',')}]`;
+  }
+  if (value !== null && typeof value === 'object') {
+    const record = value as Record<string, unknown>;
+    return `{${Object.keys(record)
+      .sort()
+      .map((key) => `${JSON.stringify(key)}:${stableComparisonJson(record[key])}`)
+      .join(',')}}`;
+  }
+  const serialized = JSON.stringify(value);
+  if (serialized === undefined) throw new TypeError('focus session value is not JSON-safe');
+  return serialized;
+}
+
+function validateFocusSessionUpdate(previous: FocusSession, next: FocusSession): void {
+  const immutableIdentityChanged =
+    previous.slotId !== next.slotId ||
+    previous.startedAtMs !== next.startedAtMs ||
+    previous.plannedFocusMs !== next.plannedFocusMs ||
+    previous.plannedBreakMs !== next.plannedBreakMs;
+  const accountingRegressed =
+    next.focusedMs < previous.focusedMs ||
+    next.breakMs < previous.breakMs ||
+    next.issuedSimulationTicks < previous.issuedSimulationTicks;
+  const previousTerminal = previous.status === 'completed' || previous.status === 'cancelled';
+  const previousReview =
+    previous.review === undefined || previous.review === null
+      ? null
+      : validateFocusSessionReview(previous.review);
+  const nextReview =
+    next.review === undefined || next.review === null
+      ? null
+      : validateFocusSessionReview(next.review);
+  const terminalChanged =
+    previousTerminal &&
+    (previous.status !== next.status ||
+      previous.endedAtMs !== next.endedAtMs ||
+      previous.focusedMs !== next.focusedMs ||
+      previous.breakMs !== next.breakMs ||
+      previous.issuedSimulationTicks !== next.issuedSimulationTicks ||
+      previous.stateJson !== next.stateJson ||
+      stableComparisonJson(previous.recapEventIds) !== stableComparisonJson(next.recapEventIds) ||
+      stableComparisonJson(previous.recapEntries) !== stableComparisonJson(next.recapEntries) ||
+      stableComparisonJson(previousReview) !== stableComparisonJson(nextReview));
+  if (immutableIdentityChanged || accountingRegressed || terminalChanged) {
+    throw new Error('focus session update is stale or changes immutable identity');
+  }
 }
 
 /**
@@ -455,6 +548,8 @@ export function createInMemoryPersistenceGateway(
       if (workerAuthority !== undefined) {
         validateWorkerFocusCheckpoint(slotId, focusSession, sourceEventIds, workerAuthority);
       }
+      const previous = sessions.get(focusSession.sessionId);
+      if (previous !== undefined) validateFocusSessionUpdate(previous, focusSession);
     } else if (workerAuthority !== undefined) {
       throw new TypeError('Worker checkpoint authority requires a focus session');
     }
@@ -575,6 +670,8 @@ export function createInMemoryPersistenceGateway(
         }
         validateRecapCopiesAgainstSnapshot(session, savedEvents);
       }
+      const previous = sessions.get(session.sessionId);
+      if (previous !== undefined) validateFocusSessionUpdate(previous, session);
       sessions.set(session.sessionId, cloneFocusSession(session));
     },
     async listFocusSessions(sourceSave) {
@@ -620,6 +717,35 @@ function parseSaveSlotSummary(value: unknown): SaveSlotSummary {
   validateIdentifier(slotId, 'slot ID');
   validateName(name);
   return { slotId, name, headGeneration };
+}
+
+function parseNativeSaveCandidatePage(value: unknown, source: string): NativeSaveCandidatePage {
+  const record = expectRecord(value, `${source} page`);
+  expectExactKeys(record, ['candidates', 'nextBeforeGeneration'], `${source} page`);
+  if (!Array.isArray(record.candidates)) {
+    throw new TypeError(`${source} candidates must be an array`);
+  }
+  if (record.candidates.length > SAVE_CANDIDATE_PAGE_SIZE) {
+    throw new RangeError(`${source} exceeded the bounded candidate page size`);
+  }
+  const nextBeforeGeneration = expectNullablePositiveInteger(
+    record.nextBeforeGeneration,
+    `${source} nextBeforeGeneration`,
+  );
+  if (record.candidates.length === 1) {
+    const candidate = expectRecord(record.candidates[0], `${source} candidate`);
+    const recoveredGeneration = expectPositiveInteger(
+      candidate.recoveredGeneration,
+      `${source} candidate recoveredGeneration`,
+    );
+    if (nextBeforeGeneration !== recoveredGeneration) {
+      throw new TypeError(`${source} cursor must match its sole candidate generation`);
+    }
+  }
+  return {
+    candidates: record.candidates,
+    nextBeforeGeneration,
+  };
 }
 
 function parseLoadedSave(

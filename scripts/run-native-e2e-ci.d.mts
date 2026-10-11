@@ -22,7 +22,34 @@ export declare function createNativeE2eCommandTracker(options?: {
 
 export declare function confirmedNativeE2eInfrastructureFailures(output: string): string[];
 
+export declare function nativeE2eDatabasePath(
+  profile: string,
+  options?: {
+    readonly environment?: NodeJS.ProcessEnv;
+    readonly platform?: NodeJS.Platform;
+  },
+): string;
+
+export interface NativeE2eDatabaseEvidence {
+  readonly databasePath: string;
+  readonly generations: 7;
+  readonly sessions: 2;
+  readonly slots: 3;
+}
+
+export declare function verifyNativeE2eDatabase(options?: {
+  readonly databasePath?: string;
+  readonly profile?: string;
+}): Promise<NativeE2eDatabaseEvidence>;
+
 export declare function runNativeE2eCi(
   run?: (args: string[]) => Promise<NativeE2eCommandResult>,
   logger?: NativeE2eLogger,
+  verifyDatabase?: () => Promise<unknown>,
+): Promise<number>;
+
+export declare function runNativeE2eSingleAttempt(
+  run?: (args: string[]) => Promise<NativeE2eCommandResult>,
+  logger?: NativeE2eLogger,
+  verifyDatabase?: () => Promise<unknown>,
 ): Promise<number>;

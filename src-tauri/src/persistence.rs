@@ -8,10 +8,13 @@ use std::{
     error::Error,
     fmt::{Display, Formatter, Write},
     fs,
-    path::{Path, PathBuf},
+    path::Path,
     sync::Mutex,
     time::{SystemTime, UNIX_EPOCH},
 };
+
+#[cfg(test)]
+use std::path::PathBuf;
 
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 use serde::{Deserialize, Serialize};
@@ -29,6 +32,13 @@ const MAX_FOCUS_REVISIT_LABEL_BYTES: usize = 80;
 const MAX_JSON_SAFE_INTEGER: u64 = 9_007_199_254_740_991;
 const MAX_FOCUS_STATE_BYTES: usize = 64 * 1024;
 const RETAINED_GENERATIONS: i64 = 3;
+const RETAINED_UNVERIFIED_GENERATIONS: i64 = 3;
+const SAVE_CANDIDATE_SCAN_ROWS_PER_PAGE: i64 = 1;
+const MAX_VERIFIED_RETENTION_SCAN_ROWS: usize = 8;
+#[cfg(feature = "desktop-e2e")]
+const E2E_INTERRUPTED_CHECKPOINT_SLOT: &str = "ipc-interrupted-checkpoint";
+#[cfg(feature = "desktop-e2e")]
+const E2E_CORRUPT_RECOVERY_SLOT: &str = "ipc-corrupt-recovery";
 
 #[derive(Debug)]
 pub struct PersistenceError(String);
@@ -87,6 +97,13 @@ pub struct LoadedSave {
     pub focus_session: Option<FocusSession>,
     pub snapshot: String,
     pub checksum: String,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct SaveCandidatePage {
+    pub candidates: Vec<LoadedSave>,
+    pub next_before_generation: Option<i64>,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -225,7 +242,50 @@ pub enum FocusSessionStatus {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "kebab-case")]
+enum FocusPhase {
+    Idle,
+    FocusRunning,
+    FocusPaused,
+    FocusCompleted,
+    FocusCancelled,
+    BreakRunning,
+    BreakPaused,
+    Finished,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+enum FocusOutcome {
+    Completed,
+    Cancelled,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct FocusState {
+    version: u32,
+    phase: FocusPhase,
+    focus_duration_ms: Option<u64>,
+    break_duration_ms: Option<u64>,
+    simulation_ticks_per_focus_second: Option<u64>,
+    accumulated_focus_ms: u64,
+    accumulated_break_ms: u64,
+    total_issued_simulation_ticks: u64,
+    simulation_tick_remainder: u64,
+    started_at_epoch_ms: Option<u64>,
+    focus_started_at_epoch_ms: Option<u64>,
+    focus_ended_at_epoch_ms: Option<u64>,
+    break_started_at_epoch_ms: Option<u64>,
+    break_ended_at_epoch_ms: Option<u64>,
+    ended_at_epoch_ms: Option<u64>,
+    active_segment_started_at_epoch_ms: Option<u64>,
+    last_observed_epoch_ms: Option<u64>,
+    outcome: Option<FocusOutcome>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct AppSettings {
     pub focus_to_sim_ratio: u32,
     pub default_focus_minutes: u32,
@@ -282,7 +342,6 @@ struct SaveExportEnvelope {
 
 pub struct PersistenceState {
     database: Mutex<PersistenceDatabase>,
-    database_path: PathBuf,
 }
 
 impl PersistenceState {
@@ -292,7 +351,6 @@ impl PersistenceState {
         let database = PersistenceDatabase::open(&database_path)?;
         Ok(Self {
             database: Mutex::new(database),
-            database_path,
         })
     }
 
@@ -300,19 +358,6 @@ impl PersistenceState {
         self.database
             .lock()
             .map_err(|_| PersistenceError::new("persistence database lock was poisoned"))
-    }
-
-    fn defer_prune(&self, slot_id: String, head_generation: i64) {
-        let database_path = self.database_path.clone();
-        let _ = std::thread::Builder::new()
-            .name("chrono-forge-save-retention".to_owned())
-            .spawn(move || {
-                let Ok(mut database) = PersistenceDatabase::open_existing_for_prune(&database_path)
-                else {
-                    return;
-                };
-                let _ = database.prune_old_generations(&slot_id, head_generation);
-            });
     }
 }
 
@@ -326,15 +371,6 @@ impl PersistenceDatabase {
         let mut database = Self { connection };
         database.migrate()?;
         Ok(database)
-    }
-
-    fn open_existing_for_prune(path: &Path) -> Result<Self> {
-        let connection = Connection::open(path)?;
-        connection.execute_batch(
-            "PRAGMA foreign_keys = ON;
-             PRAGMA busy_timeout = 5000;",
-        )?;
-        Ok(Self { connection })
     }
 
     #[cfg(test)]
@@ -559,12 +595,25 @@ impl PersistenceDatabase {
 
     #[cfg(test)]
     fn load_slot(&self, slot_id: &str) -> Result<Option<LoadedSave>> {
-        Ok(self
-            .load_slot_candidates(slot_id)?
-            .and_then(|candidates| candidates.into_iter().next()))
+        let Some(mut page) = self.load_slot_candidates(slot_id)? else {
+            return Ok(None);
+        };
+        loop {
+            if let Some(candidate) = page.candidates.into_iter().next() {
+                return Ok(Some(candidate));
+            }
+            let Some(before_generation) = page.next_before_generation else {
+                return Err(PersistenceError::new(
+                    "save slot has no generation with a verified snapshot",
+                ));
+            };
+            page = self
+                .load_slot_fallback_candidates(slot_id, before_generation)?
+                .ok_or_else(|| PersistenceError::new("save slot disappeared during recovery"))?;
+        }
     }
 
-    fn load_slot_candidates(&self, slot_id: &str) -> Result<Option<Vec<LoadedSave>>> {
+    fn load_slot_candidates(&self, slot_id: &str) -> Result<Option<SaveCandidatePage>> {
         validate_identifier(slot_id, "slot ID")?;
         let slot = self
             .connection
@@ -615,24 +664,26 @@ impl PersistenceDatabase {
                 };
                 // The common path returns only the verified head. Older generations are loaded
                 // lazily only if the TypeScript semantic validator rejects this candidate.
-                return Ok(Some(vec![head]));
+                return Ok(Some(SaveCandidatePage {
+                    candidates: vec![head],
+                    next_before_generation: Some(head_generation),
+                }));
             }
         }
 
-        let candidates = self.fallback_candidates(slot_id, &name, head_generation, None)?;
-        if candidates.is_empty() {
-            return Err(PersistenceError::new(
-                "save slot has no generation with a verified snapshot",
-            ));
-        }
-        Ok(Some(candidates))
+        Ok(Some(self.fallback_candidate_page(
+            slot_id,
+            &name,
+            head_generation,
+            None,
+        )?))
     }
 
     fn load_slot_fallback_candidates(
         &self,
         slot_id: &str,
         before_generation: i64,
-    ) -> Result<Option<Vec<LoadedSave>>> {
+    ) -> Result<Option<SaveCandidatePage>> {
         validate_identifier(slot_id, "slot ID")?;
         if before_generation < 1 {
             return Err(PersistenceError::new(
@@ -650,7 +701,7 @@ impl PersistenceDatabase {
         let Some((name, head_generation)) = slot else {
             return Ok(None);
         };
-        Ok(Some(self.fallback_candidates(
+        Ok(Some(self.fallback_candidate_page(
             slot_id,
             &name,
             head_generation,
@@ -658,31 +709,41 @@ impl PersistenceDatabase {
         )?))
     }
 
-    fn fallback_candidates(
+    fn fallback_candidate_page(
         &self,
         slot_id: &str,
         name: &str,
         head_generation: Option<i64>,
         before_generation: Option<i64>,
-    ) -> Result<Vec<LoadedSave>> {
+    ) -> Result<SaveCandidatePage> {
         let mut statement = self.connection.prepare(
             "SELECT generation, snapshot, checksum, saved_at_ms, focus_session_json
              FROM save_generations
              WHERE slot_id = ?1 AND (?2 IS NULL OR generation < ?2)
-             ORDER BY generation DESC",
+             ORDER BY generation DESC
+             LIMIT ?3",
         )?;
-        let generations = statement.query_map(params![slot_id, before_generation], |row| {
-            Ok((
-                row.get::<_, i64>(0)?,
-                row.get::<_, String>(1)?,
-                row.get::<_, String>(2)?,
-                row.get::<_, i64>(3)?,
-                row.get::<_, Option<String>>(4)?,
-            ))
-        })?;
+        let generations = statement.query_map(
+            params![
+                slot_id,
+                before_generation,
+                SAVE_CANDIDATE_SCAN_ROWS_PER_PAGE
+            ],
+            |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, i64>(3)?,
+                    row.get::<_, Option<String>>(4)?,
+                ))
+            },
+        )?;
         let mut candidates = Vec::new();
+        let mut next_before_generation = None;
         for generation in generations {
             let (generation, snapshot, checksum, saved_at_ms, focus_session_json) = generation?;
+            next_before_generation = Some(generation);
             if validate_snapshot(&snapshot).is_ok()
                 && checksum == sha256_hex(&snapshot)
                 && saved_at_ms >= 0
@@ -702,7 +763,10 @@ impl PersistenceDatabase {
                 });
             }
         }
-        Ok(candidates)
+        Ok(SaveCandidatePage {
+            candidates,
+            next_before_generation,
+        })
     }
 
     fn commit_slot(&mut self, slot_id: &str, name: &str, snapshot: &str) -> Result<LoadedSave> {
@@ -727,6 +791,9 @@ impl PersistenceDatabase {
         focus_session: Option<&FocusSession>,
         fail_before_head_update: bool,
     ) -> Result<LoadedSave> {
+        #[cfg(feature = "desktop-e2e")]
+        let fail_before_head_update =
+            fail_before_head_update || slot_id == E2E_INTERRUPTED_CHECKPOINT_SLOT;
         validate_identifier(slot_id, "slot ID")?;
         validate_name(name)?;
         if let Some(session) = focus_session {
@@ -751,6 +818,27 @@ impl PersistenceDatabase {
              ON CONFLICT(slot_id) DO UPDATE SET name = excluded.name",
             params![slot_id, name],
         )?;
+        let has_semantically_verified_generation = transaction.query_row(
+            "SELECT EXISTS(
+                 SELECT 1 FROM save_generations
+                 WHERE slot_id = ?1 AND semantically_verified = 1
+             )",
+            [slot_id],
+            |row| row.get::<_, bool>(0),
+        )?;
+        let unverified_generation_count = transaction.query_row(
+            "SELECT COUNT(*) FROM save_generations
+             WHERE slot_id = ?1 AND semantically_verified = 0",
+            [slot_id],
+            |row| row.get::<_, i64>(0),
+        )?;
+        if !has_semantically_verified_generation
+            && unverified_generation_count >= RETAINED_UNVERIFIED_GENERATIONS
+        {
+            return Err(PersistenceError::new(
+                "save slot requires semantic validation before another generation can be committed",
+            ));
+        }
         let prior_generation: Option<i64> = transaction.query_row(
             "SELECT MAX(generation) FROM save_generations WHERE slot_id = ?1",
             [slot_id],
@@ -810,10 +898,24 @@ impl PersistenceDatabase {
                 "injected commit failure before head update",
             ));
         }
+        #[cfg(feature = "desktop-e2e")]
+        if slot_id == E2E_CORRUPT_RECOVERY_SLOT && next_generation == 2 {
+            transaction.execute(
+                "UPDATE save_generations SET checksum = ?3
+                 WHERE slot_id = ?1 AND generation = ?2",
+                params![slot_id, next_generation, "0".repeat(64)],
+            )?;
+        }
         transaction.execute(
             "UPDATE save_slots SET head_generation = ?2 WHERE slot_id = ?1",
             params![slot_id, next_generation],
         )?;
+        if has_semantically_verified_generation {
+            // Semantic confirmation is deliberately best-effort after a durable commit so a
+            // broker timeout cannot invite a duplicate write. Once a confirmed recovery baseline
+            // exists, retain only the newest bounded unverified tail around that baseline.
+            prune_unverified_generations(&transaction, slot_id)?;
+        }
         transaction.commit()?;
 
         Ok(LoadedSave {
@@ -883,56 +985,16 @@ impl PersistenceDatabase {
                 |row| row.get::<_, Option<i64>>(0),
             )?
             .ok_or_else(|| PersistenceError::new("save slot has no head generation"))?;
+        // The parser confirmation and both retention tails form one durable invariant. If pruning
+        // fails, the marker rolls back and the post-commit TypeScript caller keeps the save while
+        // treating confirmation as best-effort; no partially confirmed unbounded set is exposed.
+        prune_verified_generations(&transaction, slot_id, head_generation)?;
+        // Confirmation establishes a canonical recovery baseline. Verified pruning may also
+        // demote checksum/structure-corrupt legacy markers, so bound the complete unverified tail
+        // only after that pass and never risk deleting the sole canonical baseline.
+        prune_unverified_generations(&transaction, slot_id)?;
         transaction.commit()?;
         Ok(head_generation)
-    }
-
-    fn prune_old_generations(&mut self, slot_id: &str, head_generation: i64) -> Result<()> {
-        let transaction = self
-            .connection
-            .transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let oldest_retained_verified_generation = {
-            let mut statement = transaction.prepare(
-                "SELECT generation, snapshot, checksum, saved_at_ms, focus_session_json
-                 FROM save_generations
-                 WHERE slot_id = ?1 AND generation <= ?2 AND semantically_verified = 1
-                 ORDER BY generation DESC",
-            )?;
-            let mut rows = statement.query(params![slot_id, head_generation])?;
-            let mut verified_count = 0;
-            let mut oldest_retained = None;
-            while let Some(row) = rows.next()? {
-                let generation = row.get::<_, i64>(0)?;
-                let snapshot = row.get::<_, String>(1)?;
-                let checksum = row.get::<_, String>(2)?;
-                let saved_at_ms = row.get::<_, i64>(3)?;
-                let focus_session_json = row.get::<_, Option<String>>(4)?;
-                if validate_snapshot(&snapshot).is_ok()
-                    && checksum == sha256_hex(&snapshot)
-                    && saved_at_ms >= 0
-                    && parse_focus_checkpoint(slot_id, &snapshot, focus_session_json.as_deref())
-                        .is_ok()
-                {
-                    verified_count += 1;
-                    if verified_count == RETAINED_GENERATIONS {
-                        oldest_retained = Some(generation);
-                        break;
-                    }
-                }
-            }
-            oldest_retained
-        };
-        if let Some(oldest_retained) = oldest_retained_verified_generation {
-            // Only generations explicitly confirmed after the TypeScript canonical parser accepts
-            // them can establish the cutoff. JSON/checksum-valid but semantically invalid rows may
-            // remain as evidence, but they can never displace the three recoverable generations.
-            transaction.execute(
-                "DELETE FROM save_generations WHERE slot_id = ?1 AND generation < ?2",
-                params![slot_id, oldest_retained],
-            )?;
-        }
-        transaction.commit()?;
-        Ok(())
     }
 
     fn delete_slot(&mut self, slot_id: &str) -> Result<bool> {
@@ -1253,11 +1315,98 @@ impl PersistenceDatabase {
     }
 }
 
+fn prune_verified_generations(
+    transaction: &rusqlite::Transaction<'_>,
+    slot_id: &str,
+    head_generation: i64,
+) -> Result<()> {
+    let (oldest_retained_verified_generation, invalid_verified_generations) = {
+        let mut statement = transaction.prepare(
+            "SELECT generation, snapshot, checksum, saved_at_ms, focus_session_json
+             FROM save_generations
+             WHERE slot_id = ?1 AND generation <= ?2 AND semantically_verified = 1
+             ORDER BY generation DESC",
+        )?;
+        let mut rows = statement.query(params![slot_id, head_generation])?;
+        let mut verified_count = 0;
+        let mut oldest_retained = None;
+        let mut invalid_verified = Vec::new();
+        let mut scanned_rows = 0;
+        while let Some(row) = rows.next()? {
+            if scanned_rows == MAX_VERIFIED_RETENTION_SCAN_ROWS {
+                return Err(PersistenceError::new(
+                    "verified save retention exceeded its bounded validation budget",
+                ));
+            }
+            scanned_rows += 1;
+            let generation = row.get::<_, i64>(0)?;
+            let snapshot = row.get::<_, String>(1)?;
+            let checksum = row.get::<_, String>(2)?;
+            let saved_at_ms = row.get::<_, i64>(3)?;
+            let focus_session_json = row.get::<_, Option<String>>(4)?;
+            if validate_snapshot(&snapshot).is_ok()
+                && checksum == sha256_hex(&snapshot)
+                && saved_at_ms >= 0
+                && parse_focus_checkpoint(slot_id, &snapshot, focus_session_json.as_deref()).is_ok()
+            {
+                verified_count += 1;
+                if verified_count == RETAINED_GENERATIONS {
+                    oldest_retained = Some(generation);
+                    break;
+                }
+            } else {
+                invalid_verified.push(generation);
+            }
+        }
+        (oldest_retained, invalid_verified)
+    };
+    for generation in invalid_verified_generations {
+        // A row whose bytes no longer satisfy native checksum/structure validation cannot remain a
+        // trusted semantic marker. Demotion preserves the newest bounded corrupt evidence while
+        // preventing it from displacing a confirmed canonical recovery baseline.
+        transaction.execute(
+            "UPDATE save_generations SET semantically_verified = 0
+             WHERE slot_id = ?1 AND generation = ?2",
+            params![slot_id, generation],
+        )?;
+    }
+    if let Some(oldest_retained) = oldest_retained_verified_generation {
+        // Only generations explicitly confirmed after the TypeScript canonical parser accepts
+        // them can establish the cutoff. Invalid rows are demoted before this cutoff and can never
+        // displace the three recoverable generations.
+        transaction.execute(
+            "DELETE FROM save_generations WHERE slot_id = ?1 AND generation < ?2",
+            params![slot_id, oldest_retained],
+        )?;
+    }
+    Ok(())
+}
+
+fn prune_unverified_generations(
+    transaction: &rusqlite::Transaction<'_>,
+    slot_id: &str,
+) -> Result<()> {
+    transaction.execute(
+        "DELETE FROM save_generations
+         WHERE slot_id = ?1
+           AND semantically_verified = 0
+           AND generation NOT IN (
+               SELECT generation FROM save_generations
+               WHERE slot_id = ?1 AND semantically_verified = 0
+               ORDER BY generation DESC
+               LIMIT ?2
+           )",
+        params![slot_id, RETAINED_UNVERIFIED_GENERATIONS],
+    )?;
+    Ok(())
+}
+
 fn upsert_focus_session(
     transaction: &rusqlite::Transaction<'_>,
     session: &FocusSession,
     authority: Option<(i64, &str)>,
 ) -> Result<()> {
+    validate_focus_session_update(transaction, session)?;
     let event_ids = serde_json::to_string(&session.recap_event_ids)?;
     let entries = serde_json::to_string(&session.recap_entries)?;
     let review = session
@@ -1322,6 +1471,121 @@ fn upsert_focus_session(
             authority_checksum,
         ],
     )?;
+    Ok(())
+}
+
+struct StoredFocusSessionProgress {
+    slot_id: Option<String>,
+    started_at_ms: i64,
+    ended_at_ms: Option<i64>,
+    planned_focus_ms: i64,
+    focused_ms: i64,
+    planned_break_ms: i64,
+    break_ms: i64,
+    issued_simulation_ticks: i64,
+    status: FocusSessionStatus,
+    state_json: String,
+    recap_event_ids_json: String,
+    recap_entries_json: String,
+    review_json: Option<String>,
+}
+
+fn validate_focus_session_update(
+    transaction: &rusqlite::Transaction<'_>,
+    session: &FocusSession,
+) -> Result<()> {
+    let prior = transaction
+        .query_row(
+            "SELECT slot_id, started_at_ms, ended_at_ms, planned_focus_ms, focused_ms,
+                    planned_break_ms, break_ms, issued_simulation_ticks, status, state_json,
+                    recap_event_ids_json, recap_entries_json, review_json
+             FROM focus_sessions WHERE session_id = ?1",
+            [&session.session_id],
+            |row| {
+                Ok((
+                    row.get::<_, Option<String>>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, Option<i64>>(2)?,
+                    row.get::<_, i64>(3)?,
+                    row.get::<_, i64>(4)?,
+                    row.get::<_, i64>(5)?,
+                    row.get::<_, i64>(6)?,
+                    row.get::<_, i64>(7)?,
+                    row.get::<_, String>(8)?,
+                    row.get::<_, String>(9)?,
+                    row.get::<_, String>(10)?,
+                    row.get::<_, String>(11)?,
+                    row.get::<_, Option<String>>(12)?,
+                ))
+            },
+        )
+        .optional()?;
+    let Some((
+        slot_id,
+        started_at_ms,
+        ended_at_ms,
+        planned_focus_ms,
+        focused_ms,
+        planned_break_ms,
+        break_ms,
+        issued_simulation_ticks,
+        status,
+        state_json,
+        recap_event_ids_json,
+        recap_entries_json,
+        review_json,
+    )) = prior
+    else {
+        return Ok(());
+    };
+    let prior = StoredFocusSessionProgress {
+        slot_id,
+        started_at_ms,
+        ended_at_ms,
+        planned_focus_ms,
+        focused_ms,
+        planned_break_ms,
+        break_ms,
+        issued_simulation_ticks,
+        status: focus_status_from_db(&status)?,
+        state_json,
+        recap_event_ids_json,
+        recap_entries_json,
+        review_json,
+    };
+    let immutable_identity_changed = prior.slot_id != session.slot_id
+        || prior.started_at_ms != session.started_at_ms
+        || prior.planned_focus_ms != session.planned_focus_ms
+        || prior.planned_break_ms != session.planned_break_ms;
+    let accounting_regressed = session.focused_ms < prior.focused_ms
+        || session.break_ms < prior.break_ms
+        || session.issued_simulation_ticks < prior.issued_simulation_ticks;
+    let prior_terminal = matches!(
+        prior.status,
+        FocusSessionStatus::Completed | FocusSessionStatus::Cancelled
+    );
+    let recap_event_ids_json = serde_json::to_string(&session.recap_event_ids)?;
+    let recap_entries_json = serde_json::to_string(&session.recap_entries)?;
+    let review_json = session
+        .review
+        .as_ref()
+        .map(serde_json::to_string)
+        .transpose()?;
+    let terminal_changed = prior_terminal
+        && (prior.status != session.status
+            || prior.ended_at_ms != session.ended_at_ms
+            || prior.focused_ms != session.focused_ms
+            || prior.break_ms != session.break_ms
+            || prior.issued_simulation_ticks != session.issued_simulation_ticks
+            || prior.state_json != session.state_json
+            || prior.recap_event_ids_json != recap_event_ids_json
+            || prior.recap_entries_json != recap_entries_json
+            || prior.review_json != review_json);
+    if immutable_identity_changed || accounting_regressed || terminal_changed {
+        return Err(PersistenceError::new(
+            "focus session update is stale or changes immutable identity",
+        ));
+    }
     Ok(())
 }
 
@@ -1623,55 +1887,266 @@ fn validate_recap_entries(session: &FocusSession) -> Result<()> {
 }
 
 fn validate_focus_state_summary(session: &FocusSession) -> Result<()> {
-    let state: serde_json::Value = serde_json::from_str(&session.state_json)?;
-    let object = state
-        .as_object()
-        .ok_or_else(|| PersistenceError::new("focus state must be an object"))?;
-    let phase = object
-        .get("phase")
-        .and_then(serde_json::Value::as_str)
-        .ok_or_else(|| PersistenceError::new("focus state phase is missing"))?;
-    let expected_status = match phase {
-        "focus-running" | "break-running" => FocusSessionStatus::Active,
-        "focus-paused" | "break-paused" => FocusSessionStatus::Paused,
-        "focus-completed" | "finished" => FocusSessionStatus::Completed,
-        "focus-cancelled" => FocusSessionStatus::Cancelled,
-        _ => {
+    let state: FocusState = serde_json::from_str(&session.state_json).map_err(|_| {
+        PersistenceError::new("focus state must contain exactly the supported fields")
+    })?;
+    validate_focus_state(&state)?;
+    if serde_json::to_string(&state)? != session.state_json {
+        return Err(PersistenceError::new(
+            "focus state must use canonical JSON serialization",
+        ));
+    }
+    let expected_status = match state.phase {
+        FocusPhase::FocusRunning | FocusPhase::BreakRunning => FocusSessionStatus::Active,
+        FocusPhase::FocusPaused | FocusPhase::BreakPaused => FocusSessionStatus::Paused,
+        FocusPhase::FocusCompleted | FocusPhase::Finished => FocusSessionStatus::Completed,
+        FocusPhase::FocusCancelled => FocusSessionStatus::Cancelled,
+        FocusPhase::Idle => {
             return Err(PersistenceError::new(
-                "focus state phase is not persistable",
+                "idle focus state cannot be persisted as a session",
             ));
         }
     };
-    let matches_summary = object.get("version").and_then(serde_json::Value::as_u64) == Some(1)
-        && expected_status == session.status
-        && json_i64(object, "startedAtEpochMs") == Some(session.started_at_ms)
-        && json_nullable_i64(object, "endedAtEpochMs") == Some(session.ended_at_ms)
-        && json_i64(object, "focusDurationMs") == Some(session.planned_focus_ms)
-        && json_i64(object, "accumulatedFocusMs") == Some(session.focused_ms)
-        && json_i64(object, "breakDurationMs") == Some(session.planned_break_ms)
-        && json_i64(object, "accumulatedBreakMs") == Some(session.break_ms)
-        && json_i64(object, "totalIssuedSimulationTicks") == Some(session.issued_simulation_ticks);
+    let matches_summary = expected_status == session.status
+        && i64_matches_u64(session.started_at_ms, state.started_at_epoch_ms)
+        && nullable_i64_matches_u64(session.ended_at_ms, state.ended_at_epoch_ms)
+        && i64_matches_u64(session.planned_focus_ms, state.focus_duration_ms)
+        && i64_matches_u64(session.focused_ms, Some(state.accumulated_focus_ms))
+        && i64_matches_u64(session.planned_break_ms, state.break_duration_ms)
+        && i64_matches_u64(session.break_ms, Some(state.accumulated_break_ms))
+        && i64_matches_u64(
+            session.issued_simulation_ticks,
+            Some(state.total_issued_simulation_ticks),
+        );
     if !matches_summary {
         return Err(PersistenceError::new(
-            "focus session summary does not match its serialized focus state",
+            "focus session summary does not match its canonical focus state",
         ));
     }
     Ok(())
 }
 
-fn json_i64(object: &serde_json::Map<String, serde_json::Value>, key: &str) -> Option<i64> {
-    object.get(key).and_then(serde_json::Value::as_i64)
+fn i64_matches_u64(value: i64, candidate: Option<u64>) -> bool {
+    u64::try_from(value).ok() == candidate
 }
 
-fn json_nullable_i64(
-    object: &serde_json::Map<String, serde_json::Value>,
-    key: &str,
-) -> Option<Option<i64>> {
-    match object.get(key) {
-        Some(serde_json::Value::Null) => Some(None),
-        Some(value) => value.as_i64().map(Some),
-        None => None,
+fn nullable_i64_matches_u64(value: Option<i64>, candidate: Option<u64>) -> bool {
+    match (value, candidate) {
+        (None, None) => true,
+        (Some(value), Some(candidate)) => u64::try_from(value).ok() == Some(candidate),
+        _ => false,
     }
+}
+
+fn validate_focus_state(state: &FocusState) -> Result<()> {
+    let numeric_values = [
+        state.focus_duration_ms,
+        state.break_duration_ms,
+        state.simulation_ticks_per_focus_second,
+        Some(state.accumulated_focus_ms),
+        Some(state.accumulated_break_ms),
+        Some(state.total_issued_simulation_ticks),
+        Some(state.simulation_tick_remainder),
+        state.started_at_epoch_ms,
+        state.focus_started_at_epoch_ms,
+        state.focus_ended_at_epoch_ms,
+        state.break_started_at_epoch_ms,
+        state.break_ended_at_epoch_ms,
+        state.ended_at_epoch_ms,
+        state.active_segment_started_at_epoch_ms,
+        state.last_observed_epoch_ms,
+    ];
+    if state.version != 1
+        || numeric_values
+            .into_iter()
+            .flatten()
+            .any(|value| value > MAX_JSON_SAFE_INTEGER)
+        || state.simulation_tick_remainder >= 1_000
+    {
+        return Err(PersistenceError::new(
+            "focus state contains an unsupported version or unsafe integer",
+        ));
+    }
+
+    if matches!(state.phase, FocusPhase::Idle) {
+        let idle = FocusState {
+            version: 1,
+            phase: FocusPhase::Idle,
+            focus_duration_ms: None,
+            break_duration_ms: None,
+            simulation_ticks_per_focus_second: None,
+            accumulated_focus_ms: 0,
+            accumulated_break_ms: 0,
+            total_issued_simulation_ticks: 0,
+            simulation_tick_remainder: 0,
+            started_at_epoch_ms: None,
+            focus_started_at_epoch_ms: None,
+            focus_ended_at_epoch_ms: None,
+            break_started_at_epoch_ms: None,
+            break_ended_at_epoch_ms: None,
+            ended_at_epoch_ms: None,
+            active_segment_started_at_epoch_ms: None,
+            last_observed_epoch_ms: None,
+            outcome: None,
+        };
+        if *state != idle {
+            return Err(PersistenceError::new(
+                "idle focus state must not contain session data",
+            ));
+        }
+        return Ok(());
+    }
+
+    let (
+        Some(focus_duration_ms),
+        Some(break_duration_ms),
+        Some(simulation_ticks_per_focus_second),
+        Some(started_at_epoch_ms),
+        Some(focus_started_at_epoch_ms),
+        Some(last_observed_epoch_ms),
+    ) = (
+        state.focus_duration_ms,
+        state.break_duration_ms,
+        state.simulation_ticks_per_focus_second,
+        state.started_at_epoch_ms,
+        state.focus_started_at_epoch_ms,
+        state.last_observed_epoch_ms,
+    )
+    else {
+        return Err(PersistenceError::new(
+            "configured focus state is missing required session data",
+        ));
+    };
+    if focus_duration_ms == 0
+        || simulation_ticks_per_focus_second == 0
+        || state.accumulated_focus_ms > focus_duration_ms
+        || state.accumulated_break_ms > break_duration_ms
+    {
+        return Err(PersistenceError::new(
+            "focus state duration or accepted progress is invalid",
+        ));
+    }
+    let issued_numerator =
+        u128::from(state.accumulated_focus_ms) * u128::from(simulation_ticks_per_focus_second);
+    let issued_ticks = issued_numerator / 1_000;
+    let issued_remainder = issued_numerator % 1_000;
+    if issued_ticks > u128::from(MAX_JSON_SAFE_INTEGER)
+        || issued_ticks != u128::from(state.total_issued_simulation_ticks)
+        || issued_remainder != u128::from(state.simulation_tick_remainder)
+    {
+        return Err(PersistenceError::new(
+            "focus simulation tick accounting is inconsistent",
+        ));
+    }
+
+    let running = matches!(
+        state.phase,
+        FocusPhase::FocusRunning | FocusPhase::BreakRunning
+    );
+    if running != state.active_segment_started_at_epoch_ms.is_some()
+        || focus_started_at_epoch_ms != started_at_epoch_ms
+        || last_observed_epoch_ms < started_at_epoch_ms
+        || state
+            .active_segment_started_at_epoch_ms
+            .is_some_and(|started| {
+                started < started_at_epoch_ms || started > last_observed_epoch_ms
+            })
+    {
+        return Err(PersistenceError::new(
+            "focus session timestamps are inconsistent",
+        ));
+    }
+    if state
+        .focus_ended_at_epoch_ms
+        .is_some_and(|ended| ended < focus_started_at_epoch_ms || ended > last_observed_epoch_ms)
+        || state
+            .break_started_at_epoch_ms
+            .is_some_and(|started| Some(started) != state.focus_ended_at_epoch_ms)
+        || state.break_ended_at_epoch_ms.is_some_and(|ended| {
+            state
+                .break_started_at_epoch_ms
+                .is_none_or(|started| ended < started)
+        })
+        || state
+            .ended_at_epoch_ms
+            .is_some_and(|ended| ended > last_observed_epoch_ms)
+    {
+        return Err(PersistenceError::new(
+            "focus completion timestamps are inconsistent",
+        ));
+    }
+
+    match state.phase {
+        FocusPhase::FocusRunning | FocusPhase::FocusPaused => {
+            if state.focus_ended_at_epoch_ms.is_some()
+                || state.break_started_at_epoch_ms.is_some()
+                || state.outcome.is_some()
+                || state.accumulated_focus_ms >= focus_duration_ms
+            {
+                return Err(PersistenceError::new(
+                    "incomplete focus phase contains completion history",
+                ));
+            }
+        }
+        FocusPhase::BreakRunning | FocusPhase::BreakPaused => {
+            if state.focus_ended_at_epoch_ms.is_none()
+                || state.break_started_at_epoch_ms.is_none()
+                || state.outcome.is_some()
+                || break_duration_ms == 0
+                || state.accumulated_break_ms >= break_duration_ms
+            {
+                return Err(PersistenceError::new(
+                    "break phase does not retain valid planned break time",
+                ));
+            }
+        }
+        FocusPhase::FocusCancelled => {
+            if state.outcome != Some(FocusOutcome::Cancelled)
+                || state.ended_at_epoch_ms.is_none()
+                || state.focus_ended_at_epoch_ms.is_none()
+                || state.break_started_at_epoch_ms.is_some()
+                || state.break_ended_at_epoch_ms.is_some()
+                || state.ended_at_epoch_ms != state.focus_ended_at_epoch_ms
+            {
+                return Err(PersistenceError::new(
+                    "cancelled focus state has invalid completion history",
+                ));
+            }
+        }
+        FocusPhase::FocusCompleted | FocusPhase::Finished => {
+            if state.outcome != Some(FocusOutcome::Completed)
+                || state.ended_at_epoch_ms.is_none()
+                || state.focus_ended_at_epoch_ms.is_none()
+            {
+                return Err(PersistenceError::new(
+                    "completed focus state is missing completion history",
+                ));
+            }
+        }
+        FocusPhase::Idle => unreachable!("idle state returned above"),
+    }
+    if matches!(state.phase, FocusPhase::FocusCompleted)
+        && (break_duration_ms != 0 || state.ended_at_epoch_ms != state.focus_ended_at_epoch_ms)
+    {
+        return Err(PersistenceError::new(
+            "focus-completed state is invalid for the configured break",
+        ));
+    }
+    if matches!(state.phase, FocusPhase::Finished)
+        && ((break_duration_ms == 0 && state.accumulated_focus_ms != focus_duration_ms)
+            || (break_duration_ms > 0 && state.break_ended_at_epoch_ms.is_none())
+            || state.ended_at_epoch_ms
+                != if break_duration_ms > 0 {
+                    state.break_ended_at_epoch_ms
+                } else {
+                    state.focus_ended_at_epoch_ms
+                })
+    {
+        return Err(PersistenceError::new(
+            "finished focus state has inconsistent final-phase history",
+        ));
+    }
+    Ok(())
 }
 
 #[derive(Debug)]
@@ -1836,7 +2311,7 @@ pub fn list_save_slots(
 pub fn load_save_slot_candidates(
     state: State<'_, PersistenceState>,
     slot_id: String,
-) -> std::result::Result<Option<Vec<LoadedSave>>, String> {
+) -> std::result::Result<Option<SaveCandidatePage>, String> {
     state
         .lock()
         .and_then(|database| database.load_slot_candidates(&slot_id))
@@ -1848,7 +2323,7 @@ pub fn load_save_slot_fallback_candidates(
     state: State<'_, PersistenceState>,
     slot_id: String,
     before_generation: i64,
-) -> std::result::Result<Option<Vec<LoadedSave>>, String> {
+) -> std::result::Result<Option<SaveCandidatePage>, String> {
     state
         .lock()
         .and_then(|database| database.load_slot_fallback_candidates(&slot_id, before_generation))
@@ -1888,18 +2363,28 @@ pub fn commit_focus_checkpoint(
 
 #[tauri::command]
 pub fn confirm_semantically_valid_save_generation(
+    window: tauri::WebviewWindow,
     state: State<'_, PersistenceState>,
     slot_id: String,
     generation: i64,
     checksum: String,
 ) -> std::result::Result<(), String> {
-    let head_generation = state
+    validate_semantic_confirmation_caller(window.label()).map_err(|error| error.to_string())?;
+    state
         .lock()
         .and_then(|mut database| {
             database.confirm_semantically_valid_generation(&slot_id, generation, &checksum)
         })
         .map_err(|error| error.to_string())?;
-    state.defer_prune(slot_id, head_generation);
+    Ok(())
+}
+
+fn validate_semantic_confirmation_caller(label: &str) -> Result<()> {
+    if label != "persistence-broker" {
+        return Err(PersistenceError::new(
+            "semantic save confirmation requires the isolated persistence validator",
+        ));
+    }
     Ok(())
 }
 
@@ -1983,6 +2468,17 @@ pub fn save_settings(
 mod tests {
     use super::*;
 
+    #[test]
+    fn semantic_confirmation_requires_the_isolated_validator() {
+        assert!(validate_semantic_confirmation_caller("persistence-broker").is_ok());
+        assert!(
+            validate_semantic_confirmation_caller("main")
+                .expect_err("the visible webview must not authorize pruning")
+                .to_string()
+                .contains("isolated persistence validator")
+        );
+    }
+
     fn snapshot(value: &str) -> String {
         format!(
             r#"{{"format":"chrono-forge-world","formatVersion":1,"payload":{{"tick":1,"eventLog":[{{"id":7,"tick":0,"summary":"Recorded factual event 7."}},{{"id":9,"tick":0,"summary":"Recorded factual event 9."}},{{"id":11,"tick":0,"summary":"Recorded factual event 11."}}],"test":"{value}"}}}}"#
@@ -1990,16 +2486,13 @@ mod tests {
     }
 
     fn confirm_and_prune(database: &mut PersistenceDatabase, loaded: &LoadedSave) {
-        let head_generation = database
+        database
             .confirm_semantically_valid_generation(
                 &loaded.slot_id,
                 loaded.recovered_generation,
                 &loaded.checksum,
             )
-            .expect("semantic confirmation");
-        database
-            .prune_old_generations(&loaded.slot_id, head_generation)
-            .expect("retention prune");
+            .expect("atomic semantic confirmation and retention prune");
     }
 
     fn commit_semantically_verified_slot(
@@ -2013,6 +2506,47 @@ mod tests {
             .expect("verified save commit");
         confirm_and_prune(database, &loaded);
         loaded
+    }
+
+    fn collect_candidate_pages(database: &PersistenceDatabase, slot_id: &str) -> Vec<LoadedSave> {
+        let Some(mut page) = database
+            .load_slot_candidates(slot_id)
+            .expect("initial candidate page")
+        else {
+            return Vec::new();
+        };
+        let mut candidates = Vec::new();
+        let mut requested_before = None;
+        loop {
+            assert!(
+                page.candidates.len() <= SAVE_CANDIDATE_SCAN_ROWS_PER_PAGE as usize,
+                "native recovery pages must remain bounded"
+            );
+            if let Some(boundary) = requested_before {
+                assert!(
+                    page.candidates
+                        .iter()
+                        .all(|candidate| candidate.recovered_generation < boundary),
+                    "fallback candidates must precede their requested boundary"
+                );
+            }
+            candidates.extend(page.candidates);
+            let Some(next_before_generation) = page.next_before_generation else {
+                break;
+            };
+            if let Some(boundary) = requested_before {
+                assert!(
+                    next_before_generation < boundary,
+                    "candidate page cursor must move backward"
+                );
+            }
+            requested_before = Some(next_before_generation);
+            page = database
+                .load_slot_fallback_candidates(slot_id, next_before_generation)
+                .expect("fallback candidate page")
+                .expect("slot remains present during test recovery");
+        }
+        candidates
     }
 
     fn focus_world_moment(tick: u64) -> FocusWorldMoment {
@@ -2048,7 +2582,11 @@ mod tests {
     }
 
     fn completed_focus_state_json() -> String {
-        r#"{"version":1,"phase":"finished","focusDurationMs":100,"breakDurationMs":20,"accumulatedFocusMs":100,"accumulatedBreakMs":20,"totalIssuedSimulationTicks":1,"startedAtEpochMs":100,"endedAtEpochMs":220}"#.to_owned()
+        r#"{"version":1,"phase":"finished","focusDurationMs":100,"breakDurationMs":20,"simulationTicksPerFocusSecond":10,"accumulatedFocusMs":100,"accumulatedBreakMs":20,"totalIssuedSimulationTicks":1,"simulationTickRemainder":0,"startedAtEpochMs":100,"focusStartedAtEpochMs":100,"focusEndedAtEpochMs":200,"breakStartedAtEpochMs":200,"breakEndedAtEpochMs":220,"endedAtEpochMs":220,"activeSegmentStartedAtEpochMs":null,"lastObservedEpochMs":220,"outcome":"completed"}"#.to_owned()
+    }
+
+    fn stale_paused_focus_state_json() -> String {
+        r#"{"version":1,"phase":"focus-paused","focusDurationMs":100,"breakDurationMs":20,"simulationTicksPerFocusSecond":10,"accumulatedFocusMs":50,"accumulatedBreakMs":0,"totalIssuedSimulationTicks":0,"simulationTickRemainder":500,"startedAtEpochMs":100,"focusStartedAtEpochMs":100,"focusEndedAtEpochMs":null,"breakStartedAtEpochMs":null,"breakEndedAtEpochMs":null,"endedAtEpochMs":null,"activeSegmentStartedAtEpochMs":null,"lastObservedEpochMs":150,"outcome":null}"#.to_owned()
     }
 
     fn completed_focus_session(slot_id: &str, recap_event_ids: Vec<u64>) -> FocusSession {
@@ -2105,7 +2643,7 @@ mod tests {
     }
 
     #[test]
-    fn retention_keeps_the_newest_three_verified_generations() {
+    fn semantic_confirmation_synchronously_keeps_the_newest_three_verified_generations() {
         let mut database = PersistenceDatabase::in_memory().expect("database");
         for value in ["one", "two", "three", "four"] {
             commit_semantically_verified_slot(&mut database, "alpha", "Alpha", &snapshot(value));
@@ -2121,6 +2659,209 @@ mod tests {
             .collect::<std::result::Result<_, _>>()
             .expect("generations");
         assert_eq!(generations, vec![2, 3, 4]);
+    }
+
+    #[test]
+    fn semantic_confirmation_normalizes_six_corrupt_legacy_markers_above_a_valid_baseline() {
+        let mut database = PersistenceDatabase::in_memory().expect("database");
+        let baseline = commit_semantically_verified_slot(
+            &mut database,
+            "alpha",
+            "Alpha",
+            &snapshot("baseline"),
+        );
+        for generation in 2..=7 {
+            let committed = database
+                .commit_slot("alpha", "Alpha", &snapshot(&format!("legacy-{generation}")))
+                .expect("legacy generation");
+            assert_eq!(committed.recovered_generation, generation);
+            database
+                .connection
+                .execute(
+                    "UPDATE save_generations SET semantically_verified = 1
+                     WHERE slot_id = 'alpha' AND generation = ?1",
+                    [generation],
+                )
+                .expect("simulate pre-fix confirmed generation with interrupted prune");
+        }
+        database
+            .connection
+            .execute(
+                "UPDATE save_generations SET checksum = 'corrupt'
+                 WHERE slot_id = 'alpha' AND generation > 1",
+                [],
+            )
+            .expect("corrupt six newer legacy generations");
+
+        database
+            .confirm_semantically_valid_generation(
+                "alpha",
+                baseline.recovered_generation,
+                &baseline.checksum,
+            )
+            .expect("confirm and normalize the valid baseline");
+
+        let generations: Vec<(i64, i64)> = database
+            .connection
+            .prepare(
+                "SELECT generation, semantically_verified FROM save_generations
+                 WHERE slot_id = 'alpha' ORDER BY generation",
+            )
+            .expect("generation statement")
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+            .expect("generation query")
+            .collect::<std::result::Result<_, _>>()
+            .expect("normalized generations");
+        assert_eq!(generations, vec![(1, 1), (5, 0), (6, 0), (7, 0)]);
+        let recovered = database
+            .load_slot("alpha")
+            .expect("load normalized slot")
+            .expect("normalized slot");
+        assert_eq!(recovered.recovered_generation, 1);
+        assert_eq!(recovered.snapshot, baseline.snapshot);
+    }
+
+    #[test]
+    fn unavailable_semantic_broker_bounds_sustained_autosaves_and_preserves_recovery() {
+        let mut database = PersistenceDatabase::in_memory().expect("database");
+        let baseline = commit_semantically_verified_slot(
+            &mut database,
+            "alpha",
+            "Alpha",
+            &snapshot("confirmed-baseline"),
+        );
+        for generation in 2..=21 {
+            database
+                .commit_slot(
+                    "alpha",
+                    "Alpha",
+                    &snapshot(&format!("unconfirmed-{generation}")),
+                )
+                .expect("durable autosave while broker is unavailable");
+        }
+
+        let retained: Vec<(i64, i64)> = database
+            .connection
+            .prepare(
+                "SELECT generation, semantically_verified FROM save_generations
+                 WHERE slot_id = 'alpha' ORDER BY generation",
+            )
+            .expect("retained statement")
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+            .expect("retained query")
+            .collect::<std::result::Result<_, _>>()
+            .expect("retained generations");
+        assert_eq!(retained, vec![(1, 1), (19, 0), (20, 0), (21, 0)]);
+
+        database
+            .connection
+            .execute(
+                "UPDATE save_generations SET checksum = 'corrupt'
+                 WHERE slot_id = 'alpha' AND semantically_verified = 0",
+                [],
+            )
+            .expect("corrupt unconfirmed tail");
+        let candidates = collect_candidate_pages(&database, "alpha");
+        assert_eq!(
+            candidates
+                .iter()
+                .map(|candidate| candidate.recovered_generation)
+                .collect::<Vec<_>>(),
+            vec![baseline.recovered_generation],
+        );
+        assert_eq!(candidates[0].snapshot, baseline.snapshot);
+    }
+
+    #[test]
+    fn all_unverified_migrated_slot_refuses_to_delete_its_only_recovery_candidate() {
+        let mut database = PersistenceDatabase::in_memory().expect("database");
+        let baseline = database
+            .commit_slot("alpha", "Alpha", &snapshot("migrated-baseline"))
+            .expect("unverified migrated baseline");
+        for generation in 2..=5 {
+            let invalid_snapshot = format!(r#"{{"hello":"invalid-{generation}"}}"#);
+            database
+                .connection
+                .execute(
+                    "INSERT INTO save_generations
+                     (slot_id, generation, saved_at_ms, focus_session_json, snapshot, checksum)
+                     VALUES ('alpha', ?1, ?2, NULL, ?3, 'corrupt')",
+                    params![generation, generation * 1_000, invalid_snapshot],
+                )
+                .expect("migrated unverified generation");
+        }
+        database
+            .connection
+            .execute(
+                "UPDATE save_slots SET head_generation = 5 WHERE slot_id = 'alpha'",
+                [],
+            )
+            .expect("migrated head");
+
+        let error = database
+            .commit_slot("alpha", "Alpha", &snapshot("must-not-displace-baseline"))
+            .expect_err("an all-unverified backlog must fail closed");
+        assert!(error.to_string().contains("requires semantic validation"));
+        let unchanged_generations: Vec<i64> = database
+            .connection
+            .prepare(
+                "SELECT generation FROM save_generations
+                 WHERE slot_id = 'alpha' ORDER BY generation",
+            )
+            .expect("generation statement")
+            .query_map([], |row| row.get(0))
+            .expect("generation query")
+            .collect::<std::result::Result<_, _>>()
+            .expect("unchanged generations");
+        assert_eq!(unchanged_generations, vec![1, 2, 3, 4, 5]);
+        assert_eq!(
+            database
+                .load_slot("alpha")
+                .expect("recover migrated slot")
+                .expect("migrated slot")
+                .recovered_generation,
+            baseline.recovered_generation,
+        );
+
+        database
+            .confirm_semantically_valid_generation(
+                "alpha",
+                baseline.recovered_generation,
+                &baseline.checksum,
+            )
+            .expect("confirm recovered migrated baseline");
+        let after_confirmation: Vec<(i64, i64)> = database
+            .connection
+            .prepare(
+                "SELECT generation, semantically_verified FROM save_generations
+                 WHERE slot_id = 'alpha' ORDER BY generation",
+            )
+            .expect("confirmed statement")
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+            .expect("confirmed query")
+            .collect::<std::result::Result<_, _>>()
+            .expect("confirmed generations");
+        assert_eq!(after_confirmation, vec![(1, 1), (3, 0), (4, 0), (5, 0)]);
+
+        let newest = database
+            .commit_slot("alpha", "Alpha", &snapshot("post-confirmation"))
+            .expect("commit after baseline confirmation");
+        database
+            .connection
+            .execute(
+                "UPDATE save_generations SET checksum = 'corrupt'
+                 WHERE slot_id = 'alpha' AND generation = ?1",
+                [newest.recovered_generation],
+            )
+            .expect("corrupt newest generation");
+        assert_eq!(
+            database
+                .load_slot("alpha")
+                .expect("recover confirmed baseline")
+                .expect("slot after confirmation")
+                .recovered_generation,
+            baseline.recovered_generation,
+        );
     }
 
     #[test]
@@ -2164,10 +2905,7 @@ mod tests {
                 [newest.recovered_generation],
             )
             .expect("corrupt newest head");
-        let candidates = database
-            .load_slot_candidates("alpha")
-            .expect("fallback candidates")
-            .expect("slot");
+        let candidates = collect_candidate_pages(&database, "alpha");
         assert_eq!(
             candidates
                 .iter()
@@ -2192,30 +2930,140 @@ mod tests {
                 .expect("commit");
         }
 
-        let candidates = database
+        let page = database
             .load_slot_candidates("alpha")
             .expect("load candidates")
             .expect("slot");
-        assert_eq!(candidates.len(), 1);
-        assert_eq!(candidates[0].recovered_generation, 3);
-        assert!(!candidates[0].recovered_from_corruption);
+        assert_eq!(page.candidates.len(), 1);
+        assert_eq!(page.candidates[0].recovered_generation, 3);
+        assert!(!page.candidates[0].recovered_from_corruption);
+        assert_eq!(page.next_before_generation, Some(3));
 
-        let fallbacks = database
+        let fallback_two = database
             .load_slot_fallback_candidates("alpha", 3)
             .expect("fallback candidates")
             .expect("slot");
-        assert_eq!(
-            fallbacks
-                .iter()
-                .map(|candidate| candidate.recovered_generation)
-                .collect::<Vec<_>>(),
-            vec![2, 1]
-        );
-        assert!(
-            fallbacks
-                .iter()
-                .all(|candidate| candidate.recovered_from_corruption)
-        );
+        assert_eq!(fallback_two.candidates.len(), 1);
+        assert_eq!(fallback_two.candidates[0].recovered_generation, 2);
+        assert!(fallback_two.candidates[0].recovered_from_corruption);
+        assert_eq!(fallback_two.next_before_generation, Some(2));
+
+        let fallback_one = database
+            .load_slot_fallback_candidates("alpha", 2)
+            .expect("fallback candidates")
+            .expect("slot");
+        assert_eq!(fallback_one.candidates.len(), 1);
+        assert_eq!(fallback_one.candidates[0].recovered_generation, 1);
+        assert!(fallback_one.candidates[0].recovered_from_corruption);
+        assert_eq!(fallback_one.next_before_generation, Some(1));
+    }
+
+    #[test]
+    fn candidate_pages_bound_scans_across_corrupt_rows_without_deleting_evidence() {
+        let mut database = PersistenceDatabase::in_memory().expect("database");
+        commit_semantically_verified_slot(&mut database, "alpha", "Alpha", &snapshot("one"));
+        let second = database
+            .commit_slot("alpha", "Alpha", &snapshot("two"))
+            .expect("second generation");
+        database
+            .confirm_semantically_valid_generation(
+                "alpha",
+                second.recovered_generation,
+                &second.checksum,
+            )
+            .expect("confirm second generation");
+        let third = database
+            .commit_slot("alpha", "Alpha", &snapshot("three"))
+            .expect("third generation");
+        database
+            .confirm_semantically_valid_generation(
+                "alpha",
+                third.recovered_generation,
+                &third.checksum,
+            )
+            .expect("confirm third generation");
+        database
+            .commit_focus_checkpoint(
+                "alpha",
+                "Alpha",
+                &snapshot("four"),
+                &completed_focus_session("alpha", vec![7]),
+            )
+            .expect("fourth generation");
+        database
+            .commit_slot("alpha", "Alpha", r#"{"hello":"world-five"}"#)
+            .expect("checksum-valid semantic failure");
+        database
+            .connection
+            .execute(
+                "UPDATE save_generations SET snapshot = '{'
+                 WHERE slot_id = 'alpha' AND generation = 2",
+                [],
+            )
+            .expect("truncate second generation");
+        database
+            .connection
+            .execute(
+                "UPDATE save_generations SET checksum = 'corrupt'
+                 WHERE slot_id = 'alpha' AND generation = 3",
+                [],
+            )
+            .expect("corrupt third generation checksum");
+        database
+            .connection
+            .execute(
+                "UPDATE save_generations SET focus_session_json = '{}'
+                 WHERE slot_id = 'alpha' AND generation = 4",
+                [],
+            )
+            .expect("corrupt fourth generation checkpoint");
+
+        let mut page = database
+            .load_slot_candidates("alpha")
+            .expect("initial page")
+            .expect("slot");
+        let mut cursors = Vec::new();
+        let mut candidate_generations = Vec::new();
+        let mut requested_before = None;
+        loop {
+            assert!(page.candidates.len() <= 1);
+            if let Some(boundary) = requested_before {
+                assert!(
+                    page.candidates
+                        .iter()
+                        .all(|candidate| candidate.recovered_generation < boundary)
+                );
+            }
+            candidate_generations.extend(
+                page.candidates
+                    .iter()
+                    .map(|candidate| candidate.recovered_generation),
+            );
+            let Some(next_before_generation) = page.next_before_generation else {
+                break;
+            };
+            if let Some(boundary) = requested_before {
+                assert!(next_before_generation < boundary);
+            }
+            cursors.push(next_before_generation);
+            requested_before = Some(next_before_generation);
+            page = database
+                .load_slot_fallback_candidates("alpha", next_before_generation)
+                .expect("fallback page")
+                .expect("slot");
+        }
+
+        assert_eq!(cursors, vec![5, 4, 3, 2, 1]);
+        assert_eq!(candidate_generations, vec![5, 1]);
+        let row_count: i64 = database
+            .connection
+            .query_row(
+                "SELECT COUNT(*) FROM save_generations WHERE slot_id = 'alpha'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("row count");
+        assert_eq!(row_count, 5);
     }
 
     #[test]
@@ -2429,6 +3277,122 @@ mod tests {
     }
 
     #[test]
+    fn interrupted_focus_checkpoint_rolls_back_world_history_and_generation_together() {
+        let mut database = PersistenceDatabase::in_memory().expect("database");
+        let first =
+            commit_semantically_verified_slot(&mut database, "alpha", "Alpha", &snapshot("one"));
+        let session = completed_focus_session("alpha", vec![7, 9]);
+
+        assert!(
+            database
+                .commit_slot_inner(
+                    "alpha",
+                    "Alpha",
+                    &snapshot("interrupted"),
+                    Some(&session),
+                    true,
+                )
+                .is_err()
+        );
+
+        let loaded = database.load_slot("alpha").expect("load").expect("present");
+        assert_eq!(loaded.recovered_generation, first.recovered_generation);
+        assert_eq!(loaded.snapshot, first.snapshot);
+        assert!(database.list_focus_sessions().expect("history").is_empty());
+        let row_count: i64 = database
+            .connection
+            .query_row(
+                "SELECT COUNT(*) FROM save_generations WHERE slot_id = 'alpha'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("row count");
+        assert_eq!(row_count, 1);
+
+        let committed = database
+            .commit_focus_checkpoint("alpha", "Alpha", &snapshot("two"), &session)
+            .expect("retry checkpoint");
+        assert_eq!(committed.recovered_generation, 2);
+        assert_eq!(
+            database.list_focus_sessions().expect("history"),
+            vec![session]
+        );
+    }
+
+    #[test]
+    fn stale_or_cross_slot_focus_checkpoint_rolls_back_the_whole_transaction() {
+        let mut database = PersistenceDatabase::in_memory().expect("database");
+        let completed = completed_focus_session("alpha", vec![7]);
+        let first = database
+            .commit_focus_checkpoint("alpha", "Alpha", &snapshot("one"), &completed)
+            .expect("completed checkpoint");
+
+        let mut stale = completed.clone();
+        stale.ended_at_ms = None;
+        stale.focused_ms = 50;
+        stale.break_ms = 0;
+        stale.issued_simulation_ticks = 0;
+        stale.status = FocusSessionStatus::Paused;
+        stale.state_json = stale_paused_focus_state_json();
+        stale.recap_event_ids.clear();
+        stale.recap_entries.clear();
+        assert!(
+            database
+                .commit_focus_checkpoint("alpha", "Alpha", &snapshot("two"), &stale)
+                .is_err()
+        );
+
+        let mut cross_slot = completed.clone();
+        cross_slot.slot_id = Some("beta".to_owned());
+        assert!(
+            database
+                .commit_focus_checkpoint("beta", "Beta", &snapshot("other"), &cross_slot)
+                .is_err()
+        );
+
+        let mut rewritten_history = completed.clone();
+        rewritten_history.recap_event_ids.clear();
+        rewritten_history.recap_entries.clear();
+        assert!(
+            database
+                .commit_focus_checkpoint("alpha", "Alpha", &snapshot("two"), &rewritten_history,)
+                .is_err()
+        );
+        assert!(database.record_focus_session(&rewritten_history).is_err());
+
+        let mut noncanonical = completed.clone();
+        noncanonical.session_id = "session-noncanonical".to_owned();
+        let mut state: serde_json::Value =
+            serde_json::from_str(&noncanonical.state_json).expect("focus state");
+        state
+            .as_object_mut()
+            .expect("focus state object")
+            .insert("unexpectedAuthority".to_owned(), true.into());
+        noncanonical.state_json = serde_json::to_string(&state).expect("focus state JSON");
+        assert!(
+            database
+                .commit_focus_checkpoint("alpha", "Alpha", &snapshot("two"), &noncanonical)
+                .is_err()
+        );
+
+        let loaded = database.load_slot("alpha").expect("load").expect("present");
+        assert_eq!(loaded.recovered_generation, first.recovered_generation);
+        assert_eq!(loaded.snapshot, first.snapshot);
+        assert_eq!(
+            database.list_focus_sessions().expect("history"),
+            vec![completed]
+        );
+        assert_eq!(
+            database.list_slots().expect("slots"),
+            vec![SaveSlotSummary {
+                slot_id: "alpha".to_owned(),
+                name: "Alpha".to_owned(),
+                head_generation: Some(1),
+            }]
+        );
+    }
+
+    #[test]
     fn inserted_generation_verification_rejects_same_length_snapshot_corruption() {
         let expected = "abcd";
         let inserted = "wxyz";
@@ -2530,6 +3494,27 @@ mod tests {
             database.list_focus_sessions().expect("list"),
             vec![session.clone()]
         );
+
+        let mut rewritten_review = session.clone();
+        rewritten_review
+            .review
+            .as_mut()
+            .expect("review")
+            .revisit_target
+            .as_mut()
+            .expect("target")
+            .label = "Renamed Hearth".to_owned();
+        assert!(
+            database
+                .commit_focus_checkpoint(
+                    "alpha",
+                    "Alpha",
+                    &snapshot("focus-review"),
+                    &rewritten_review,
+                )
+                .is_err()
+        );
+        assert!(database.record_focus_session(&rewritten_review).is_err());
 
         let mut wrong_tick = session.clone();
         wrong_tick.review.as_mut().expect("review").after.tick = 2;
@@ -2781,6 +3766,537 @@ mod tests {
             },
         ] {
             assert!(database.save_settings(&invalid).is_err());
+        }
+    }
+
+    #[test]
+    fn typed_settings_reject_unknown_command_fields() {
+        let mut value = serde_json::to_value(AppSettings::default()).expect("settings JSON");
+        value.as_object_mut().expect("settings object").insert(
+            "unexpectedAuthority".to_owned(),
+            serde_json::Value::Bool(true),
+        );
+
+        assert!(serde_json::from_value::<AppSettings>(value).is_err());
+    }
+
+    struct HistoricalDatabaseFile {
+        path: PathBuf,
+    }
+
+    impl HistoricalDatabaseFile {
+        fn create(schema_version: i64) -> Self {
+            assert!([2, 4, 5, 7].contains(&schema_version));
+            let unique = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("test clock")
+                .as_nanos();
+            let path = std::env::temp_dir().join(format!(
+                "chrono-forge-m10-7-v{schema_version}-{}-{unique}.sqlite3",
+                std::process::id()
+            ));
+            let connection = Connection::open(&path).expect("historical database");
+            seed_historical_database(&connection, schema_version);
+            drop(connection);
+            Self { path }
+        }
+
+        fn path(&self) -> &Path {
+            &self.path
+        }
+    }
+
+    impl Drop for HistoricalDatabaseFile {
+        fn drop(&mut self) {
+            for path in [
+                self.path.clone(),
+                PathBuf::from(format!("{}-wal", self.path.display())),
+                PathBuf::from(format!("{}-shm", self.path.display())),
+            ] {
+                let _ = fs::remove_file(path);
+            }
+        }
+    }
+
+    fn historical_focus_session(schema_version: i64) -> FocusSession {
+        let mut session = completed_focus_session("alpha", vec![7]);
+        if schema_version < 4 {
+            session.recap_entries.clear();
+        }
+        if schema_version >= 5 {
+            session.review = Some(FocusSessionReview {
+                version: 1,
+                baseline_event_id: 6,
+                before: focus_world_moment(0),
+                after: focus_world_moment(1),
+                revisit_target: Some(FocusRevisitTarget {
+                    kind: FocusRevisitKind::Settlement,
+                    id: 1,
+                    label: "First Hearth".to_owned(),
+                    source_event_id: Some(7),
+                }),
+            });
+        }
+        session
+    }
+
+    fn seed_historical_database(connection: &Connection, schema_version: i64) {
+        connection
+            .execute_batch(
+                "
+                PRAGMA foreign_keys = ON;
+                CREATE TABLE schema_migrations (
+                    version INTEGER PRIMARY KEY,
+                    applied_marker INTEGER NOT NULL
+                );
+                INSERT INTO schema_migrations (version, applied_marker) VALUES (1, 1);
+                CREATE TABLE save_slots (
+                    slot_id TEXT PRIMARY KEY NOT NULL,
+                    name TEXT NOT NULL,
+                    head_generation INTEGER,
+                    FOREIGN KEY (slot_id, head_generation)
+                        REFERENCES save_generations(slot_id, generation)
+                        DEFERRABLE INITIALLY DEFERRED
+                );
+                CREATE TABLE save_generations (
+                    slot_id TEXT NOT NULL,
+                    generation INTEGER NOT NULL,
+                    snapshot TEXT NOT NULL,
+                    checksum TEXT NOT NULL,
+                    PRIMARY KEY (slot_id, generation),
+                    FOREIGN KEY (slot_id) REFERENCES save_slots(slot_id) ON DELETE CASCADE
+                );
+                CREATE INDEX idx_save_generations_newest
+                    ON save_generations (slot_id, generation DESC);
+                CREATE TABLE focus_sessions (
+                    session_id TEXT PRIMARY KEY NOT NULL,
+                    slot_id TEXT,
+                    started_at_ms INTEGER NOT NULL,
+                    ended_at_ms INTEGER,
+                    planned_focus_ms INTEGER NOT NULL,
+                    focused_ms INTEGER NOT NULL,
+                    planned_break_ms INTEGER NOT NULL,
+                    break_ms INTEGER NOT NULL,
+                    issued_simulation_ticks INTEGER NOT NULL,
+                    status TEXT NOT NULL,
+                    state_json TEXT NOT NULL,
+                    recap_event_ids_json TEXT NOT NULL,
+                    FOREIGN KEY (slot_id) REFERENCES save_slots(slot_id) ON DELETE SET NULL
+                );
+                CREATE INDEX idx_focus_sessions_newest
+                    ON focus_sessions (started_at_ms DESC, session_id ASC);
+                CREATE TABLE app_settings (
+                    singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+                    focus_to_sim_ratio INTEGER NOT NULL,
+                    default_focus_minutes INTEGER NOT NULL,
+                    default_break_minutes INTEGER NOT NULL,
+                    volume_percent INTEGER NOT NULL,
+                    offline_progression_enabled INTEGER NOT NULL
+                        CHECK (offline_progression_enabled IN (0, 1)),
+                    max_offline_hours INTEGER NOT NULL,
+                    calm_mode INTEGER NOT NULL CHECK (calm_mode IN (0, 1)),
+                    notifications_enabled INTEGER NOT NULL
+                        CHECK (notifications_enabled IN (0, 1)),
+                    sound_enabled INTEGER NOT NULL CHECK (sound_enabled IN (0, 1)),
+                    breaks_enabled INTEGER NOT NULL CHECK (breaks_enabled IN (0, 1))
+                );
+                ",
+            )
+            .expect("v1 schema");
+
+        for version in 2..=schema_version {
+            let migration = match version {
+                2 => {
+                    "ALTER TABLE save_generations
+                     ADD COLUMN saved_at_ms INTEGER NOT NULL DEFAULT 0;"
+                }
+                3 => {
+                    "ALTER TABLE save_generations ADD COLUMN focus_session_json TEXT;
+                     ALTER TABLE app_settings ADD COLUMN active_slot_id TEXT;"
+                }
+                4 => {
+                    "ALTER TABLE focus_sessions
+                         ADD COLUMN recap_entries_json TEXT NOT NULL DEFAULT '[]';
+                     ALTER TABLE app_settings ADD COLUMN reduced_effects INTEGER NOT NULL DEFAULT 0
+                         CHECK (reduced_effects IN (0, 1));"
+                }
+                5 => "ALTER TABLE focus_sessions ADD COLUMN review_json TEXT;",
+                6 => {
+                    "ALTER TABLE focus_sessions ADD COLUMN checkpoint_generation INTEGER;
+                     ALTER TABLE focus_sessions ADD COLUMN review_authority_json TEXT;
+                     ALTER TABLE focus_sessions ADD COLUMN review_authority_checksum TEXT;"
+                }
+                7 => {
+                    "ALTER TABLE app_settings ADD COLUMN audio_muted INTEGER NOT NULL DEFAULT 0
+                         CHECK (audio_muted IN (0, 1));
+                     ALTER TABLE app_settings ADD COLUMN ambience_enabled INTEGER NOT NULL DEFAULT 0
+                         CHECK (ambience_enabled IN (0, 1));
+                     ALTER TABLE app_settings
+                         ADD COLUMN ambience_volume_percent INTEGER NOT NULL DEFAULT 20;
+                     ALTER TABLE app_settings
+                         ADD COLUMN effects_volume_percent INTEGER NOT NULL DEFAULT 45;"
+                }
+                _ => unreachable!("bounded historical schema version"),
+            };
+            connection
+                .execute_batch(migration)
+                .unwrap_or_else(|error| panic!("v{version} schema: {error}"));
+            connection
+                .execute(
+                    "INSERT INTO schema_migrations (version, applied_marker) VALUES (?1, 1)",
+                    [version],
+                )
+                .unwrap_or_else(|error| panic!("v{version} marker: {error}"));
+        }
+
+        let legacy_snapshot = snapshot(&format!("legacy-v{schema_version}"));
+        let legacy_checksum = sha256_hex(&legacy_snapshot);
+        let session = historical_focus_session(schema_version);
+        let session_json = serde_json::to_string(&session).expect("historical session JSON");
+        connection
+            .execute(
+                "INSERT INTO save_slots (slot_id, name, head_generation)
+                 VALUES ('alpha', 'Alpha', NULL)",
+                [],
+            )
+            .expect("historical slot");
+        if schema_version >= 3 {
+            connection
+                .execute(
+                    "INSERT INTO save_generations
+                     (slot_id, generation, snapshot, checksum, saved_at_ms, focus_session_json)
+                     VALUES ('alpha', 1, ?1, ?2, ?3, ?4)",
+                    params![
+                        legacy_snapshot,
+                        legacy_checksum,
+                        1_000 + schema_version,
+                        session_json
+                    ],
+                )
+                .expect("historical generation with checkpoint");
+        } else {
+            connection
+                .execute(
+                    "INSERT INTO save_generations
+                     (slot_id, generation, snapshot, checksum, saved_at_ms)
+                     VALUES ('alpha', 1, ?1, ?2, ?3)",
+                    params![legacy_snapshot, legacy_checksum, 1_000 + schema_version],
+                )
+                .expect("historical generation");
+        }
+        connection
+            .execute(
+                "UPDATE save_slots SET head_generation = 1 WHERE slot_id = 'alpha'",
+                [],
+            )
+            .expect("historical head");
+        connection
+            .execute(
+                "INSERT INTO app_settings
+                 (singleton, focus_to_sim_ratio, default_focus_minutes, default_break_minutes,
+                  volume_percent, offline_progression_enabled, max_offline_hours, calm_mode,
+                  notifications_enabled, sound_enabled, breaks_enabled)
+                 VALUES (1, 25, 50, 10, 60, 0, 12, 1, 0, 0, 1)",
+                [],
+            )
+            .expect("historical settings");
+        if schema_version >= 3 {
+            connection
+                .execute(
+                    "UPDATE app_settings SET active_slot_id = 'alpha' WHERE singleton = 1",
+                    [],
+                )
+                .expect("historical active slot");
+        }
+        if schema_version >= 4 {
+            connection
+                .execute(
+                    "UPDATE app_settings SET reduced_effects = 1 WHERE singleton = 1",
+                    [],
+                )
+                .expect("historical reduced effects");
+        }
+        if schema_version >= 7 {
+            connection
+                .execute(
+                    "UPDATE app_settings
+                     SET audio_muted = 1, ambience_enabled = 1,
+                         ambience_volume_percent = 33, effects_volume_percent = 44
+                     WHERE singleton = 1",
+                    [],
+                )
+                .expect("historical audio settings");
+        }
+
+        connection
+            .execute(
+                "INSERT INTO focus_sessions
+                 (session_id, slot_id, started_at_ms, ended_at_ms, planned_focus_ms, focused_ms,
+                  planned_break_ms, break_ms, issued_simulation_ticks, status, state_json,
+                  recap_event_ids_json)
+                 VALUES ('session-1', 'alpha', 100, 220, 100, 100, 20, 20, 1,
+                         'completed', ?1, '[7]')",
+                [completed_focus_state_json()],
+            )
+            .expect("historical focus session");
+        if schema_version >= 4 {
+            connection
+                .execute(
+                    "UPDATE focus_sessions SET recap_entries_json = ?1
+                     WHERE session_id = 'session-1'",
+                    [serde_json::to_string(&session.recap_entries)
+                        .expect("historical recap entries")],
+                )
+                .expect("historical recap entries");
+        }
+        if schema_version >= 5 {
+            connection
+                .execute(
+                    "UPDATE focus_sessions SET review_json = ?1 WHERE session_id = 'session-1'",
+                    [serde_json::to_string(&session.review).expect("historical review")],
+                )
+                .expect("historical review");
+        }
+        if schema_version >= 7 {
+            connection
+                .execute(
+                    "UPDATE focus_sessions
+                     SET checkpoint_generation = 1, review_authority_json = ?1,
+                         review_authority_checksum = ?2
+                     WHERE session_id = 'session-1'",
+                    params![session_json, sha256_hex(&session_json)],
+                )
+                .expect("historical review authority");
+        }
+    }
+
+    fn schema_fingerprint(database: &PersistenceDatabase) -> Vec<(String, String)> {
+        database
+            .connection
+            .prepare(
+                "SELECT type || ':' || name, COALESCE(sql, '')
+                 FROM sqlite_schema
+                 WHERE name NOT LIKE 'sqlite_%'
+                 ORDER BY type, name",
+            )
+            .expect("schema statement")
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+            .expect("schema query")
+            .collect::<std::result::Result<_, _>>()
+            .expect("schema fingerprint")
+    }
+
+    #[test]
+    fn historical_schema_matrix_migrates_idempotently_and_preserves_recovery_contracts() {
+        for schema_version in [2, 4, 5, 7] {
+            let file = HistoricalDatabaseFile::create(schema_version);
+            let mut database = PersistenceDatabase::open(file.path())
+                .unwrap_or_else(|error| panic!("open v{schema_version}: {error}"));
+            let expected_session = historical_focus_session(schema_version);
+            let expected_settings = AppSettings {
+                focus_to_sim_ratio: 25,
+                default_focus_minutes: 50,
+                default_break_minutes: 10,
+                volume_percent: 60,
+                audio_muted: schema_version >= 7,
+                ambience_enabled: schema_version >= 7,
+                ambience_volume_percent: if schema_version >= 7 { 33 } else { 20 },
+                effects_volume_percent: if schema_version >= 7 { 44 } else { 45 },
+                offline_progression_enabled: false,
+                max_offline_hours: 12,
+                calm_mode: true,
+                reduced_effects: schema_version >= 4,
+                notifications_enabled: false,
+                sound_enabled: false,
+                breaks_enabled: true,
+                active_slot_id: (schema_version >= 3).then(|| "alpha".to_owned()),
+            };
+            let schema_after_first_migration = schema_fingerprint(&database);
+            let loaded_after_first_migration = database
+                .load_slot("alpha")
+                .expect("load migrated slot")
+                .expect("migrated slot");
+            let settings_after_first_migration =
+                database.load_settings().expect("migrated settings");
+            let focus_after_first_migration = database
+                .list_focus_session_records()
+                .expect("migrated focus history");
+
+            database
+                .migrate()
+                .unwrap_or_else(|error| panic!("repeat v{schema_version} migration: {error}"));
+            assert_eq!(schema_fingerprint(&database), schema_after_first_migration);
+            assert_eq!(
+                database.load_slot("alpha").expect("repeat load"),
+                Some(loaded_after_first_migration.clone())
+            );
+            assert_eq!(
+                database.load_settings().expect("repeat settings"),
+                settings_after_first_migration
+            );
+            assert_eq!(
+                database
+                    .list_focus_session_records()
+                    .expect("repeat focus history"),
+                focus_after_first_migration
+            );
+            let versions: Vec<i64> = database
+                .connection
+                .prepare("SELECT version FROM schema_migrations ORDER BY version")
+                .expect("version statement")
+                .query_map([], |row| row.get(0))
+                .expect("version query")
+                .collect::<std::result::Result<_, _>>()
+                .expect("schema versions");
+            assert_eq!(versions, (1..=SCHEMA_VERSION).collect::<Vec<_>>());
+            let foreign_key_failures: i64 = database
+                .connection
+                .query_row("SELECT COUNT(*) FROM pragma_foreign_key_check", [], |row| {
+                    row.get(0)
+                })
+                .expect("foreign-key check");
+            assert_eq!(foreign_key_failures, 0);
+
+            assert_eq!(
+                loaded_after_first_migration.snapshot,
+                snapshot(&format!("legacy-v{schema_version}"))
+            );
+            assert_eq!(loaded_after_first_migration.recovered_generation, 1);
+            assert_eq!(loaded_after_first_migration.head_generation, Some(1));
+            assert!(!loaded_after_first_migration.recovered_from_corruption);
+            assert_eq!(
+                loaded_after_first_migration.checksum,
+                sha256_hex(&loaded_after_first_migration.snapshot)
+            );
+            assert_eq!(
+                loaded_after_first_migration.saved_at_ms,
+                1_000 + schema_version
+            );
+            assert_eq!(
+                loaded_after_first_migration.focus_session,
+                (schema_version >= 3).then(|| expected_session.clone())
+            );
+            assert_eq!(settings_after_first_migration, expected_settings);
+            assert_eq!(focus_after_first_migration.len(), 1);
+            assert_eq!(focus_after_first_migration[0].session, expected_session);
+            assert_eq!(
+                focus_after_first_migration[0].checkpoint_generation,
+                (schema_version >= 7).then_some(1)
+            );
+            assert_eq!(
+                focus_after_first_migration[0].authority_session,
+                (schema_version >= 7).then(|| expected_session.clone())
+            );
+            let legacy_semantic_marker: i64 = database
+                .connection
+                .query_row(
+                    "SELECT semantically_verified FROM save_generations
+                     WHERE slot_id = 'alpha' AND generation = 1",
+                    [],
+                    |row| row.get(0),
+                )
+                .expect("legacy semantic marker");
+            assert_eq!(legacy_semantic_marker, 0);
+            assert!(
+                database
+                    .confirm_semantically_valid_generation("alpha", 1, &"0".repeat(64),)
+                    .is_err()
+            );
+            confirm_and_prune(&mut database, &loaded_after_first_migration);
+
+            let current_snapshot = snapshot(&format!("current-v{schema_version}"));
+            let committed = database
+                .commit_slot("alpha", "Alpha", &current_snapshot)
+                .expect("post-migration commit");
+            assert_eq!(committed.recovered_generation, 2);
+            assert_eq!(committed.head_generation, Some(2));
+            assert_eq!(committed.checksum, sha256_hex(&current_snapshot));
+            let exported: SaveExportEnvelope = serde_json::from_str(
+                &database
+                    .export_generation("alpha", 2)
+                    .expect("post-migration export"),
+            )
+            .expect("export envelope");
+            assert_eq!(exported.slot_id, "alpha");
+            assert_eq!(exported.name, "Alpha");
+            assert_eq!(exported.snapshot, current_snapshot);
+            assert_eq!(exported.checksum, committed.checksum);
+            confirm_and_prune(&mut database, &committed);
+
+            database
+                .connection
+                .execute(
+                    "UPDATE save_generations SET checksum = ?1
+                     WHERE slot_id = 'alpha' AND generation = 2",
+                    ["0".repeat(64)],
+                )
+                .expect("corrupt migrated head");
+            let recovered = database
+                .load_slot("alpha")
+                .expect("recover migrated slot")
+                .expect("recovered migrated slot");
+            assert_eq!(recovered.recovered_generation, 1);
+            assert!(recovered.recovered_from_corruption);
+            assert_eq!(recovered.snapshot, loaded_after_first_migration.snapshot);
+
+            for generation in 3..=5 {
+                let replacement = snapshot(&format!("replacement-v{schema_version}-{generation}"));
+                let loaded = database
+                    .commit_slot("alpha", "Alpha", &replacement)
+                    .expect("replacement commit");
+                assert_eq!(loaded.recovered_generation, generation);
+                confirm_and_prune(&mut database, &loaded);
+                if generation < 5 {
+                    let historical_candidate_count: i64 = database
+                        .connection
+                        .query_row(
+                            "SELECT COUNT(*) FROM save_generations
+                             WHERE slot_id = 'alpha' AND generation = 1",
+                            [],
+                            |row| row.get(0),
+                        )
+                        .expect("historical recovery candidate");
+                    assert_eq!(historical_candidate_count, 1);
+                }
+            }
+            let retained: Vec<(i64, i64)> = database
+                .connection
+                .prepare(
+                    "SELECT generation, semantically_verified FROM save_generations
+                     WHERE slot_id = 'alpha' ORDER BY generation",
+                )
+                .expect("retained statement")
+                .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+                .expect("retained query")
+                .collect::<std::result::Result<_, _>>()
+                .expect("retained generations");
+            assert_eq!(retained, vec![(3, 1), (4, 1), (5, 1)]);
+            database
+                .connection
+                .execute(
+                    "UPDATE save_generations SET checksum = ?1
+                     WHERE slot_id = 'alpha' AND generation = 5",
+                    ["f".repeat(64)],
+                )
+                .expect("corrupt retained head");
+            let retained_recovery = database
+                .load_slot("alpha")
+                .expect("retained recovery")
+                .expect("retained recovery candidate");
+            assert_eq!(retained_recovery.recovered_generation, 4);
+            assert!(retained_recovery.recovered_from_corruption);
+            assert_eq!(
+                retained_recovery.checksum,
+                sha256_hex(&retained_recovery.snapshot)
+            );
+            let retained_export: SaveExportEnvelope = serde_json::from_str(
+                &database
+                    .export_generation("alpha", 4)
+                    .expect("retained export"),
+            )
+            .expect("retained export envelope");
+            assert_eq!(retained_export.snapshot, retained_recovery.snapshot);
+            assert_eq!(retained_export.checksum, retained_recovery.checksum);
         }
     }
 

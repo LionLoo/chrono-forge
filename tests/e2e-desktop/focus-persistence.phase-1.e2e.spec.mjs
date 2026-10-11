@@ -17,6 +17,22 @@ function parseCameraReadout(readout) {
   return { x: Number(match[1]), y: Number(match[2]), zoom: Number(match[3]) };
 }
 
+function displayedWorldCoordinateInterval(anchor, position, zoom) {
+  const positions = [position - 0.5, position + 0.5];
+  const zooms = [zoom - 0.005, zoom + 0.005];
+  const candidates = positions.flatMap((candidatePosition) =>
+    zooms.map((candidateZoom) => (anchor - candidatePosition) / candidateZoom),
+  );
+  return { maximum: Math.max(...candidates), minimum: Math.min(...candidates) };
+}
+
+function expectDisplayedCameraAnchorPreserved(anchor, before, after) {
+  const beforeInterval = displayedWorldCoordinateInterval(anchor, before.position, before.zoom);
+  const afterInterval = displayedWorldCoordinateInterval(anchor, after.position, after.zoom);
+  expect(beforeInterval.minimum).toBeLessThanOrEqual(afterInterval.maximum);
+  expect(afterInterval.minimum).toBeLessThanOrEqual(beforeInterval.maximum);
+}
+
 async function setMapSelectionValue(value) {
   await browser.execute((nextValue) => {
     const select = document.querySelector('#map-inspector select');
@@ -36,6 +52,16 @@ describe('native focus persistence phase 1', () => {
   it('validates the initial native UI and persists a paused ten-second focus session through SQLite', async function () {
     await $('#focus-title').waitForDisplayed();
     await $('span=SQLite archive').waitForDisplayed();
+    const initialArchive = await executeTauri(async ({ core }) => ({
+      history: await core.invoke('list_focus_sessions'),
+      settings: await core.invoke('load_settings'),
+      slots: await core.invoke('list_save_slots'),
+    }));
+    expect(initialArchive.history).toEqual([]);
+    expect(initialArchive.settings).toMatchObject({ activeSlotId: 'primary' });
+    expect(initialArchive.slots).toEqual([
+      { headGeneration: 1, name: 'Founding world', slotId: 'primary' },
+    ]);
     for (const scale of [100, 150, 200]) {
       const layout = await browser.execute((percent) => {
         document.documentElement.style.fontSize = `${percent}%`;
@@ -161,18 +187,16 @@ describe('native focus persistence phase 1', () => {
     );
     const afterWheel = parseCameraReadout(await cameraReadout.getText());
     expect(afterWheel.zoom).toBeLessThan(beforeWheel.zoom);
-    expect(
-      Math.abs(
-        (mapViewport.anchorX - beforeWheel.x) / beforeWheel.zoom -
-          (mapViewport.anchorX - afterWheel.x) / afterWheel.zoom,
-      ),
-    ).toBeLessThan(1);
-    expect(
-      Math.abs(
-        (mapViewport.anchorY - beforeWheel.y) / beforeWheel.zoom -
-          (mapViewport.anchorY - afterWheel.y) / afterWheel.zoom,
-      ),
-    ).toBeLessThan(1);
+    expectDisplayedCameraAnchorPreserved(
+      mapViewport.anchorX,
+      { position: beforeWheel.x, zoom: beforeWheel.zoom },
+      { position: afterWheel.x, zoom: afterWheel.zoom },
+    );
+    expectDisplayedCameraAnchorPreserved(
+      mapViewport.anchorY,
+      { position: beforeWheel.y, zoom: beforeWheel.zoom },
+      { position: afterWheel.y, zoom: afterWheel.zoom },
+    );
     expect(await browser.execute(() => window.scrollY)).toBe(mapViewport.scrollY);
 
     await mapHost.click();
@@ -338,10 +362,10 @@ describe('native focus persistence phase 1', () => {
       plannedFocusMs: 120_000,
       focusedMs: 10_000,
     });
-    const pausedCandidates = await executeTauri(({ core }) =>
+    const pausedCandidatePage = await executeTauri(({ core }) =>
       core.invoke('load_save_slot_candidates', { slotId: 'primary' }),
     );
-    expect(pausedCandidates[0]?.focusSession).toMatchObject({
+    expect(pausedCandidatePage.candidates[0]?.focusSession).toMatchObject({
       sessionId: pausedSessions[0]?.sessionId,
       status: 'paused',
       plannedFocusMs: 120_000,
