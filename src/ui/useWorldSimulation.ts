@@ -32,6 +32,8 @@ export const DEMO_WORLD_CONFIG: WorldConfig = Object.freeze({
 
 export const ADVANCE_RESPONSE_TIMEOUT_MS = 10_000;
 
+export type SimulationAdvancePriority = 'ordinary' | 'terminal';
+
 export interface SimulationWorkerPort {
   onerror: ((event: ErrorEvent) => void) | null;
   onmessage: ((event: MessageEvent<WorkerToUiMessage>) => void) | null;
@@ -111,9 +113,14 @@ interface PendingFocusCheckpointRequest {
   readonly resolve: (result: FocusCheckpointResult) => void;
 }
 
+interface PendingAdvanceRequest {
+  readonly priority: SimulationAdvancePriority;
+  readonly timeout: ReturnType<typeof globalThis.setTimeout> | null;
+}
+
 export interface WorldSimulationView {
-  /** Returns false when an earlier authoritative advance is still outstanding. */
-  readonly advanceTicks: (ticks: number) => boolean | void;
+  /** Returns false when equivalent authoritative work is already outstanding. */
+  readonly advanceTicks: (ticks: number, priority?: SimulationAdvancePriority) => boolean | void;
   readonly error: string | null;
   readonly events: readonly WorkerEvent[];
   /** The latest events newly recorded after an authoritative advance, excluding load history. */
@@ -190,9 +197,7 @@ export function useWorldSimulation(
   const frameRef = useRef<WorldFrameProjection | null>(null);
   const workerRef = useRef<SimulationWorkerPort | null>(null);
   const requestSequenceRef = useRef(0);
-  const pendingAdvanceRequestsRef = useRef(
-    new Map<string, ReturnType<typeof globalThis.setTimeout> | null>(),
-  );
+  const pendingAdvanceRequestsRef = useRef(new Map<string, PendingAdvanceRequest>());
   const failWorkerRef = useRef<((reason: Error) => void) | null>(null);
   const pendingSavesRef = useRef(new Map<string, PendingSaveRequest>());
   const pendingFocusCheckpointsRef = useRef(new Map<string, PendingFocusCheckpointRequest>());
@@ -282,8 +287,8 @@ export function useWorldSimulation(
       pendingLoads.clear();
       pendingOffline.clear();
       pendingCommands.clear();
-      for (const timeout of pendingAdvanceRequests.values()) {
-        if (timeout !== null) globalThis.clearTimeout(timeout);
+      for (const request of pendingAdvanceRequests.values()) {
+        if (request.timeout !== null) globalThis.clearTimeout(request.timeout);
       }
       pendingAdvanceRequests.clear();
     };
@@ -367,9 +372,15 @@ export function useWorldSimulation(
         case 'frameDelta': {
           try {
             const isExpectedAdvance = pendingAdvanceRequests.has(message.requestId);
-            const advanceTimeout = pendingAdvanceRequests.get(message.requestId);
-            if (advanceTimeout !== undefined && advanceTimeout !== null) {
-              globalThis.clearTimeout(advanceTimeout);
+            if (
+              isExpectedAdvance &&
+              pendingAdvanceRequests.keys().next().value !== message.requestId
+            ) {
+              throw new Error('The simulation worker sent an out-of-order advance response.');
+            }
+            const advanceRequest = pendingAdvanceRequests.get(message.requestId);
+            if (advanceRequest?.timeout !== null && advanceRequest?.timeout !== undefined) {
+              globalThis.clearTimeout(advanceRequest.timeout);
             }
             pendingAdvanceRequests.delete(message.requestId);
             const pendingOfflineRequest = pendingOffline.get(message.requestId);
@@ -529,16 +540,23 @@ export function useWorldSimulation(
   }, []);
 
   const advanceTicks = useCallback(
-    (ticks: number): boolean => {
+    (ticks: number, priority: SimulationAdvancePriority = 'ordinary'): boolean => {
       assertNonNegativeSafeInteger(ticks, 'Advance ticks');
       const worker = workerRef.current;
       if (worker === null) return false;
-      // Deltas are base-tick ordered. Never enqueue a second advance behind an unacknowledged
-      // one: focus time must remain available for an exact retry instead of outrunning Worker
-      // authority or growing an unbounded request/message queue.
-      if (pendingAdvanceRequestsRef.current.size > 0) return false;
+      // Routine deltas remain one-at-a-time. One explicit terminal transition may cross behind an
+      // ordinary timer checkpoint so Pause/Complete cannot be swallowed by Worker latency.
+      const pendingRequests = [...pendingAdvanceRequestsRef.current.values()];
+      const terminalPending = pendingRequests.some((request) => request.priority === 'terminal');
+      if (
+        terminalPending ||
+        pendingRequests.length >= 2 ||
+        (priority === 'ordinary' && pendingRequests.length > 0)
+      ) {
+        return false;
+      }
       const requestId = nextRequestId('advance');
-      pendingAdvanceRequestsRef.current.set(requestId, null);
+      pendingAdvanceRequestsRef.current.set(requestId, { priority, timeout: null });
       try {
         postWorkerMessage(
           worker,
@@ -563,7 +581,7 @@ export function useWorldSimulation(
             ),
           );
         }, ADVANCE_RESPONSE_TIMEOUT_MS);
-        pendingAdvanceRequestsRef.current.set(requestId, timeout);
+        pendingAdvanceRequestsRef.current.set(requestId, { priority, timeout });
       }
       return true;
     },

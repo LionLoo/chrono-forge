@@ -1,5 +1,6 @@
 import { act, renderHook, waitFor } from '@testing-library/react';
 
+import type { FocusSession } from '../../src/adapters/persistence';
 import {
   WORKER_PROTOCOL_VERSION,
   type UiToWorkerMessage,
@@ -15,6 +16,7 @@ import {
   createTestRuntimeActivityRecorder,
   type RuntimeActivitySample,
 } from '../../src/testing/runtime-activity';
+import { useFocusController } from '../../src/ui/useFocusController';
 import {
   ADVANCE_RESPONSE_TIMEOUT_MS,
   DEMO_WORLD_CONFIG,
@@ -47,7 +49,7 @@ function createRuntimeWorker(failingPostType?: UiToWorkerMessage['type']): Simul
 }
 
 function createControlledRuntimeWorker(): {
-  readonly flush: () => void;
+  readonly flush: (messageLimit?: number) => void;
   readonly port: SimulationWorkerPort;
 } {
   let active = true;
@@ -66,10 +68,12 @@ function createControlledRuntimeWorker(): {
     },
   };
   return {
-    flush() {
-      while (active && delivered.length > 0) {
+    flush(messageLimit = Number.POSITIVE_INFINITY) {
+      let deliveredCount = 0;
+      while (active && delivered.length > 0 && deliveredCount < messageLimit) {
         const message = delivered.shift();
         if (message !== undefined) port.onmessage?.(new MessageEvent('message', { data: message }));
+        deliveredCount += 1;
       }
     },
     port,
@@ -488,6 +492,63 @@ describe('world simulation UI gateway', () => {
     expect(result.current.frame?.tick).toBe(0);
   });
 
+  it('keeps pause responsive while the preceding focus advance is awaiting its frame', async () => {
+    let now = 0;
+    const activity = createTestRuntimeActivityRecorder(() => now);
+    const worker = createControlledRuntimeWorker();
+    const workerFactory = () => worker.port;
+    const { result } = renderHook(() => {
+      const simulation = useWorldSimulation(workerFactory, activity);
+      const focus = useFocusController({
+        clock: { now: () => now },
+        slotId: 'primary',
+        createSessionId: () => 'long-focus-session',
+        checkpointIntervalMs: 60_000,
+        onSimulationTicks: simulation.advanceTicks,
+      });
+      return { focus, simulation };
+    });
+
+    await act(async () => {
+      worker.flush();
+      await Promise.resolve();
+    });
+    expect(result.current.simulation.status).toBe('ready');
+
+    act(() =>
+      result.current.focus.start({ focusDurationMs: 60_000, simulationTicksPerFocusSecond: 10 }),
+    );
+    now = 1_000;
+    act(() => result.current.focus.checkpoint());
+    expect(result.current.focus.state).toMatchObject({
+      accumulatedFocusMs: 1_000,
+      phase: 'focus-running',
+      totalIssuedSimulationTicks: 10,
+    });
+    expect(result.current.simulation.frame?.tick).toBe(0);
+
+    now = 2_000;
+    act(() => result.current.focus.pause());
+    expect(result.current.focus.state).toMatchObject({
+      accumulatedFocusMs: 2_000,
+      phase: 'focus-paused',
+      totalIssuedSimulationTicks: 20,
+    });
+
+    await act(async () => {
+      worker.flush();
+      await Promise.resolve();
+    });
+    expect(result.current.simulation.frame?.tick).toBe(20);
+    expect(
+      activity
+        .samples()
+        .filter(
+          (sample) => sample.kind === 'worker-request' && sample.messageType === 'advanceTicks',
+        ),
+    ).toHaveLength(2);
+  });
+
   it('bounds unacknowledged advances and faults after the Worker response deadline', async () => {
     vi.useFakeTimers();
     try {
@@ -504,13 +565,15 @@ describe('world simulation UI gateway', () => {
 
       expect(result.current.advanceTicks(10)).toBe(true);
       expect(result.current.advanceTicks(20)).toBe(false);
+      expect(result.current.advanceTicks(20, 'terminal')).toBe(true);
+      expect(result.current.advanceTicks(30, 'terminal')).toBe(false);
       expect(
         activity
           .samples()
           .filter(
             (sample) => sample.kind === 'worker-request' && sample.messageType === 'advanceTicks',
           ),
-      ).toHaveLength(1);
+      ).toHaveLength(2);
 
       act(() => {
         vi.advanceTimersByTime(ADVANCE_RESPONSE_TIMEOUT_MS);
@@ -527,10 +590,227 @@ describe('world simulation UI gateway', () => {
           .filter(
             (sample) => sample.kind === 'worker-request' && sample.messageType === 'advanceTicks',
           ),
-      ).toHaveLength(1);
+      ).toHaveLength(2);
     } finally {
       vi.useRealTimers();
     }
+  });
+
+  it('keeps each queued advance on its original deadline during partial Worker progress', async () => {
+    vi.useFakeTimers();
+    try {
+      const worker = createControlledRuntimeWorker();
+      const workerFactory = () => worker.port;
+      const { result } = renderHook(() => useWorldSimulation(workerFactory));
+
+      await act(async () => {
+        worker.flush();
+        await Promise.resolve();
+      });
+      expect(result.current.status).toBe('ready');
+
+      expect(result.current.advanceTicks(10)).toBe(true);
+      act(() => {
+        vi.advanceTimersByTime(1_000);
+      });
+      expect(result.current.advanceTicks(20, 'terminal')).toBe(true);
+      act(() => {
+        vi.advanceTimersByTime(ADVANCE_RESPONSE_TIMEOUT_MS - 1_001);
+      });
+      await act(async () => {
+        worker.flush(1);
+        await Promise.resolve();
+      });
+      expect(result.current.frame?.tick).toBe(10);
+      expect(result.current.status).toBe('ready');
+
+      act(() => {
+        vi.advanceTimersByTime(1);
+      });
+      await act(async () => Promise.resolve());
+      expect(result.current.status).toBe('ready');
+
+      act(() => {
+        vi.advanceTimersByTime(999);
+      });
+      await act(async () => Promise.resolve());
+      expect(result.current.status).toBe('ready');
+
+      act(() => {
+        vi.advanceTimersByTime(1);
+      });
+      await act(async () => Promise.resolve());
+      expect(result.current.status).toBe('faulted');
+      expect(result.current.error).toMatch(/did not answer an advance request/i);
+      expect(result.current.frame?.tick).toBe(10);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('reserves one bounded advance slot for a responsive pause transition', async () => {
+    let now = 0;
+    const worker = createControlledRuntimeWorker();
+    const workerFactory = () => worker.port;
+    const { result } = renderHook(() => {
+      const simulation = useWorldSimulation(workerFactory);
+      const focus = useFocusController({
+        clock: { now: () => now },
+        slotId: 'primary',
+        createSessionId: () => 'boundary-focus-session',
+        checkpointIntervalMs: 60_000,
+        onSimulationTicks: simulation.advanceTicks,
+      });
+      return { focus, simulation };
+    });
+
+    await act(async () => {
+      worker.flush();
+      await Promise.resolve();
+    });
+    act(() =>
+      result.current.focus.start({ focusDurationMs: 60_000, simulationTicksPerFocusSecond: 10 }),
+    );
+    now = 1_000;
+    act(() => result.current.focus.checkpoint());
+    now = 2_000;
+    act(() => result.current.focus.checkpoint());
+    expect(result.current.focus.state.accumulatedFocusMs).toBe(1_000);
+
+    now = 3_000;
+    act(() => result.current.focus.pause());
+    expect(result.current.focus.state).toMatchObject({
+      accumulatedFocusMs: 3_000,
+      phase: 'focus-paused',
+      totalIssuedSimulationTicks: 30,
+    });
+    expect(result.current.simulation.advanceTicks(10)).toBe(false);
+
+    await act(async () => {
+      worker.flush();
+      await Promise.resolve();
+    });
+    expect(result.current.simulation.frame?.tick).toBe(30);
+  });
+
+  it('never admits ordinary work behind a pending terminal transition', async () => {
+    const worker = createControlledRuntimeWorker();
+    const workerFactory = () => worker.port;
+    const { result } = renderHook(() => useWorldSimulation(workerFactory));
+
+    await act(async () => {
+      worker.flush();
+      await Promise.resolve();
+    });
+    expect(result.current.advanceTicks(20, 'terminal')).toBe(true);
+    expect(result.current.advanceTicks(10)).toBe(false);
+    expect(result.current.advanceTicks(10, 'terminal')).toBe(false);
+
+    await act(async () => {
+      worker.flush();
+      await Promise.resolve();
+    });
+    expect(result.current.frame?.tick).toBe(20);
+  });
+
+  it('admits explicit completion behind an outstanding ordinary checkpoint', async () => {
+    let now = 0;
+    const sessions: FocusSession[] = [];
+    const worker = createControlledRuntimeWorker();
+    const workerFactory = () => worker.port;
+    const { result } = renderHook(() => {
+      const simulation = useWorldSimulation(workerFactory);
+      const focus = useFocusController({
+        clock: { now: () => now },
+        slotId: 'primary',
+        createSessionId: () => 'explicit-completion-session',
+        checkpointIntervalMs: 60_000,
+        onSessionState: (session) => sessions.push(session),
+        onSimulationTicks: simulation.advanceTicks,
+      });
+      return { focus, simulation };
+    });
+
+    await act(async () => {
+      worker.flush();
+      await Promise.resolve();
+    });
+    act(() =>
+      result.current.focus.start({ focusDurationMs: 60_000, simulationTicksPerFocusSecond: 10 }),
+    );
+    now = 1_000;
+    act(() => result.current.focus.checkpoint());
+    now = 3_000;
+    act(() => result.current.focus.complete());
+
+    expect(result.current.focus.state).toMatchObject({
+      accumulatedFocusMs: 3_000,
+      phase: 'focus-completed',
+      totalIssuedSimulationTicks: 30,
+    });
+    expect(sessions.at(-1)).toMatchObject({
+      focusedMs: 3_000,
+      issuedSimulationTicks: 30,
+      status: 'completed',
+    });
+    await act(async () => {
+      worker.flush();
+      await Promise.resolve();
+    });
+    expect(result.current.simulation.frame?.tick).toBe(30);
+  });
+
+  it('admits natural focus completion into a configured break behind ordinary work', async () => {
+    let now = 0;
+    const sessions: FocusSession[] = [];
+    const worker = createControlledRuntimeWorker();
+    const workerFactory = () => worker.port;
+    const { result } = renderHook(() => {
+      const simulation = useWorldSimulation(workerFactory);
+      const focus = useFocusController({
+        clock: { now: () => now },
+        slotId: 'primary',
+        createSessionId: () => 'natural-completion-session',
+        checkpointIntervalMs: 60_000,
+        onSessionState: (session) => sessions.push(session),
+        onSimulationTicks: simulation.advanceTicks,
+      });
+      return { focus, simulation };
+    });
+
+    await act(async () => {
+      worker.flush();
+      await Promise.resolve();
+    });
+    act(() =>
+      result.current.focus.start({
+        breakDurationMs: 5_000,
+        focusDurationMs: 2_000,
+        simulationTicksPerFocusSecond: 10,
+      }),
+    );
+    now = 1_000;
+    act(() => result.current.focus.checkpoint());
+    now = 2_500;
+    act(() => result.current.focus.checkpoint());
+
+    expect(result.current.focus.state).toMatchObject({
+      accumulatedBreakMs: 500,
+      accumulatedFocusMs: 2_000,
+      phase: 'break-running',
+      totalIssuedSimulationTicks: 20,
+    });
+    expect(sessions.at(-1)).toMatchObject({
+      breakMs: 500,
+      focusedMs: 2_000,
+      issuedSimulationTicks: 20,
+      status: 'active',
+    });
+    await act(async () => {
+      worker.flush();
+      await Promise.resolve();
+    });
+    expect(result.current.simulation.frame?.tick).toBe(20);
   });
 
   it('retries a failed bootstrap but cannot replace an established authoritative frame', async () => {

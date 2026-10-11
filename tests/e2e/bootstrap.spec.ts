@@ -146,6 +146,99 @@ test('production frontend renders a Worker-owned autonomous settlement', async (
   await expect(page.getByText('Shelter 1 was planned.', { exact: true }).first()).toBeVisible();
 });
 
+test('long focus controls remain responsive while authoritative Worker requests are delayed', async ({
+  page,
+}) => {
+  await page.addInitScript(() => {
+    const NativeWorker = globalThis.Worker;
+    const heldAdvanceRequests: (() => void)[] = [];
+    let holdAdvanceRequests = true;
+
+    globalThis.Worker = new Proxy(NativeWorker, {
+      construct(Target, argumentsList) {
+        const worker = Reflect.construct(Target, argumentsList) as Worker;
+        const nativePostMessage = worker.postMessage.bind(worker);
+        Object.defineProperty(worker, 'postMessage', {
+          configurable: true,
+          value: (message: unknown) => {
+            if (
+              holdAdvanceRequests &&
+              typeof message === 'object' &&
+              message !== null &&
+              'type' in message &&
+              message.type === 'advanceTicks'
+            ) {
+              heldAdvanceRequests.push(() => nativePostMessage(message));
+              return;
+            }
+            nativePostMessage(message);
+          },
+        });
+        return worker;
+      },
+    });
+
+    Object.defineProperties(globalThis, {
+      __chronoForgeHeldAdvanceRequestCount: {
+        configurable: true,
+        get: () => heldAdvanceRequests.length,
+      },
+      __chronoForgeReleaseHeldAdvanceRequests: {
+        configurable: true,
+        value: () => {
+          holdAdvanceRequests = false;
+          for (const release of heldAdvanceRequests.splice(0)) {
+            release();
+          }
+        },
+      },
+    });
+  });
+  await page.clock.install({ time: new Date('2026-09-15T12:00:00Z') });
+  await page.goto(origin);
+  await expect(page.locator('.simulation-status')).toContainText('Worker projection ready');
+
+  await page.getByRole('button', { name: 'Start focus' }).click();
+  await page.clock.fastForward(1_000);
+  await expect
+    .poll(() =>
+      page.evaluate(
+        () =>
+          (
+            globalThis as typeof globalThis & {
+              __chronoForgeHeldAdvanceRequestCount?: number;
+            }
+          ).__chronoForgeHeldAdvanceRequestCount ?? 0,
+      ),
+    )
+    .toBeGreaterThan(0);
+
+  await page.clock.fastForward(1_000);
+  const pause = page.getByRole('button', { name: 'Pause' });
+  await pause.focus();
+  await page.keyboard.press('Enter');
+  await expect(page.getByText('focus paused', { exact: true })).toBeVisible();
+  const pausedTimer = await page.getByRole('timer', { name: 'Focus time remaining' }).innerText();
+
+  const zoom = page.getByRole('button', { name: 'Zoom world in' });
+  await zoom.click();
+  await expect(page.getByLabel('Camera position')).toContainText('1.80×');
+  await page.clock.fastForward(5_000);
+  await expect(page.getByRole('timer', { name: 'Focus time remaining' })).toHaveText(pausedTimer);
+
+  await page.evaluate(() => {
+    (
+      globalThis as typeof globalThis & {
+        __chronoForgeReleaseHeldAdvanceRequests?: () => void;
+      }
+    ).__chronoForgeReleaseHeldAdvanceRequests?.();
+  });
+  const logicalTick = page.locator('.world-metrics div').filter({ hasText: 'Logical tick' });
+  await expect
+    .poll(async () => Number(await logicalTick.locator('dd').textContent()))
+    .toBeGreaterThanOrEqual(20);
+});
+
 test('society controls remain readable with reduced motion and 200% text', async ({ page }) => {
   await page.emulateMedia({ reducedMotion: 'reduce' });
   await page.goto(origin);
