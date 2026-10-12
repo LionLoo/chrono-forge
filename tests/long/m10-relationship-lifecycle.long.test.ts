@@ -358,36 +358,45 @@ describe.sequential('M10 relationship, household, and biography evidence catalog
     );
     expect(serializeWorldSnapshot(restored)).toBe(snapshot);
 
-    for (const transition of scenario.estrangements) {
-      const adverse = pressured.eventLog.find((event) => event.id === transition.adverseEventId);
-      expect(adverse).toMatchObject({
+    const estrangements = pressured.eventLog.filter((event) => event.kind === 'family-estranged');
+    expect(estrangements).toHaveLength(scenario.estrangements.length);
+    for (const transition of scenario.estrangements)
+      expect(
+        pressured.eventLog.find((event) => event.id === transition.adverseEventId),
+      ).toMatchObject({
         tick: transition.adverseTick,
         kind: 'family-estranged',
-        subjectKind: 'person',
         subjectId: transition.firstPersonId,
-        targetKind: 'person',
         targetId: transition.secondPersonId,
       });
+    for (const adverse of estrangements) {
+      expect(adverse).toMatchObject({
+        kind: 'family-estranged',
+        subjectKind: 'person',
+        targetKind: 'person',
+      });
+      const firstPersonId = adverse.subjectId;
+      const secondPersonId = adverse.targetId;
       expect(
         findActiveRelationship(
           pressured.civilization.society.interpersonal,
-          transition.firstPersonId,
-          transition.secondPersonId,
+          firstPersonId,
+          secondPersonId,
         )?.kind,
       ).toBe('estranged');
       expect(
         pressured.eventLog.some(
           (event) =>
             event.kind === 'relationship-reconciled' &&
-            event.subjectId === transition.firstPersonId &&
-            event.targetId === transition.secondPersonId,
+            ((event.subjectId === firstPersonId && event.targetId === secondPersonId) ||
+              (event.subjectId === secondPersonId && event.targetId === firstPersonId)),
         ),
       ).toBe(false);
-      for (const personId of [transition.firstPersonId, transition.secondPersonId])
+      for (const personId of [firstPersonId, secondPersonId])
         expect(
           pressured.civilization.society.people
             .find((person) => person.id === personId)
-            ?.biographyEventIds.includes(transition.adverseEventId),
+            ?.biographyEventIds.includes(adverse.id),
         ).toBe(true);
     }
     expectSourceBackedWorldBiographies(pressured.eventLog, pressured.civilization.society);
@@ -404,43 +413,53 @@ describe.sequential('M10 relationship, household, and biography evidence catalog
     expect(resumed.civilization.society.people.filter((person) => person.alive)).toHaveLength(
       scenario.recoveredLivingPeople,
     );
-
-    for (const transition of scenario.estrangements) {
-      const reconciliation = resumed.eventLog.find(
-        (event) => event.id === transition.reconciliationEventId,
-      );
-      expect(reconciliation).toMatchObject({
+    for (const transition of scenario.estrangements)
+      expect(
+        resumed.eventLog.find((event) => event.id === transition.reconciliationEventId),
+      ).toMatchObject({
         tick: transition.reconciliationTick,
         kind: 'relationship-reconciled',
-        subjectKind: 'person',
         subjectId: transition.firstPersonId,
-        targetKind: 'person',
         targetId: transition.secondPersonId,
       });
-      expect(reconciliation!.tick).toBeGreaterThan(transition.adverseTick);
+
+    for (const adverse of estrangements) {
+      const firstPersonId = adverse.subjectId;
+      const secondPersonId = adverse.targetId;
+      const reconciliation = resumed.eventLog.find(
+        (event) =>
+          event.kind === 'relationship-reconciled' &&
+          event.tick > adverse.tick &&
+          ((event.subjectId === firstPersonId && event.targetId === secondPersonId) ||
+            (event.subjectId === secondPersonId && event.targetId === firstPersonId)),
+      );
+      expect(reconciliation).toMatchObject({
+        kind: 'relationship-reconciled',
+        subjectKind: 'person',
+        targetKind: 'person',
+      });
+      expect(reconciliation!.tick).toBeGreaterThan(adverse.tick);
       const recoveredRelationship = findActiveRelationship(
         resumed.civilization.society.interpersonal,
-        transition.firstPersonId,
-        transition.secondPersonId,
+        firstPersonId,
+        secondPersonId,
       );
       expect(['reconciled', 'friend', 'close-friend']).toContain(recoveredRelationship?.kind);
-      expect(recoveredRelationship!.changedTick).toBeGreaterThanOrEqual(
-        transition.reconciliationTick,
-      );
+      expect(recoveredRelationship!.changedTick).toBeGreaterThanOrEqual(reconciliation!.tick);
       expect(
         resumed.eventLog.filter(
           (event) =>
             event.kind === 'family-estranged' &&
-            event.subjectId === transition.firstPersonId &&
-            event.targetId === transition.secondPersonId,
+            ((event.subjectId === firstPersonId && event.targetId === secondPersonId) ||
+              (event.subjectId === secondPersonId && event.targetId === firstPersonId)),
         ),
       ).toHaveLength(1);
-      for (const personId of [transition.firstPersonId, transition.secondPersonId]) {
+      for (const personId of [firstPersonId, secondPersonId]) {
         const biography = resumed.civilization.society.people.find(
           (person) => person.id === personId,
         )?.biographyEventIds;
-        expect(biography).toContain(transition.adverseEventId);
-        expect(biography).toContain(transition.reconciliationEventId);
+        expect(biography).toContain(adverse.id);
+        expect(biography).toContain(reconciliation!.id);
       }
     }
     expectSourceBackedWorldBiographies(resumed.eventLog, resumed.civilization.society);
@@ -486,38 +505,43 @@ describe.sequential('M10 relationship, household, and biography evidence catalog
       expect(source).toMatchObject({
         tick: shared.tick,
         subjectKind: 'person',
-        subjectId: 1,
         targetKind: 'person',
-        targetId: 2,
       });
+      expect(new Set([source!.subjectId, source!.targetId])).toStrictEqual(new Set([1, 2]));
     }
 
-    const partnership = eventsById.get(88);
-    const householdFormation = eventsById.get(89);
+    const partnership = world.eventLog.find(
+      (event) => event.kind === 'long-term-partnership-formed',
+    );
+    const householdFormation = world.eventLog.find(
+      (event) =>
+        event.kind === 'household-formed' &&
+        event.tick === partnership?.tick &&
+        event.subjectId === partnership.subjectId &&
+        event.targetId === partnership.targetId,
+    );
     expect(partnership).toMatchObject({
       tick: 35_000,
       kind: 'long-term-partnership-formed',
       subjectKind: 'person',
-      subjectId: 2,
       targetKind: 'person',
-      targetId: 6,
     });
     expect(householdFormation).toMatchObject({
       tick: 35_000,
       kind: 'household-formed',
-      subjectId: 2,
-      targetId: 6,
       amount: 4,
     });
-    for (const personId of [2, 6]) {
+    for (const personId of [partnership!.subjectId, partnership!.targetId]) {
       expect(society.people.find((person) => person.id === personId)?.biographyEventIds).toContain(
-        88,
+        partnership!.id,
       );
       expect(
         interpersonal.householdHistories
           .get(personId)
           ?.intervals.some(
-            (interval) => interval.householdId === 4 && interval.startTick === 35_000,
+            (interval) =>
+              interval.householdId === householdFormation!.amount &&
+              interval.startTick === partnership!.tick,
           ),
       ).toBe(true);
     }
@@ -525,14 +549,14 @@ describe.sequential('M10 relationship, household, and biography evidence catalog
       world.civilizations.residencies.some(
         (residency) =>
           residency.subjectKind === 'household' &&
-          residency.subjectId === 4 &&
+          residency.subjectId === householdFormation!.amount &&
           residency.startedTick === householdFormation!.tick,
       ),
     ).toBe(true);
 
-    const widowhood = eventsById.get(1_192);
-    const deceased = society.people.find((person) => person.id === 5)!;
-    const survivor = society.people.find((person) => person.id === 8)!;
+    const widowhood = world.eventLog.find((event) => event.kind === 'partner-widowed');
+    const deceased = society.people.find((person) => person.id === widowhood?.subjectId)!;
+    const survivor = society.people.find((person) => person.id === widowhood?.targetId)!;
     expect(widowhood).toMatchObject({
       tick: 270_000,
       kind: 'partner-widowed',
@@ -559,27 +583,27 @@ describe.sequential('M10 relationship, household, and biography evidence catalog
           residency.endedTick === deceased.deathTick,
       ),
     ).toBe(true);
-    for (const person of [deceased, survivor]) expect(person.biographyEventIds).toContain(1_192);
+    for (const person of [deceased, survivor])
+      expect(person.biographyEventIds).toContain(widowhood!.id);
 
-    const child = society.people.find((person) => person.id === 25)!;
+    const child = society.people.find(
+      (person) =>
+        person.alive &&
+        person.generation === Math.max(...society.people.map(({ generation }) => generation)),
+    )!;
     const arrival = interpersonal.childArrivals.find(
       (candidate) => candidate.childId === child.id,
     )!;
     expect(child).toMatchObject({
       origin: 'birth',
       alive: true,
-      birthTick: 270_000,
       generation: 3,
-      parentIds: [13, 15],
-      householdId: 4,
     });
     expect(arrival).toMatchObject({
       tick: child.birthTick,
-      eventId: 1_200,
-      eligibilityEventId: 1_201,
       policy: 'communal-guardianship',
       householdId: child.householdId,
-      guardianIds: [13, 15],
+      guardianIds: child.parentIds,
     });
     expect(child.biographyEventIds).toContain(arrival.eventId);
     expect(

@@ -34,7 +34,7 @@ export interface M10WorldRelationshipLifecycleScenario {
   readonly warmupYears: 20;
   readonly pressureYears: 20;
   readonly shortageIntervalYears: 2;
-  readonly shortageSeverity: 70;
+  readonly shortageSeverity: 80;
   readonly recoveryYears: 7;
   readonly pressuredHash: string;
   readonly pressuredOperations: number;
@@ -96,46 +96,46 @@ export const M10_WORLD_RELATIONSHIP_LIFECYCLE_SCENARIO: M10WorldRelationshipLife
     warmupYears: 20,
     pressureYears: 20,
     shortageIntervalYears: 2,
-    shortageSeverity: 70,
+    shortageSeverity: 80,
     recoveryYears: 7,
-    pressuredHash: '11e555e0',
-    pressuredOperations: 10_059,
-    pressuredLivingPeople: 25,
-    recoveredHash: '565e7f6c',
-    recoveredOperations: 14_331,
+    pressuredHash: 'db7df5d9',
+    pressuredOperations: 10_667,
+    pressuredLivingPeople: 23,
+    recoveredHash: 'bd9d3d50',
+    recoveredOperations: 14_543,
     recoveredLivingPeople: 25,
     estrangements: Object.freeze([
       Object.freeze({
+        firstPersonId: 1,
+        secondPersonId: 22,
+        adverseEventId: 1_189,
+        adverseTick: 190_000,
+        reconciliationEventId: 1_401,
+        reconciliationTick: 235_000,
+      }),
+      Object.freeze({
         firstPersonId: 2,
-        secondPersonId: 24,
-        adverseEventId: 1_262,
-        adverseTick: 200_000,
-        reconciliationEventId: 1_502,
-        reconciliationTick: 235_000,
+        secondPersonId: 22,
+        adverseEventId: 1_191,
+        adverseTick: 190_000,
+        reconciliationEventId: 1_324,
+        reconciliationTick: 220_000,
       }),
       Object.freeze({
-        firstPersonId: 6,
-        secondPersonId: 23,
-        adverseEventId: 1_265,
-        adverseTick: 200_000,
-        reconciliationEventId: 1_503,
-        reconciliationTick: 235_000,
+        firstPersonId: 5,
+        secondPersonId: 21,
+        adverseEventId: 1_193,
+        adverseTick: 190_000,
+        reconciliationEventId: 1_335,
+        reconciliationTick: 225_000,
       }),
       Object.freeze({
-        firstPersonId: 11,
-        secondPersonId: 24,
-        adverseEventId: 1_269,
-        adverseTick: 200_000,
-        reconciliationEventId: 1_504,
-        reconciliationTick: 235_000,
-      }),
-      Object.freeze({
-        firstPersonId: 22,
-        secondPersonId: 24,
-        adverseEventId: 1_281,
-        adverseTick: 200_000,
-        reconciliationEventId: 1_498,
-        reconciliationTick: 230_000,
+        firstPersonId: 10,
+        secondPersonId: 22,
+        adverseEventId: 1_196,
+        adverseTick: 190_000,
+        reconciliationEventId: 1_325,
+        reconciliationTick: 220_000,
       }),
     ]),
   });

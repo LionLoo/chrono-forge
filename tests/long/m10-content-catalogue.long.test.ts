@@ -175,6 +175,7 @@ describe.sequential('M10 integrated 25-seed content-hardening catalogue', () => 
     for (const requiredKind of [
       'shelter-operational',
       'local-exchange',
+      'knowledge-lost',
       'person-born',
       'person-died',
       'friendship-formed',

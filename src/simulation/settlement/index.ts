@@ -29,6 +29,8 @@ export const SETTLEMENT_PATH_CACHE_CHUNK_SIZE = 32;
 export const MAX_AGENT_PLAN_STEPS = 2;
 export const MAX_AGENT_ROUTE_LENGTH = SETTLEMENT_PATH_EXPANSION_QUOTA + 1;
 
+const RESOURCE_TARGET_RESERVATION_PENALTY = 512;
+
 export type AgentAction =
   | 'idle'
   | 'forage'
@@ -465,6 +467,49 @@ interface DecisionCandidate {
   readonly utility: number;
 }
 
+interface DecisionReservations {
+  readonly assignments: Map<string, number>;
+}
+
+function createDecisionReservations(): DecisionReservations {
+  return {
+    assignments: new Map(),
+  };
+}
+
+function assignmentKey(
+  sourceTileIndex: number,
+  action: AgentAction,
+  targetTileIndex: number,
+): string {
+  return `${sourceTileIndex}:${action}:${targetTileIndex}`;
+}
+
+function reservationCount(
+  reservations: DecisionReservations,
+  sourceTileIndex: number,
+  action: AgentAction,
+  targetTileIndex: number,
+): number {
+  return reservations.assignments.get(assignmentKey(sourceTileIndex, action, targetTileIndex)) ?? 0;
+}
+
+function reservePlanStep(
+  reservations: DecisionReservations,
+  sourceTileIndex: number,
+  step: AgentPlanStep,
+): void {
+  const key = assignmentKey(sourceTileIndex, step.action, step.targetTileIndex);
+  reservations.assignments.set(key, (reservations.assignments.get(key) ?? 0) + 1);
+}
+
+function targetPreference(agentId: number, action: AgentAction, tileIndex: number): number {
+  let value = Math.imul(agentId + action.length * 131, 0x45d9f3b);
+  value ^= Math.imul(tileIndex + 1, 0x27d4eb2d);
+  value ^= value >>> 16;
+  return value & 15;
+}
+
 function nearbyTiles(center: number, terrain: SettlementTerrain): readonly number[] {
   const x = center % terrain.width;
   const y = Math.trunc(center / terrain.width);
@@ -494,26 +539,41 @@ function bestResourceTile(
   civilization: CivilizationState,
   terrain: SettlementTerrain,
   kind: Exclude<CarriedResource, 'none'>,
+  action: Extract<AgentAction, 'collect-water' | 'forage' | 'gather-stone' | 'gather-timber'>,
+  reservations: DecisionReservations,
 ): readonly [number, number] {
   const candidates = nearbyTiles(agent.tileIndex, terrain);
+  const resourceAt = (tileIndex: number): number =>
+    kind === 'water'
+      ? (terrain.freshWater[tileIndex] ?? 0)
+      : available(terrain, civilization.resourceDepletion, tileIndex, kind);
+  const viableCandidates = candidates.filter((tileIndex) => resourceAt(tileIndex) > 0);
+  const consideredCandidates = viableCandidates.length > 0 ? viableCandidates : candidates;
   let bestTile = agent.tileIndex;
-  let bestScore = Number.MIN_SAFE_INTEGER;
-  for (const tileIndex of candidates) {
-    const resource =
-      kind === 'water'
-        ? (terrain.freshWater[tileIndex] ?? 0)
-        : available(terrain, civilization.resourceDepletion, tileIndex, kind);
-    const score =
+  let bestSelectionScore = Number.MIN_SAFE_INTEGER;
+  let bestUtility = Number.MIN_SAFE_INTEGER;
+  for (const tileIndex of consideredCandidates) {
+    const resource = resourceAt(tileIndex);
+    const utility =
       resource * 4 +
       (terrain.habitability[tileIndex] ?? 0) -
       (terrain.hazard[tileIndex] ?? 0) * 2 -
       distance(agent.tileIndex, tileIndex, terrain.width) * 8;
-    if (score > bestScore || (score === bestScore && tileIndex < bestTile)) {
+    const selectionScore =
+      utility -
+      reservationCount(reservations, agent.tileIndex, action, tileIndex) *
+        RESOURCE_TARGET_RESERVATION_PENALTY +
+      targetPreference(agent.id, action, tileIndex);
+    if (
+      selectionScore > bestSelectionScore ||
+      (selectionScore === bestSelectionScore && tileIndex < bestTile)
+    ) {
       bestTile = tileIndex;
-      bestScore = score;
+      bestSelectionScore = selectionScore;
+      bestUtility = utility;
     }
   }
-  return [bestTile, bestScore];
+  return [bestTile, bestUtility];
 }
 
 function socialContext(agent: SettlementAgent, society: SocietyState): number {
@@ -536,6 +596,7 @@ function selectDecision(
   civilization: CivilizationState,
   terrain: SettlementTerrain,
   rng: Xoshiro128StarStar,
+  reservations: DecisionReservations,
 ): DecisionCandidate {
   if (agent.carryingAmount > 0) {
     return {
@@ -546,10 +607,38 @@ function selectDecision(
       utility: 1_000_000,
     };
   }
-  const [foodTile, foodScore] = bestResourceTile(agent, civilization, terrain, 'food');
-  const [waterTile, waterScore] = bestResourceTile(agent, civilization, terrain, 'water');
-  const [timberTile, timberScore] = bestResourceTile(agent, civilization, terrain, 'timber');
-  const [stoneTile, stoneScore] = bestResourceTile(agent, civilization, terrain, 'stone');
+  const [foodTile, foodScore] = bestResourceTile(
+    agent,
+    civilization,
+    terrain,
+    'food',
+    'forage',
+    reservations,
+  );
+  const [waterTile, waterScore] = bestResourceTile(
+    agent,
+    civilization,
+    terrain,
+    'water',
+    'collect-water',
+    reservations,
+  );
+  const [timberTile, timberScore] = bestResourceTile(
+    agent,
+    civilization,
+    terrain,
+    'timber',
+    'gather-timber',
+    reservations,
+  );
+  const [stoneTile, stoneScore] = bestResourceTile(
+    agent,
+    civilization,
+    terrain,
+    'stone',
+    'gather-stone',
+    reservations,
+  );
   const structure = civilization.structures.find(
     (candidate) =>
       candidate.status === 'planned' ||
@@ -1319,6 +1408,15 @@ function advanceCivilizationInternal(
     structures: lifecycle,
   });
 
+  const decisionReservations = createDecisionReservations();
+  for (const agent of agents) {
+    if (!agent.alive) continue;
+    const activeStep = agent.plan[agent.planIndex];
+    if (activeStep !== undefined && activePlanStepIsValid(activeStep, lifecycle)) {
+      reservePlanStep(decisionReservations, agent.tileIndex, activeStep);
+    }
+  }
+
   agents = agents.map((agent) => {
     if (!agent.alive) return agent;
     const rng = new Xoshiro128StarStar(agent.rng);
@@ -1336,7 +1434,7 @@ function advanceCivilizationInternal(
     const existingStep = decidingAgent.plan[decidingAgent.planIndex];
     const decision =
       existingStep === undefined
-        ? selectDecision(decidingAgent, decisionCivilization, terrain, rng)
+        ? selectDecision(decidingAgent, decisionCivilization, terrain, rng, decisionReservations)
         : undefined;
     const plan =
       existingStep === undefined
@@ -1344,6 +1442,8 @@ function advanceCivilizationInternal(
         : decidingAgent.plan;
     const planIndex = existingStep === undefined ? 0 : decidingAgent.planIndex;
     const step = plan[planIndex]!;
+    if (existingStep === undefined)
+      reservePlanStep(decisionReservations, decidingAgent.tileIndex, step);
     const routeComplete =
       decidingAgent.route.length === 0 ||
       decidingAgent.routeCursor >= decidingAgent.route.length - 1 ||

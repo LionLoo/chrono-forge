@@ -9,6 +9,15 @@ export interface M5Scenario {
   readonly expectedHashes: readonly [string, string, string];
 }
 
+export const M5_KNOWLEDGE_LOSS_SCENARIO = Object.freeze({
+  name: 'iron-pollinators-loss-witness',
+  seed: Object.freeze([337, 347, 349, 353] as const),
+  yearTicks: 5_000,
+  horizonYears: 60,
+  expectedHash: '8dddaa19',
+  expectedLossTick: 245_000,
+});
+
 /**
  * Stable accelerated worlds for the M5 semantic and eventual golden gates.
  * Hashes and operation totals are locked only after the observable behavior is
@@ -21,7 +30,7 @@ export const M5_SCENARIOS: readonly M5Scenario[] = Object.freeze([
     seed: Object.freeze([7, 11, 13, 17] as const),
     yearTicks: 5_000,
     checkpointYears: Object.freeze([5, 25, 60] as const),
-    expectedHashes: Object.freeze(['b1b31224', '06e506ef', '2182b552'] as const),
+    expectedHashes: Object.freeze(['7827fcb3', '3c0a752f', '6cb52cfb'] as const),
   }),
   Object.freeze({
     name: 'ore-council',
@@ -29,7 +38,7 @@ export const M5_SCENARIOS: readonly M5Scenario[] = Object.freeze([
     seed: Object.freeze([19, 23, 29, 31] as const),
     yearTicks: 5_000,
     checkpointYears: Object.freeze([5, 25, 60] as const),
-    expectedHashes: Object.freeze(['508eaa50', '9483c5c5', '1c5d4e12'] as const),
+    expectedHashes: Object.freeze(['96d98332', '3dbf876b', 'eb2b8873'] as const),
   }),
   Object.freeze({
     name: 'storm-kin',
@@ -37,7 +46,7 @@ export const M5_SCENARIOS: readonly M5Scenario[] = Object.freeze([
     seed: Object.freeze([37, 41, 43, 47] as const),
     yearTicks: 5_000,
     checkpointYears: Object.freeze([5, 25, 60] as const),
-    expectedHashes: Object.freeze(['6f7060df', 'c9b0bbf1', 'afcfa13d'] as const),
+    expectedHashes: Object.freeze(['896d1dc5', 'a787da6a', 'ec2ee45c'] as const),
   }),
   Object.freeze({
     name: 'renewed-observatory',
@@ -45,6 +54,6 @@ export const M5_SCENARIOS: readonly M5Scenario[] = Object.freeze([
     seed: Object.freeze([53, 59, 61, 67] as const),
     yearTicks: 5_000,
     checkpointYears: Object.freeze([5, 25, 60] as const),
-    expectedHashes: Object.freeze(['59cd9799', 'bdaee725', '31fdc103'] as const),
+    expectedHashes: Object.freeze(['efeec5c9', 'c191920e', '4151b92a'] as const),
   }),
 ]);
