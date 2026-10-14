@@ -441,7 +441,7 @@ describe('Pixi world projection', () => {
     } satisfies WorldMapProjection;
     const view = render(
       <WorldMapCanvas
-        camera={INITIAL_WORLD_CAMERA}
+        camera={{ ...INITIAL_WORLD_CAMERA, zoom: 1 }}
         onCameraChange={vi.fn()}
         overlay="terrain"
         projection={initial}
@@ -449,9 +449,12 @@ describe('Pixi world projection', () => {
     );
 
     await waitFor(() => expect(view.getByRole('application')).toBeVisible());
+    const agentGraphics = pixiMocks.graphics[5]!;
+    expect(agentGraphics.circle).toHaveBeenCalledTimes(agentCount);
+    expect(agentGraphics.moveTo).not.toHaveBeenCalled();
     view.rerender(
       <WorldMapCanvas
-        camera={INITIAL_WORLD_CAMERA}
+        camera={{ ...INITIAL_WORLD_CAMERA, zoom: 1 }}
         onCameraChange={vi.fn()}
         overlay="terrain"
         projection={advanced}
@@ -459,6 +462,8 @@ describe('Pixi world projection', () => {
     );
 
     expect(requestAnimationFrame).not.toHaveBeenCalled();
+    expect(agentGraphics.circle).toHaveBeenCalledTimes(agentCount * 2);
+    expect(agentGraphics.moveTo).not.toHaveBeenCalled();
     requestAnimationFrame.mockRestore();
   });
 

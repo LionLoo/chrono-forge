@@ -706,7 +706,13 @@ function FocusWorkspace({
           await alerts.notifyCompletion(settings).catch(() => undefined);
         }
       } catch (error) {
-        setOperationError(error instanceof Error ? error.message : 'Autosave failed.');
+        setOperationError(
+          error instanceof Error
+            ? error.message
+            : typeof error === 'string' && error.length > 0
+              ? error
+              : 'Autosave failed.',
+        );
         throw error;
       }
     },

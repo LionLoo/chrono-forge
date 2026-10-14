@@ -690,6 +690,8 @@ function drawAgents(
   now: number,
 ): void {
   graphics.clear();
+  const useDenseOverviewMarkers =
+    model.detailLevel === 'overview' && model.agents.length > MAX_INTERPOLATED_AGENT_COUNT;
   for (const agent of model.agents) {
     const motion = motions.get(agent.selectable.id);
     const [x, y] =
@@ -716,6 +718,19 @@ function drawAgents(
     const bodyBottom = centerY + height * 0.34;
     const healthOutline =
       agent.healthTier === 'sound' ? 0x17211c : agent.healthTier === 'worn' ? 0xe2ac55 : 0xd75d55;
+    if (useDenseOverviewMarkers) {
+      const markerRadius = agent.healthTier === 'sound' ? 0.9 : 1.15;
+      graphics
+        .circle(centerX, centerY, markerRadius)
+        .fill(agent.identity.clothingColor)
+        .stroke({ color: healthOutline, width: agent.healthTier === 'sound' ? 0.35 : 0.55 });
+      if (agent.activityVisual !== 'idle') {
+        graphics
+          .rect(centerX + direction * 0.95 - 0.22, centerY - 0.22, 0.44, 0.44)
+          .fill(agent.identity.accentColor);
+      }
+      continue;
+    }
     if (model.detailLevel !== 'overview') {
       graphics
         .ellipse(centerX, centerY + height * 0.58, halfWidth * 1.45, height * 0.12)

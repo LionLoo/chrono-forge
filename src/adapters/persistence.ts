@@ -308,7 +308,7 @@ export function createTauriPersistenceGateway(
     },
     async commitSaveSlot(slotId, name, snapshot) {
       const snapshotWorld = validateCommit(slotId, name, snapshot);
-      const loaded = parseSaveCommitReceipt(
+      const loaded = await parseSaveCommitReceipt(
         await invoke<unknown>('commit_save_slot', { slotId, name, snapshot }),
         { slotId, name, snapshot, world: snapshotWorld, focusSession: null },
       );
@@ -321,7 +321,7 @@ export function createTauriPersistenceGateway(
       if (workerAuthority !== undefined) {
         validateWorkerFocusCheckpoint(slotId, session, sourceEventIds, workerAuthority);
       }
-      const loaded = parseSaveCommitReceipt(
+      const loaded = await parseSaveCommitReceipt(
         await invoke<unknown>('commit_focus_checkpoint', { slotId, name, snapshot, session }),
         {
           slotId,
@@ -813,7 +813,7 @@ function parseLoadedSave(
   );
 }
 
-function parseSaveCommitReceipt(
+async function parseSaveCommitReceipt(
   value: unknown,
   expected: Readonly<{
     slotId: string;
@@ -822,7 +822,7 @@ function parseSaveCommitReceipt(
     world?: ReturnType<typeof deserializeWorldSnapshot>;
     focusSession: FocusSession | null;
   }>,
-): LoadedSave {
+): Promise<LoadedSave> {
   const record = expectRecord(value, 'save commit receipt');
   expectExactKeys(
     record,
@@ -840,7 +840,7 @@ function parseSaveCommitReceipt(
   if (slotId !== expected.slotId || name !== expected.name) {
     throw new TypeError('save commit receipt does not match its requested slot');
   }
-  validateChecksum(checksum, expected.snapshot);
+  await validateChecksumAsync(checksum, expected.snapshot);
   const loaded: LoadedSave = {
     slotId,
     name,
@@ -1259,6 +1259,22 @@ function validateSnapshot(value: string): ReturnType<typeof deserializeWorldSnap
 
 function validateChecksum(checksum: string, snapshot: string): void {
   if (!CHECKSUM_PATTERN.test(checksum) || checksum !== sha256Hex(snapshot)) {
+    throw new TypeError('save checksum does not match its snapshot');
+  }
+}
+
+async function validateChecksumAsync(checksum: string, snapshot: string): Promise<void> {
+  if (!CHECKSUM_PATTERN.test(checksum)) {
+    throw new TypeError('save checksum does not match its snapshot');
+  }
+  const subtle = globalThis.crypto?.subtle;
+  if (subtle === undefined) {
+    validateChecksum(checksum, snapshot);
+    return;
+  }
+  const digest = new Uint8Array(await subtle.digest('SHA-256', new TextEncoder().encode(snapshot)));
+  const actual = [...digest].map((byte) => byte.toString(16).padStart(2, '0')).join('');
+  if (checksum !== actual) {
     throw new TypeError('save checksum does not match its snapshot');
   }
 }

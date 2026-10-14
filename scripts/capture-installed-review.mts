@@ -11,6 +11,7 @@ import {
   stepWorld,
   type WorldState,
 } from '../src/simulation/world';
+import { waitForInstalledPlayerPage } from './installed-player-page';
 
 const endpoint = process.env.CHRONO_FORGE_CDP_URL ?? 'http://127.0.0.1:9333';
 const outputDirectory = resolve(
@@ -243,10 +244,9 @@ mkdirSync(outputDirectory, { recursive: true });
 const packages = reviewPackages();
 const browser = await chromium.connectOverCDP(endpoint);
 const context = browser.contexts()[0];
-const page = context
-  ?.pages()
-  .find((candidate) => candidate.url().startsWith('http://tauri.localhost'));
-if (page === undefined) throw new Error('No Chrono Forge WebView page was exposed over CDP.');
+const page = context === undefined ? undefined : await waitForInstalledPlayerPage(context);
+if (page === undefined)
+  throw new Error('No Chrono Forge player WebView page was exposed over CDP.');
 
 const observations: CaptureObservation[] = [];
 try {
