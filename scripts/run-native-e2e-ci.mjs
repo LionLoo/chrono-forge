@@ -146,7 +146,7 @@ export async function verifyNativeE2eDatabase({
            (SELECT COUNT(*) FROM focus_sessions) AS sessions`,
       )
       .get();
-    if (counts?.slots !== 3 || counts.generations !== 7 || counts.sessions !== 2) {
+    if (counts?.slots !== 3 || counts.generations !== 8 || counts.sessions !== 2) {
       throw new Error(`unexpected post-cleanup SQLite counts: ${JSON.stringify(counts)}`);
     }
     const settings = database.prepare('SELECT active_slot_id FROM app_settings').get();
@@ -164,10 +164,30 @@ export async function verifyNativeE2eDatabase({
     if (JSON.stringify(slots) !== JSON.stringify(expectedSlots)) {
       throw new Error(`unexpected post-cleanup save slots: ${JSON.stringify(slots)}`);
     }
+    const generations = database
+      .prepare(
+        `SELECT slot_id, generation, semantically_verified
+         FROM save_generations
+         ORDER BY slot_id ASC, generation ASC`,
+      )
+      .all();
+    const expectedGenerations = [
+      { slot_id: 'm9-contacted', generation: 1, semantically_verified: 1 },
+      { slot_id: 'm9-contacted', generation: 2, semantically_verified: 0 },
+      { slot_id: 'm9-mid-flight', generation: 1, semantically_verified: 1 },
+      { slot_id: 'm9-mid-flight', generation: 2, semantically_verified: 0 },
+      { slot_id: 'primary', generation: 1, semantically_verified: 1 },
+      { slot_id: 'primary', generation: 3, semantically_verified: 0 },
+      { slot_id: 'primary', generation: 4, semantically_verified: 0 },
+      { slot_id: 'primary', generation: 5, semantically_verified: 0 },
+    ];
+    if (JSON.stringify(generations) !== JSON.stringify(expectedGenerations)) {
+      throw new Error(`unexpected post-cleanup save generations: ${JSON.stringify(generations)}`);
+    }
     console.log(
-      `[native-e2e-integrity] integrity_check=ok foreign_key_check=ok slots=3 generations=7 sessions=2 database=${resolvedPath}`,
+      `[native-e2e-integrity] integrity_check=ok foreign_key_check=ok slots=3 generations=8 sessions=2 database=${resolvedPath}`,
     );
-    return Object.freeze({ databasePath: resolvedPath, generations: 7, sessions: 2, slots: 3 });
+    return Object.freeze({ databasePath: resolvedPath, generations: 8, sessions: 2, slots: 3 });
   } finally {
     database.close();
   }

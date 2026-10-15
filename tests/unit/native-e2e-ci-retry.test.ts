@@ -221,7 +221,11 @@ describe('native E2E SQLite integrity gate', () => {
     try {
       database.exec(`
         CREATE TABLE save_slots (slot_id TEXT PRIMARY KEY, head_generation INTEGER NOT NULL);
-        CREATE TABLE save_generations (slot_id TEXT NOT NULL, generation INTEGER NOT NULL);
+        CREATE TABLE save_generations (
+          slot_id TEXT NOT NULL,
+          generation INTEGER NOT NULL,
+          semantically_verified INTEGER NOT NULL
+        );
         CREATE TABLE focus_sessions (session_id TEXT PRIMARY KEY);
         CREATE TABLE app_settings (active_slot_id TEXT NOT NULL);
         INSERT INTO save_slots VALUES
@@ -229,13 +233,14 @@ describe('native E2E SQLite integrity gate', () => {
           ('m9-mid-flight', 2),
           ('primary', 5);
         INSERT INTO save_generations VALUES
-          ('m9-contacted', 1),
-          ('m9-contacted', 2),
-          ('m9-mid-flight', 1),
-          ('m9-mid-flight', 2),
-          ('primary', 3),
-          ('primary', 4),
-          ('primary', 5);
+          ('m9-contacted', 1, 1),
+          ('m9-contacted', 2, 0),
+          ('m9-mid-flight', 1, 1),
+          ('m9-mid-flight', 2, 0),
+          ('primary', 1, 1),
+          ('primary', 3, 0),
+          ('primary', 4, 0),
+          ('primary', 5, 0);
         INSERT INTO focus_sessions VALUES ('primary-session'), ('probe-session');
         INSERT INTO app_settings VALUES ('m9-contacted');
       `);
@@ -245,10 +250,24 @@ describe('native E2E SQLite integrity gate', () => {
     try {
       await expect(verifyNativeE2eDatabase({ databasePath })).resolves.toMatchObject({
         databasePath,
-        generations: 7,
+        generations: 8,
         sessions: 2,
         slots: 3,
       });
+
+      const changedDatabase = new DatabaseSync(databasePath);
+      try {
+        changedDatabase.exec(
+          `UPDATE save_generations
+           SET semantically_verified = 1
+           WHERE slot_id = 'primary' AND generation = 5`,
+        );
+      } finally {
+        changedDatabase.close();
+      }
+      await expect(verifyNativeE2eDatabase({ databasePath })).rejects.toThrow(
+        'unexpected post-cleanup save generations',
+      );
     } finally {
       rmSync(fixtureDirectory, { force: true, recursive: true });
     }

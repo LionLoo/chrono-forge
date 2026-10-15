@@ -32,7 +32,7 @@ export declare function nativeE2eDatabasePath(
 
 export interface NativeE2eDatabaseEvidence {
   readonly databasePath: string;
-  readonly generations: 7;
+  readonly generations: 8;
   readonly sessions: 2;
   readonly slots: 3;
 }
