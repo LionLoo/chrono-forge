@@ -37,11 +37,8 @@ import { DevelopmentPanel } from './ui/DevelopmentPanel';
 import { SocietyPanel } from './ui/SocietyPanel';
 import { SpacePanel } from './ui/SpacePanel';
 import type { FocusClock } from './ui/useFocusController';
-import {
-  DEMO_WORLD_SEED,
-  useWorldSimulation,
-  type SimulationWorkerFactory,
-} from './ui/useWorldSimulation';
+import { useWorldSimulation, type SimulationWorkerFactory } from './ui/useWorldSimulation';
+import { formatWorldSeed } from './ui/world-seed';
 
 const STRUCTURE_KIND_LABELS: Readonly<Record<number, string>> = Object.freeze({
   1: 'Shelter',
@@ -96,10 +93,6 @@ interface AppProps {
   readonly persistence?: RuntimePersistence;
   readonly soundscape?: GameSoundscape;
   readonly workerFactory?: SimulationWorkerFactory;
-}
-
-function seedLabel(): string {
-  return DEMO_WORLD_SEED.map((word) => word.toString(16).padStart(8, '0')).join('-');
 }
 
 function factualEventCopy(event: { readonly summary: string }): string {
@@ -1095,7 +1088,9 @@ export function App({ focusAlerts, focusClock, persistence, soundscape, workerFa
 
             <div className="seed-panel">
               <span>Visible 128-bit seed</span>
-              <code>{seedLabel()}</code>
+              <code>
+                {simulation.frame === null ? '—' : formatWorldSeed(simulation.frame.seed)}
+              </code>
             </div>
 
             <p className="milestone-note">

@@ -121,7 +121,7 @@ function createLoadFaultWorker(
 }
 
 function createRequestFaultWorker(
-  targetType: 'queueCommand' | 'requestSave',
+  targetType: 'queueCommand' | 'requestFreshWorldSnapshot' | 'requestSave',
 ): SimulationWorkerPort {
   let active = true;
   const runtime = createSimulationRuntime((message: WorkerToUiMessage) => {
@@ -1186,6 +1186,33 @@ describe('world simulation UI gateway', () => {
     ]);
   });
 
+  it('requests a fresh snapshot without replacing the active frame', async () => {
+    const { result } = renderHook(() => useWorldSimulation(createRuntimeWorker));
+    await waitFor(() => expect(result.current.status).toBe('ready'));
+
+    act(() => {
+      result.current.advanceTicks(25);
+    });
+    await waitFor(() => expect(result.current.frame?.tick).toBe(25));
+    const activeSeed = result.current.frame!.seed;
+
+    let freshSnapshot = '';
+    await act(async () => {
+      freshSnapshot = await result.current.requestFreshWorldSnapshot([11, 13, 17, 19], {
+        width: 10,
+        height: 6,
+        chunkSize: 2,
+      });
+    });
+
+    const fresh = deserializeWorldSnapshot(freshSnapshot);
+    expect(fresh.seed).toStrictEqual([11, 13, 17, 19]);
+    expect(fresh.tick).toBe(0);
+    expect(fresh.config).toMatchObject({ width: 10, height: 6, chunkSize: 2 });
+    expect(result.current.frame?.seed).toStrictEqual(activeSeed);
+    expect(result.current.frame?.tick).toBe(25);
+  });
+
   it('returns a focus checkpoint and snapshot from the same authoritative Worker state', async () => {
     const { result } = renderHook(() => useWorldSimulation(createRuntimeWorker));
     await waitFor(() => expect(result.current.status).toBe('ready'));
@@ -1278,6 +1305,23 @@ describe('world simulation UI gateway', () => {
     expect(result.current.status).toBe('faulted');
     expect(result.current.frame?.tick).toBe(0);
     await expect(result.current.requestSave()).rejects.toThrow('unavailable');
+  });
+
+  it('keeps a fresh-world generation fault request-scoped and leaves the active world ready', async () => {
+    const workerFactory = () => createRequestFaultWorker('requestFreshWorldSnapshot');
+    const { result } = renderHook(() => useWorldSimulation(workerFactory));
+    await waitFor(() => expect(result.current.status).toBe('ready'));
+
+    await act(async () => {
+      await expect(result.current.requestFreshWorldSnapshot([11, 13, 17, 19])).rejects.toThrow(
+        'Injected requestFreshWorldSnapshot failure',
+      );
+    });
+
+    expect(result.current.status).toBe('ready');
+    expect(result.current.error).toBeNull();
+    expect(result.current.frame?.tick).toBe(0);
+    await expect(result.current.requestSave()).resolves.toBeTypeOf('string');
   });
 
   it('keeps a command world-error request-scoped and leaves the Worker ready', async () => {

@@ -20,8 +20,14 @@ import {
   type FocusSessionReview,
 } from '../focus/session-review';
 import type { WorkerEvent } from '../protocol';
+import type { WorldSeed } from '../simulation/world';
 import { systemFocusClock, useFocusController, type FocusClock } from './useFocusController';
-import type { SimulationAdvancePriority, WorldSimulationView } from './useWorldSimulation';
+import {
+  DEMO_WORLD_CONFIG,
+  type SimulationAdvancePriority,
+  type WorldSimulationView,
+} from './useWorldSimulation';
+import { createRandomWorldSeed, formatWorldSeed, parseWorldSeed } from './world-seed';
 
 const PRIMARY_SLOT_ID = 'primary';
 const PRIMARY_SLOT_NAME = 'Founding world';
@@ -31,6 +37,7 @@ const MAX_OFFLINE_CATCH_UP_RATE = 1_000;
 interface FocusPersistencePanelProps {
   readonly alerts: FocusAlerts;
   readonly clock?: FocusClock;
+  readonly createWorldSeed?: () => WorldSeed;
   readonly onReducedEffectsChange?: (reduced: boolean) => void;
   readonly onRevisitTarget?: (target: FocusRevisitTarget) => void;
   readonly onSettingsChange?: (settings: AppSettings) => void;
@@ -54,6 +61,9 @@ interface WorkspaceData {
 
 type OperationEnqueuer = <Result>(operation: () => Promise<Result>) => Promise<Result>;
 type WorkspaceRefUpdater = (update: (current: WorkspaceData) => WorkspaceData) => void;
+
+const LIFECYCLE_OPERATIONS_BLOCKED_MESSAGE =
+  'World controls are frozen until Chrono Forge is reopened.';
 
 interface WorkspaceOperationError {
   readonly kind:
@@ -243,6 +253,7 @@ function workspaceNotice(workspace: WorkspaceData): string {
 export function FocusPersistencePanel({
   alerts,
   clock = systemFocusClock,
+  createWorldSeed = createRandomWorldSeed,
   onReducedEffectsChange,
   onRevisitTarget,
   onSettingsChange,
@@ -252,7 +263,10 @@ export function FocusPersistencePanel({
 }: FocusPersistencePanelProps) {
   const bootstrapPromiseRef = useRef<Promise<WorkspaceData> | null>(null);
   const currentWorkspaceRef = useRef<WorkspaceData | null>(null);
+  const lifecycleOperationsBlockedRef = useRef(false);
   const operationQueueRef = useRef<Promise<void>>(Promise.resolve());
+  const worldAuthorityTransitionsRef = useRef(0);
+  const exclusiveWorldAuthorityTransitionsRef = useRef(0);
   const [workspace, setWorkspace] = useState<WorkspaceData | null>(null);
   const [publishedExport, setPublishedExport] = useState<PublishedExport | null>(null);
   const [notice, setNotice] = useState('');
@@ -263,14 +277,64 @@ export function FocusPersistencePanel({
   const [recoveryError, setRecoveryError] = useState<string | null>(null);
   const [recoveringFreshWorld, setRecoveringFreshWorld] = useState(false);
   const [workspaceRevision, setWorkspaceRevision] = useState(0);
+  const [lifecycleOperationsBlocked, setLifecycleOperationsBlocked] = useState(false);
+  const [worldAuthorityTransitionPending, setWorldAuthorityTransitionPending] = useState(false);
+  const [exclusiveWorldAuthorityTransitionPending, setExclusiveWorldAuthorityTransitionPending] =
+    useState(false);
   const enqueue = useCallback<OperationEnqueuer>((operation) => {
-    const result = operationQueueRef.current.then(operation, operation);
+    const guardedOperation = (): ReturnType<typeof operation> => {
+      if (lifecycleOperationsBlockedRef.current) {
+        return Promise.reject(new Error(LIFECYCLE_OPERATIONS_BLOCKED_MESSAGE));
+      }
+      return operation();
+    };
+    const result = operationQueueRef.current.then(guardedOperation, guardedOperation);
     operationQueueRef.current = result.then(
       () => undefined,
       () => undefined,
     );
     return result;
   }, []);
+  const blockLifecycleOperations = useCallback((): void => {
+    lifecycleOperationsBlockedRef.current = true;
+    setLifecycleOperationsBlocked(true);
+  }, []);
+  const lifecycleOperationIsBlocked = useCallback(
+    (): boolean => lifecycleOperationsBlockedRef.current,
+    [],
+  );
+  const beginWorldAuthorityTransition = useCallback((exclusive = false): (() => void) => {
+    worldAuthorityTransitionsRef.current += 1;
+    setWorldAuthorityTransitionPending(true);
+    if (exclusive) {
+      exclusiveWorldAuthorityTransitionsRef.current += 1;
+      setExclusiveWorldAuthorityTransitionPending(true);
+    }
+    let released = false;
+    return () => {
+      if (released) return;
+      released = true;
+      worldAuthorityTransitionsRef.current = Math.max(0, worldAuthorityTransitionsRef.current - 1);
+      if (worldAuthorityTransitionsRef.current === 0) setWorldAuthorityTransitionPending(false);
+      if (exclusive) {
+        exclusiveWorldAuthorityTransitionsRef.current = Math.max(
+          0,
+          exclusiveWorldAuthorityTransitionsRef.current - 1,
+        );
+        if (exclusiveWorldAuthorityTransitionsRef.current === 0) {
+          setExclusiveWorldAuthorityTransitionPending(false);
+        }
+      }
+    };
+  }, []);
+  const worldAuthorityTransitionIsPending = useCallback(
+    (): boolean => worldAuthorityTransitionsRef.current > 0,
+    [],
+  );
+  const exclusiveWorldAuthorityTransitionIsPending = useCallback(
+    (): boolean => exclusiveWorldAuthorityTransitionsRef.current > 0,
+    [],
+  );
   const getCurrentWorkspace = useCallback(() => currentWorkspaceRef.current, []);
   const updateCurrentWorkspaceRef = useCallback<WorkspaceRefUpdater>((update) => {
     if (currentWorkspaceRef.current !== null) {
@@ -354,8 +418,12 @@ export function FocusPersistencePanel({
         runtime.gateway.listSaveSlots(),
       ]);
       const recoverySlot = freshRecoverySlot(slots);
-      const snapshot = await simulation.requestSave();
+      const snapshot = await simulation.requestFreshWorldSnapshot(
+        createWorldSeed(),
+        DEMO_WORLD_CONFIG,
+      );
       await runtime.gateway.commitSaveSlot(recoverySlot.slotId, recoverySlot.name, snapshot);
+      await simulation.loadSnapshot(snapshot);
       await runtime.gateway.saveSettings({ ...settings, activeSlotId: recoverySlot.slotId });
       const recoveredWorkspace = await loadWorkspace(clock, runtime, {
         events: simulation.events,
@@ -377,7 +445,7 @@ export function FocusPersistencePanel({
     } finally {
       setRecoveringFreshWorld(false);
     }
-  }, [clock, runtime, simulation]);
+  }, [clock, createWorldSeed, runtime, simulation]);
 
   if (bootstrapError !== null) {
     return (
@@ -410,9 +478,14 @@ export function FocusPersistencePanel({
   return (
     <FocusWorkspace
       alerts={alerts}
+      beginWorldAuthorityTransition={beginWorldAuthorityTransition}
+      blockLifecycleOperations={blockLifecycleOperations}
       clearWorkspaceOperationError={clearWorkspaceOperationError}
       clock={clock}
+      createWorldSeed={createWorldSeed}
       enqueue={enqueue}
+      exclusiveWorldAuthorityTransitionIsPending={exclusiveWorldAuthorityTransitionIsPending}
+      exclusiveWorldAuthorityTransitionPending={exclusiveWorldAuthorityTransitionPending}
       exportPackage={
         publishedExport?.slotId === workspace.activeSave.slotId ? publishedExport.savePackage : ''
       }
@@ -420,6 +493,8 @@ export function FocusPersistencePanel({
       getCurrentWorkspace={getCurrentWorkspace}
       initial={workspace}
       key={`${workspace.activeSave.slotId}-${workspaceRevision}`}
+      lifecycleOperationIsBlocked={lifecycleOperationIsBlocked}
+      lifecycleOperationsBlocked={lifecycleOperationsBlocked}
       notice={notice}
       onExportPackageChange={(slotId, savePackage) => setPublishedExport({ savePackage, slotId })}
       onNoticeChange={setNotice}
@@ -429,6 +504,8 @@ export function FocusPersistencePanel({
       simulation={simulation}
       soundscape={soundscape}
       updateCurrentWorkspaceRef={updateCurrentWorkspaceRef}
+      worldAuthorityTransitionIsPending={worldAuthorityTransitionIsPending}
+      worldAuthorityTransitionPending={worldAuthorityTransitionPending}
       {...(onReducedEffectsChange === undefined ? {} : { onReducedEffectsChange })}
       {...(onRevisitTarget === undefined ? {} : { onRevisitTarget })}
       {...(onSettingsChange === undefined ? {} : { onSettingsChange })}
@@ -438,16 +515,23 @@ export function FocusPersistencePanel({
 
 interface FocusWorkspaceProps {
   readonly alerts: FocusAlerts;
+  readonly beginWorldAuthorityTransition: (exclusive?: boolean) => () => void;
+  readonly blockLifecycleOperations: () => void;
   readonly clearWorkspaceOperationError: (
     slotId: string,
     kind: WorkspaceOperationError['kind'],
   ) => void;
   readonly clock: FocusClock;
+  readonly createWorldSeed: () => WorldSeed;
   readonly enqueue: OperationEnqueuer;
+  readonly exclusiveWorldAuthorityTransitionIsPending: () => boolean;
+  readonly exclusiveWorldAuthorityTransitionPending: boolean;
   readonly exportPackage: string;
   readonly externalOperationErrors: readonly WorkspaceOperationError[];
   readonly getCurrentWorkspace: () => WorkspaceData | null;
   readonly initial: WorkspaceData;
+  readonly lifecycleOperationIsBlocked: () => boolean;
+  readonly lifecycleOperationsBlocked: boolean;
   readonly notice: string;
   readonly onExportPackageChange: (slotId: string, savePackage: string) => void;
   readonly onNoticeChange: (notice: string) => void;
@@ -464,17 +548,26 @@ interface FocusWorkspaceProps {
   readonly simulation: WorldSimulationView;
   readonly soundscape: GameSoundscape;
   readonly updateCurrentWorkspaceRef: WorkspaceRefUpdater;
+  readonly worldAuthorityTransitionIsPending: () => boolean;
+  readonly worldAuthorityTransitionPending: boolean;
 }
 
 function FocusWorkspace({
   alerts,
+  beginWorldAuthorityTransition,
+  blockLifecycleOperations,
   clearWorkspaceOperationError,
   clock,
+  createWorldSeed,
   enqueue,
+  exclusiveWorldAuthorityTransitionIsPending,
+  exclusiveWorldAuthorityTransitionPending,
   exportPackage,
   externalOperationErrors,
   getCurrentWorkspace,
   initial,
+  lifecycleOperationIsBlocked,
+  lifecycleOperationsBlocked,
   notice,
   onExportPackageChange,
   onNoticeChange: setNotice,
@@ -487,6 +580,8 @@ function FocusWorkspace({
   simulation,
   soundscape,
   updateCurrentWorkspaceRef,
+  worldAuthorityTransitionIsPending,
+  worldAuthorityTransitionPending,
 }: FocusWorkspaceProps) {
   const [activeSave, setActiveSave] = useState(initial.activeSave);
   const [slots, setSlots] = useState(initial.slots);
@@ -500,6 +595,10 @@ function FocusWorkspace({
   );
   const [slotIdDraft, setSlotIdDraft] = useState('world-2');
   const [slotNameDraft, setSlotNameDraft] = useState('Second world');
+  const [newWorldSeedDraft, setNewWorldSeedDraft] = useState(() =>
+    formatWorldSeed(createWorldSeed()),
+  );
+  const [resetConfirmation, setResetConfirmation] = useState('');
   const [importPackage, setImportPackage] = useState('');
   const [operationError, setOperationError] = useState<string | null>(
     initial.initialOperationError,
@@ -771,8 +870,14 @@ function FocusWorkspace({
     [clearWorkspaceOperationError, persistSession, updateCurrentWorkspaceRef],
   );
 
+  const focusActionIsBlocked = useCallback(
+    (): boolean => lifecycleOperationIsBlocked() || worldAuthorityTransitionIsPending(),
+    [lifecycleOperationIsBlocked, worldAuthorityTransitionIsPending],
+  );
+
   const advanceFocusTicks = useCallback(
     (ticks: number, priority: SimulationAdvancePriority): boolean => {
+      if (focusActionIsBlocked()) return false;
       const currentWorkspace = getCurrentWorkspace();
       if (
         currentWorkspace !== null &&
@@ -782,10 +887,17 @@ function FocusWorkspace({
       }
       return simulation.advanceTicks(ticks, priority) !== false;
     },
-    [getCurrentWorkspace, simulation],
+    [getCurrentWorkspace, focusActionIsBlocked, simulation],
   );
 
-  const focusFrozen = simulation.status === 'faulted';
+  const focusFrozen =
+    simulation.status === 'faulted' ||
+    lifecycleOperationsBlocked ||
+    worldAuthorityTransitionPending;
+  const worldMutationFrozen =
+    simulation.status === 'faulted' ||
+    lifecycleOperationsBlocked ||
+    exclusiveWorldAuthorityTransitionPending;
   const focus = useFocusController({
     clock,
     initialSession: initial.initialSession,
@@ -842,6 +954,9 @@ function FocusWorkspace({
       await operation();
       setOperationError(null);
     } catch (error) {
+      if (error instanceof Error && error.message === LIFECYCLE_OPERATIONS_BLOCKED_MESSAGE) {
+        return;
+      }
       setOperationError(
         error instanceof Error
           ? error.message
@@ -852,38 +967,250 @@ function FocusWorkspace({
     }
   }, []);
 
-  const saveAsNewWorld = useCallback(
+  const enqueueWorldAuthorityTransition = useCallback<OperationEnqueuer>(
+    (operation) => {
+      if (exclusiveWorldAuthorityTransitionIsPending()) {
+        return Promise.reject(new Error('Wait for the active world reset to finish.'));
+      }
+      const release = beginWorldAuthorityTransition();
+      return enqueue(operation).finally(release);
+    },
+    [beginWorldAuthorityTransition, enqueue, exclusiveWorldAuthorityTransitionIsPending],
+  );
+
+  const enqueueExclusiveWorldAuthorityTransition = useCallback<OperationEnqueuer>(
+    (operation) => {
+      if (exclusiveWorldAuthorityTransitionIsPending()) {
+        return Promise.reject(new Error('Wait for the active world reset to finish.'));
+      }
+      const release = beginWorldAuthorityTransition(true);
+      return enqueue(operation).finally(release);
+    },
+    [beginWorldAuthorityTransition, enqueue, exclusiveWorldAuthorityTransitionIsPending],
+  );
+
+  const adoptCommittedWorld = useCallback(
+    async (
+      committed: LoadedSave,
+      currentWorkspace: WorkspaceData,
+      initialNotice: string,
+      worldAlreadyLoaded = false,
+    ): Promise<void> => {
+      const recapBaselineEventId = latestSnapshotEventId(committed);
+      const [nextSlots, nextHistory] = await Promise.all([
+        runtime.gateway.listSaveSlots(),
+        runtime.gateway.listFocusSessions(committed),
+      ]);
+      if (!worldAlreadyLoaded) await simulation.loadSnapshot(committed.snapshot);
+      const selectedSettings = {
+        ...currentWorkspace.settings,
+        activeSlotId: committed.slotId,
+      };
+      onReplaceWorkspace({
+        activeSave: committed,
+        history: nextHistory,
+        initialSession: selectRestorableSession(committed),
+        initialNotice,
+        initialOperationError: null,
+        offlineCatchUpApplied: false,
+        recapBaselineEventId,
+        settings: selectedSettings,
+        slots: nextSlots,
+      });
+
+      if (currentWorkspace.settings.activeSlotId !== committed.slotId) {
+        try {
+          const savedSettings = await runtime.gateway.saveSettings(selectedSettings);
+          updateCurrentWorkspaceRef((current) =>
+            current.activeSave.slotId === committed.slotId
+              ? { ...current, initialOperationError: null, settings: savedSettings }
+              : current,
+          );
+          clearWorkspaceOperationError(committed.slotId, 'active-preference');
+        } catch (error) {
+          const message =
+            error instanceof Error
+              ? error.message
+              : typeof error === 'string' && error.length > 0
+                ? error
+                : 'The active slot preference could not be saved.';
+          updateCurrentWorkspaceRef((current) =>
+            current.activeSave.slotId === committed.slotId
+              ? { ...current, initialOperationError: message }
+              : current,
+          );
+          reportWorkspaceOperationError(committed.slotId, message, 'active-preference');
+        }
+      }
+    },
+    [
+      clearWorkspaceOperationError,
+      onReplaceWorkspace,
+      reportWorkspaceOperationError,
+      runtime.gateway,
+      simulation,
+      updateCurrentWorkspaceRef,
+    ],
+  );
+
+  const assertNewSlotDestination = useCallback(
+    (currentWorkspace: WorkspaceData, slotId: string): void => {
+      if (currentWorkspace.slots.some((slot) => slot.slotId === slotId)) {
+        throw new Error('Choose a new slot ID so an existing world is not replaced.');
+      }
+    },
+    [],
+  );
+
+  const duplicateCurrentWorld = useCallback(
     (slotId: string, name: string): Promise<void> =>
-      enqueue(async () => {
+      enqueueWorldAuthorityTransition(async () => {
         const currentWorkspace = getCurrentWorkspace();
         if (currentWorkspace === null) throw new Error('The active workspace is unavailable.');
         if (!canLeaveFocusSession(currentWorkspace.initialSession)) {
-          throw new Error('Finish or cancel the active focus session before creating a new slot.');
+          throw new Error('Finish or cancel the active focus session before duplicating a world.');
         }
+        assertNewSlotDestination(currentWorkspace, slotId);
         const snapshot = await simulation.requestSave();
         const committed = await runtime.gateway.commitSaveSlot(slotId, name, snapshot);
-        const recapBaselineEventId = latestSnapshotEventId(committed);
-        const [nextSlots, nextHistory] = await Promise.all([
-          runtime.gateway.listSaveSlots(),
-          runtime.gateway.listFocusSessions(committed),
-        ]);
-        const nextSettings = await runtime.gateway.saveSettings({
-          ...currentWorkspace.settings,
-          activeSlotId: slotId,
-        });
-        onReplaceWorkspace({
-          activeSave: committed,
-          history: nextHistory,
-          initialSession: selectRestorableSession(committed),
-          initialNotice: 'New save slot created.',
-          initialOperationError: null,
-          offlineCatchUpApplied: false,
-          recapBaselineEventId,
-          settings: nextSettings,
-          slots: nextSlots,
-        });
+        await adoptCommittedWorld(
+          committed,
+          currentWorkspace,
+          `Current world duplicated into ${committed.name}.`,
+        );
       }),
-    [enqueue, getCurrentWorkspace, onReplaceWorkspace, runtime.gateway, simulation],
+    [
+      adoptCommittedWorld,
+      assertNewSlotDestination,
+      enqueueWorldAuthorityTransition,
+      getCurrentWorkspace,
+      runtime.gateway,
+      simulation,
+    ],
+  );
+
+  const createNewWorld = useCallback(
+    (slotId: string, name: string, seedText: string): Promise<void> =>
+      enqueueWorldAuthorityTransition(async () => {
+        const currentWorkspace = getCurrentWorkspace();
+        if (currentWorkspace === null) throw new Error('The active workspace is unavailable.');
+        if (!canLeaveFocusSession(currentWorkspace.initialSession)) {
+          throw new Error('Finish or cancel the active focus session before creating a new world.');
+        }
+        assertNewSlotDestination(currentWorkspace, slotId);
+        const seed = parseWorldSeed(seedText);
+        if (seed === null) {
+          throw new Error('Enter the seed as four groups of eight hexadecimal characters.');
+        }
+        const snapshot = await simulation.requestFreshWorldSnapshot(seed, DEMO_WORLD_CONFIG);
+        const committed = await runtime.gateway.commitSaveSlot(slotId, name, snapshot);
+        await adoptCommittedWorld(
+          committed,
+          currentWorkspace,
+          `Fresh world ${committed.name} created.`,
+        );
+      }),
+    [
+      adoptCommittedWorld,
+      assertNewSlotDestination,
+      enqueueWorldAuthorityTransition,
+      getCurrentWorkspace,
+      runtime.gateway,
+      simulation,
+    ],
+  );
+
+  const resetActiveWorld = useCallback(
+    (confirmation: string, seedText: string): Promise<void> =>
+      enqueueExclusiveWorldAuthorityTransition(async () => {
+        const currentWorkspace = getCurrentWorkspace();
+        if (currentWorkspace === null) throw new Error('The active workspace is unavailable.');
+        if (!canLeaveFocusSession(currentWorkspace.initialSession)) {
+          throw new Error('Finish or cancel the active focus session before resetting this world.');
+        }
+        if (confirmation !== currentWorkspace.activeSave.name) {
+          throw new Error(`Type ${currentWorkspace.activeSave.name} exactly to confirm the reset.`);
+        }
+        const seed = parseWorldSeed(seedText);
+        if (seed === null) {
+          throw new Error('Enter the seed as four groups of eight hexadecimal characters.');
+        }
+        const previousSnapshot = await simulation.requestSave();
+        const freshSnapshot = await simulation.requestFreshWorldSnapshot(seed, DEMO_WORLD_CONFIG);
+        await simulation.loadSnapshot(freshSnapshot);
+        let committed: LoadedSave;
+        try {
+          committed = await runtime.gateway.commitSaveSlot(
+            currentWorkspace.activeSave.slotId,
+            currentWorkspace.activeSave.name,
+            freshSnapshot,
+          );
+        } catch (error) {
+          let durableAfterFailure: LoadedSave | null;
+          try {
+            durableAfterFailure = await runtime.gateway.loadSaveSlot(
+              currentWorkspace.activeSave.slotId,
+            );
+          } catch (verificationError) {
+            blockLifecycleOperations();
+            const resetMessage = error instanceof Error ? error.message : 'The reset failed.';
+            const verificationMessage =
+              verificationError instanceof Error
+                ? verificationError.message
+                : 'the durable result could not be read';
+            throw new Error(
+              `${resetMessage} Reset outcome could not be verified: ${verificationMessage}. Reopen Chrono Forge before continuing.`,
+              { cause: verificationError },
+            );
+          }
+          if (durableAfterFailure?.snapshot === freshSnapshot) {
+            // The immutable generation committed, but a later receipt/confirmation step failed.
+            // The normal load boundary revalidated that exact snapshot, so finish adoption instead
+            // of rolling Worker authority back behind its durable slot head.
+            committed = durableAfterFailure;
+          } else {
+            const rollbackSnapshot = durableAfterFailure?.snapshot ?? previousSnapshot;
+            try {
+              await simulation.loadSnapshot(rollbackSnapshot);
+            } catch (rollbackError) {
+              blockLifecycleOperations();
+              const resetMessage = error instanceof Error ? error.message : 'The reset failed.';
+              const rollbackMessage =
+                rollbackError instanceof Error ? rollbackError.message : 'the rollback failed';
+              throw new Error(`${resetMessage} Worker rollback also failed: ${rollbackMessage}`, {
+                cause: rollbackError,
+              });
+            }
+            throw error;
+          }
+        }
+        try {
+          await adoptCommittedWorld(
+            committed,
+            currentWorkspace,
+            `${committed.name} was reset with a fresh seed.`,
+            true,
+          );
+        } catch (adoptionError) {
+          blockLifecycleOperations();
+          const adoptionMessage =
+            adoptionError instanceof Error
+              ? adoptionError.message
+              : 'the committed world could not be adopted';
+          throw new Error(
+            `The reset committed, but the active workspace could not be synchronized: ${adoptionMessage}. Reopen Chrono Forge before continuing.`,
+            { cause: adoptionError },
+          );
+        }
+      }),
+    [
+      adoptCommittedWorld,
+      blockLifecycleOperations,
+      enqueueExclusiveWorldAuthorityTransition,
+      getCurrentWorkspace,
+      runtime.gateway,
+      simulation,
+    ],
   );
 
   const persistCurrentWorld = useCallback(
@@ -926,15 +1253,25 @@ function FocusWorkspace({
   }, [focus]);
 
   const saveCurrentWorld = useCallback(async (): Promise<void> => {
-    checkpointFocusForArchiveOperation();
+    if (exclusiveWorldAuthorityTransitionIsPending()) return;
+    if (!worldAuthorityTransitionIsPending()) checkpointFocusForArchiveOperation();
     await enqueue(() => persistCurrentWorld('World saved manually.'));
-  }, [checkpointFocusForArchiveOperation, enqueue, persistCurrentWorld]);
+  }, [
+    checkpointFocusForArchiveOperation,
+    enqueue,
+    exclusiveWorldAuthorityTransitionIsPending,
+    persistCurrentWorld,
+    worldAuthorityTransitionIsPending,
+  ]);
 
   const exportCurrentWorld = useCallback(async (): Promise<void> => {
-    if (!focusFrozen) checkpointFocusForArchiveOperation();
+    if (exclusiveWorldAuthorityTransitionIsPending()) return;
+    if (simulation.status !== 'faulted' && !worldAuthorityTransitionIsPending()) {
+      checkpointFocusForArchiveOperation();
+    }
     await enqueue(async () => {
       try {
-        if (!focusFrozen) {
+        if (simulation.status !== 'faulted') {
           await persistCurrentWorld('World saved before export.');
         } else {
           const currentWorkspace = getCurrentWorkspace();
@@ -952,7 +1289,7 @@ function FocusWorkspace({
         onExportPackageChange(slotId, savePackage);
         clearWorkspaceOperationError(slotId, 'archive-operation');
         setNotice(
-          focusFrozen
+          simulation.status === 'faulted'
             ? 'Export package prepared from the last valid local checkpoint.'
             : 'Export package refreshed from the current world.',
         );
@@ -979,18 +1316,21 @@ function FocusWorkspace({
     checkpointFocusForArchiveOperation,
     clearWorkspaceOperationError,
     enqueue,
-    focusFrozen,
+    exclusiveWorldAuthorityTransitionIsPending,
     getCurrentWorkspace,
     onExportPackageChange,
     persistCurrentWorld,
     reportWorkspaceOperationError,
     runtime.gateway,
     setNotice,
+    simulation.status,
+    worldAuthorityTransitionIsPending,
   ]);
 
   const saveCurrentSettings = useCallback(
-    (draft: AppSettings, originatingSlotId: string): Promise<void> =>
-      enqueue(async () => {
+    (draft: AppSettings, originatingSlotId: string): Promise<void> => {
+      if (exclusiveWorldAuthorityTransitionIsPending()) return Promise.resolve();
+      return enqueue(async () => {
         const currentWorkspace = getCurrentWorkspace();
         if (currentWorkspace === null) throw new Error('The active workspace is unavailable.');
         const slotId = currentWorkspace.activeSave.slotId;
@@ -1026,10 +1366,12 @@ function FocusWorkspace({
           reportWorkspaceOperationError(slotId, message, 'settings-write');
           throw error;
         }
-      }),
+      });
+    },
     [
       clearWorkspaceOperationError,
       enqueue,
+      exclusiveWorldAuthorityTransitionIsPending,
       getCurrentWorkspace,
       onReplaceWorkspace,
       reportWorkspaceOperationError,
@@ -1039,9 +1381,86 @@ function FocusWorkspace({
     ],
   );
 
+  const replaceWithSlotNow = useCallback(
+    async (slotId: string): Promise<void> => {
+      const currentWorkspace = getCurrentWorkspace();
+      if (currentWorkspace !== null && !canLeaveFocusSession(currentWorkspace.initialSession)) {
+        const message = 'Finish or cancel the active focus session before switching worlds.';
+        reportWorkspaceOperationError(
+          currentWorkspace.activeSave.slotId,
+          message,
+          'focus-session-blocked',
+        );
+        throw new Error(message);
+      }
+      const loaded = await runtime.gateway.loadSaveSlot(slotId);
+      if (loaded === null) throw new Error('The selected slot has no valid save.');
+      const recapBaselineEventId = latestSnapshotEventId(loaded);
+      const [loadedSettings, nextSlots, nextHistory] = await Promise.all([
+        runtime.gateway.loadSettings(),
+        runtime.gateway.listSaveSlots(),
+        runtime.gateway.listFocusSessions(loaded),
+      ]);
+
+      const selectedSettings =
+        loadedSettings.activeSlotId === loaded.slotId
+          ? loadedSettings
+          : { ...loadedSettings, activeSlotId: loaded.slotId };
+
+      // No persistence read remains after this boundary. Once the Worker accepts the target,
+      // synchronously transfer authority before any other awaited work can let an outgoing
+      // focus controller issue ticks against the newly loaded world.
+      await simulation.loadSnapshot(loaded.snapshot);
+      const nextWorkspace: WorkspaceData = {
+        activeSave: loaded,
+        history: nextHistory,
+        initialSession: selectRestorableSession(loaded),
+        initialOperationError: null,
+        offlineCatchUpApplied: false,
+        recapBaselineEventId,
+        settings: selectedSettings,
+        slots: nextSlots,
+      };
+      onReplaceWorkspace(nextWorkspace);
+
+      if (loadedSettings.activeSlotId !== loaded.slotId) {
+        try {
+          await runtime.gateway.saveSettings(selectedSettings);
+        } catch (error) {
+          const message =
+            error instanceof Error
+              ? error.message
+              : typeof error === 'string' && error.length > 0
+                ? error
+                : 'The active slot preference could not be saved.';
+          updateCurrentWorkspaceRef((current) =>
+            current.activeSave.slotId === loaded.slotId
+              ? { ...current, initialOperationError: message }
+              : current,
+          );
+          reportWorkspaceOperationError(loaded.slotId, message, 'active-preference');
+        }
+      }
+    },
+    [
+      getCurrentWorkspace,
+      onReplaceWorkspace,
+      reportWorkspaceOperationError,
+      runtime.gateway,
+      simulation,
+      updateCurrentWorkspaceRef,
+    ],
+  );
+
   const replaceWithSlot = useCallback(
     (slotId: string): Promise<void> =>
-      enqueue(async () => {
+      enqueueWorldAuthorityTransition(() => replaceWithSlotNow(slotId)),
+    [enqueueWorldAuthorityTransition, replaceWithSlotNow],
+  );
+
+  const importWorld = useCallback(
+    (savePackage: string): Promise<void> =>
+      enqueueWorldAuthorityTransition(async () => {
         const currentWorkspace = getCurrentWorkspace();
         if (currentWorkspace !== null && !canLeaveFocusSession(currentWorkspace.initialSession)) {
           const message = 'Finish or cancel the active focus session before switching worlds.';
@@ -1052,63 +1471,15 @@ function FocusWorkspace({
           );
           throw new Error(message);
         }
-        const loaded = await runtime.gateway.loadSaveSlot(slotId);
-        if (loaded === null) throw new Error('The selected slot has no valid save.');
-        const recapBaselineEventId = latestSnapshotEventId(loaded);
-        const [loadedSettings, nextSlots, nextHistory] = await Promise.all([
-          runtime.gateway.loadSettings(),
-          runtime.gateway.listSaveSlots(),
-          runtime.gateway.listFocusSessions(loaded),
-        ]);
-
-        const selectedSettings =
-          loadedSettings.activeSlotId === loaded.slotId
-            ? loadedSettings
-            : { ...loadedSettings, activeSlotId: loaded.slotId };
-
-        // No persistence read remains after this boundary. Once the Worker accepts the target,
-        // synchronously transfer authority before any other awaited work can let an outgoing
-        // focus controller issue ticks against the newly loaded world.
-        await simulation.loadSnapshot(loaded.snapshot);
-        const nextWorkspace: WorkspaceData = {
-          activeSave: loaded,
-          history: nextHistory,
-          initialSession: selectRestorableSession(loaded),
-          initialOperationError: null,
-          offlineCatchUpApplied: false,
-          recapBaselineEventId,
-          settings: selectedSettings,
-          slots: nextSlots,
-        };
-        onReplaceWorkspace(nextWorkspace);
-
-        if (loadedSettings.activeSlotId !== loaded.slotId) {
-          try {
-            await runtime.gateway.saveSettings(selectedSettings);
-          } catch (error) {
-            const message =
-              error instanceof Error
-                ? error.message
-                : typeof error === 'string' && error.length > 0
-                  ? error
-                  : 'The active slot preference could not be saved.';
-            updateCurrentWorkspaceRef((current) =>
-              current.activeSave.slotId === loaded.slotId
-                ? { ...current, initialOperationError: message }
-                : current,
-            );
-            reportWorkspaceOperationError(loaded.slotId, message, 'active-preference');
-          }
-        }
+        const imported = await runtime.gateway.importSaveSlot(savePackage);
+        await replaceWithSlotNow(imported.slotId);
       }),
     [
-      enqueue,
+      enqueueWorldAuthorityTransition,
       getCurrentWorkspace,
-      onReplaceWorkspace,
+      replaceWithSlotNow,
       reportWorkspaceOperationError,
       runtime.gateway,
-      simulation,
-      updateCurrentWorkspaceRef,
     ],
   );
 
@@ -1118,6 +1489,7 @@ function FocusWorkspace({
     focus.state.phase === 'focus-cancelled' ||
     focus.state.phase === 'finished';
   const startNewSession = (): void => {
+    if (focusActionIsBlocked()) return;
     focus.reset();
     latestSessionRef.current = null;
     updateCurrentWorkspaceRef((current) => ({ ...current, initialSession: null }));
@@ -1147,6 +1519,8 @@ function FocusWorkspace({
     [settings.volumePercent, settings.ambienceVolumePercent, settings.effectsVolumePercent].every(
       (value) => Number.isSafeInteger(value) && value >= 0 && value <= 100,
     );
+  const parsedNewWorldSeed = parseWorldSeed(newWorldSeedDraft);
+  const destinationSlotExists = slots.some((slot) => slot.slotId === slotIdDraft);
   const timerValue =
     focus.state.phase === 'break-running' || focus.state.phase === 'break-paused'
       ? focus.breakRemainingMs
@@ -1264,11 +1638,18 @@ function FocusWorkspace({
             are non-punitive
           </p>
 
-          {focusFrozen ? (
+          {simulation.status === 'faulted' ? (
             <p className="focus-runtime-fault" role="alert">
               Focus controls are frozen because the simulation Worker stopped. No additional focus
               time or world ticks will be issued. Reopen Chrono Forge to recover the last saved
               session state.
+            </p>
+          ) : null}
+          {lifecycleOperationsBlocked ? (
+            <p className="focus-runtime-fault" role="alert">
+              World controls are frozen because the reset&apos;s durable outcome could not be safely
+              synchronized. Reopen Chrono Forge before continuing; no further focus, save, load,
+              import, export, or settings write will run.
             </p>
           ) : null}
 
@@ -1319,12 +1700,13 @@ function FocusWorkspace({
               <button
                 className="primary-action"
                 disabled={
-                  simulation.status !== 'ready' ||
+                  focusFrozen ||
                   !focusDurationIsValid ||
                   !configuredBreakIsValid ||
                   !settingsAreValid
                 }
                 onClick={() => {
+                  if (focusActionIsBlocked()) return;
                   void soundscape.playCue('focus-start', settings);
                   focus.start({
                     focusDurationMs: focusMinutes * 60_000,
@@ -1343,6 +1725,7 @@ function FocusWorkspace({
                 <button
                   disabled={focusFrozen}
                   onClick={() => {
+                    if (focusActionIsBlocked()) return;
                     void soundscape.playCue('focus-pause', settings);
                     focus.pause();
                   }}
@@ -1356,6 +1739,7 @@ function FocusWorkspace({
                   className="primary-action"
                   disabled={focusFrozen}
                   onClick={() => {
+                    if (focusActionIsBlocked()) return;
                     void soundscape.playCue('focus-resume', settings);
                     focus.resume();
                   }}
@@ -1366,16 +1750,34 @@ function FocusWorkspace({
               )}
               {(focus.state.phase === 'focus-running' || focus.state.phase === 'focus-paused') && (
                 <>
-                  <button disabled={focusFrozen} onClick={() => focus.complete()} type="button">
+                  <button
+                    disabled={focusFrozen}
+                    onClick={() => {
+                      if (!focusActionIsBlocked()) focus.complete();
+                    }}
+                    type="button"
+                  >
                     Complete focus
                   </button>
-                  <button disabled={focusFrozen} onClick={() => focus.cancel()} type="button">
+                  <button
+                    disabled={focusFrozen}
+                    onClick={() => {
+                      if (!focusActionIsBlocked()) focus.cancel();
+                    }}
+                    type="button"
+                  >
                     Cancel
                   </button>
                 </>
               )}
               {(focus.state.phase === 'break-running' || focus.state.phase === 'break-paused') && (
-                <button disabled={focusFrozen} onClick={() => focus.skipBreak()} type="button">
+                <button
+                  disabled={focusFrozen}
+                  onClick={() => {
+                    if (!focusActionIsBlocked()) focus.skipBreak();
+                  }}
+                  type="button"
+                >
                   End break
                 </button>
               )}
@@ -1394,10 +1796,15 @@ function FocusWorkspace({
             Active slot: <strong>{activeSave.name}</strong> · generation{' '}
             {activeSave.recoveredGeneration}
           </p>
+          {simulation.frame === null ? null : (
+            <p>
+              Active seed: <code>{formatWorldSeed(simulation.frame.seed)}</code>
+            </p>
+          )}
           <label>
             Load local slot
             <select
-              disabled={focusFrozen || !canSwitchWorld}
+              disabled={worldMutationFrozen || !canSwitchWorld}
               onChange={(event) => {
                 void runOperation(() => replaceWithSlot(event.currentTarget.value));
               }}
@@ -1412,18 +1819,26 @@ function FocusWorkspace({
           </label>
           <div className="archive-actions">
             <button
-              disabled={focusFrozen}
+              disabled={worldMutationFrozen}
               onClick={() => void runOperation(saveCurrentWorld)}
               type="button"
             >
               Save now
             </button>
-            <button onClick={() => void runOperation(exportCurrentWorld)} type="button">
+            <button
+              disabled={lifecycleOperationsBlocked || exclusiveWorldAuthorityTransitionPending}
+              onClick={() => void runOperation(exportCurrentWorld)}
+              type="button"
+            >
               Export
             </button>
           </div>
           <details>
-            <summary>Create another slot</summary>
+            <summary>World lifecycle</summary>
+            <p>
+              A new world starts at tick 0. A duplicate preserves the current world exactly in a
+              separate slot.
+            </p>
             <label>
               Slot ID
               <input
@@ -1438,12 +1853,77 @@ function FocusWorkspace({
                 value={slotNameDraft}
               />
             </label>
+            {destinationSlotExists ? (
+              <p role="status">Choose a new slot ID; existing worlds are never replaced here.</p>
+            ) : null}
+            <label>
+              New world seed
+              <input
+                aria-invalid={parsedNewWorldSeed === null}
+                onChange={(event) => setNewWorldSeedDraft(event.currentTarget.value)}
+                spellCheck={false}
+                value={newWorldSeedDraft}
+              />
+            </label>
             <button
-              disabled={focusFrozen || !canSwitchWorld}
-              onClick={() => void runOperation(() => saveAsNewWorld(slotIdDraft, slotNameDraft))}
+              onClick={() => setNewWorldSeedDraft(formatWorldSeed(createWorldSeed()))}
               type="button"
             >
-              Save as new slot
+              Generate another seed
+            </button>
+            <div className="archive-actions">
+              <button
+                disabled={
+                  worldMutationFrozen ||
+                  !canSwitchWorld ||
+                  parsedNewWorldSeed === null ||
+                  destinationSlotExists
+                }
+                onClick={() =>
+                  void runOperation(() =>
+                    createNewWorld(slotIdDraft, slotNameDraft, newWorldSeedDraft),
+                  )
+                }
+                type="button"
+              >
+                Create new world
+              </button>
+              <button
+                disabled={worldMutationFrozen || !canSwitchWorld || destinationSlotExists}
+                onClick={() =>
+                  void runOperation(() => duplicateCurrentWorld(slotIdDraft, slotNameDraft))
+                }
+                type="button"
+              >
+                Duplicate current world
+              </button>
+            </div>
+            <hr />
+            <p>
+              Reset permanently replaces only <strong>{activeSave.name}</strong> with a tick-zero
+              world. Other slots are untouched.
+            </p>
+            <label>
+              Reset confirmation
+              <input
+                onChange={(event) => setResetConfirmation(event.currentTarget.value)}
+                placeholder={activeSave.name}
+                value={resetConfirmation}
+              />
+            </label>
+            <button
+              disabled={
+                worldMutationFrozen ||
+                !canSwitchWorld ||
+                parsedNewWorldSeed === null ||
+                resetConfirmation !== activeSave.name
+              }
+              onClick={() =>
+                void runOperation(() => resetActiveWorld(resetConfirmation, newWorldSeedDraft))
+              }
+              type="button"
+            >
+              Reset active world
             </button>
           </details>
           <details>
@@ -1461,13 +1941,8 @@ function FocusWorkspace({
               />
             </label>
             <button
-              disabled={focusFrozen || !canSwitchWorld || importPackage.trim().length === 0}
-              onClick={() =>
-                void runOperation(async () => {
-                  const imported = await runtime.gateway.importSaveSlot(importPackage);
-                  await replaceWithSlot(imported.slotId);
-                })
-              }
+              disabled={worldMutationFrozen || !canSwitchWorld || importPackage.trim().length === 0}
+              onClick={() => void runOperation(() => importWorld(importPackage))}
               type="button"
             >
               Validate and import
@@ -1616,7 +2091,11 @@ function FocusWorkspace({
             Preview audio
           </button>
           <button
-            disabled={!settingsAreValid}
+            disabled={
+              lifecycleOperationsBlocked ||
+              exclusiveWorldAuthorityTransitionPending ||
+              !settingsAreValid
+            }
             onClick={() =>
               void runOperation(() => saveCurrentSettings(settings, activeSaveRef.current.slotId))
             }

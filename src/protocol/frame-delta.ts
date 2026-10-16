@@ -77,6 +77,14 @@ function isSafeNonNegativeInteger(value: unknown): value is number {
   return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0;
 }
 
+function isUint32(value: unknown): value is number {
+  return isSafeNonNegativeInteger(value) && value <= 0xffff_ffff;
+}
+
+function copySeed(seed: WorldFrameProjection['seed']): WorldFrameProjection['seed'] {
+  return Object.freeze([seed[0], seed[1], seed[2], seed[3]]);
+}
+
 function checkedTileCount(width: number, height: number): number {
   if (!isSafeNonNegativeInteger(width) || width < 1) fail('width must be a positive safe integer.');
   if (!isSafeNonNegativeInteger(height) || height < 1)
@@ -243,6 +251,8 @@ function validateStructures(layer: StructureFrameLayer, tiles: number): void {
 
 function validateFrame(frame: WorldFrameProjection): void {
   if (frame.version !== WORKER_PROTOCOL_VERSION) fail('frame protocol version is unsupported.');
+  if (!Array.isArray(frame.seed) || frame.seed.length !== 4 || !frame.seed.every(isUint32))
+    fail('frame seed must contain four uint32 values.');
   const tiles = checkedTileCount(frame.width, frame.height);
   if (!isSafeNonNegativeInteger(frame.tick))
     fail('frame tick must be a non-negative safe integer.');
@@ -313,6 +323,7 @@ export function createWorldFrameDelta(
   if (previous.version !== next.version) fail('frames use different protocol versions.');
   if (previous.width !== next.width || previous.height !== next.height)
     fail('frames use different dimensions.');
+  if (!structuralEqual(previous.seed, next.seed)) fail('frames use different world seeds.');
   if (next.tick < previous.tick) fail('next frame tick precedes its base tick.');
 
   const delta: {
@@ -388,6 +399,7 @@ export function applyWorldFrameDelta(
   const civilizations = delta.civilizations ?? previous.civilizations;
   const applied: WorldFrameProjection = Object.freeze({
     version: delta.version,
+    seed: copySeed(previous.seed),
     width: delta.width,
     height: delta.height,
     tick: delta.tick,
