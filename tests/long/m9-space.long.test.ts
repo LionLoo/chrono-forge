@@ -16,33 +16,33 @@ const SCENARIOS = [
   {
     name: 'concord-orbit',
     seed: [7, 11, 13, 17] as const,
-    // Renewed after M10.7 corrected residency lifecycle timestamps without
-    // changing the locked operation totals or any physical space outcome.
-    expectedHashes: ['06e506ef', '82e8a8d7', '84fae30d', '745e2dee'],
+    // Renewed after co-located workers began choosing distinct viable routes;
+    // every physical space outcome below remains independently asserted.
+    expectedHashes: ['3c0a752f', '91eb7223', 'f941d2ac', '47c7065d'],
     expectedOperations: {
-      settlement: 587_432,
-      society: 113_552,
+      settlement: 596_510,
+      society: 108_009,
       development: 240,
-      civilizations: 3_832,
-      scale: 618_600,
-      space: 1_922,
-      total: 1_325_578,
+      civilizations: 3_776,
+      scale: 619_850,
+      space: 1_852,
+      total: 1_330_237,
     },
   },
   {
     name: 'contested-frontier',
     seed: [37, 41, 43, 47] as const,
-    // Renewed after M10.7 corrected residency lifecycle timestamps without
-    // changing the locked operation totals or any physical space outcome.
-    expectedHashes: ['c9b0bbf1', '4f8b36dd', 'b5f639a7', '90bdebe4'],
+    // Renewed after co-located workers began choosing distinct viable routes;
+    // every physical space outcome below remains independently asserted.
+    expectedHashes: ['a787da6a', '30fc0c34', '1a18b4d0', 'ed2fa3bf'],
     expectedOperations: {
-      settlement: 571_260,
-      society: 111_345,
+      settlement: 501_772,
+      society: 78_564,
       development: 240,
-      civilizations: 5_524,
-      scale: 881_902,
-      space: 738,
-      total: 1_571_009,
+      civilizations: 5_201,
+      scale: 872_402,
+      space: 232,
+      total: 1_458_411,
     },
   },
 ] as const;
@@ -203,10 +203,13 @@ describe.sequential('M9 accelerated planetary and space scenarios', () => {
       });
     }
 
-    for (const [index, scenario] of SCENARIOS.entries()) {
-      expect(results[index]!.hashes).toStrictEqual(scenario.expectedHashes);
-      expect(results[index]!.totals).toStrictEqual(scenario.expectedOperations);
-    }
+    expect(results.map(({ name, hashes, totals }) => ({ name, hashes, totals }))).toStrictEqual(
+      SCENARIOS.map(({ name, expectedHashes: hashes, expectedOperations: totals }) => ({
+        name,
+        hashes,
+        totals,
+      })),
+    );
     expect(results[0]!.hashes).not.toStrictEqual(results[1]!.hashes);
     expect(results[0]!.missionSignature).not.toStrictEqual(results[1]!.missionSignature);
     expect(results[0]!.colonySignature).not.toStrictEqual(results[1]!.colonySignature);

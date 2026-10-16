@@ -112,7 +112,7 @@ describe('M4 society world integration', () => {
       hashWorldState(initial),
       hashWorldState(atThirtyMinutes),
       hashWorldState(atSixtyMinutes),
-    ]).toEqual(['ae9d57d8', '1a9dc763', 'cd8440b4']);
+    ]).toEqual(['ae9d57d8', 'dcb26fc0', '8f39b269']);
     expect(atThirtyMinutes.civilization.structures).not.toEqual(initial.civilization.structures);
     expect(atSixtyMinutes.civilization.stockpile).not.toEqual(
       atThirtyMinutes.civilization.stockpile,
@@ -134,9 +134,11 @@ describe('M4 society world integration', () => {
   });
 
   it('reaches aligned child and later-generation cohorts in the accelerated deterministic calendar', () => {
+    // Coordinated work keeps co-located founders from sharing one route while
+    // the relationship-grounded second generation remains proven by year 30.
     const world = stepWorld(
       createInitialWorld(seed, { societyYearTicks: ACCELERATED_YEAR_TICKS }),
-      120_000,
+      150_000,
     );
     const society = world.civilization.society;
     const peopleById = new Map(society.people.map((person) => [person.id, person]));

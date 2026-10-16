@@ -4,12 +4,95 @@ use std::{
 };
 
 use serde::Serialize;
-use tauri::{Manager, WebviewUrl, WebviewWindowBuilder};
+use tauri::{Emitter, Manager, WebviewUrl, WebviewWindowBuilder};
 
 mod persistence;
 
 const PROFILE_ENVIRONMENT_VARIABLE: &str = "CHRONO_FORGE_PROFILE";
 const PERSISTENCE_BROKER_LABEL: &str = "persistence-broker";
+const PERSISTENCE_BROKER_RETIRED_EVENT: &str = "chrono-forge://persistence-retired";
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct PersistenceBrokerRetiredEnvelope {
+    request_id: String,
+    value: (),
+}
+
+fn create_persistence_broker<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> Result<(), String> {
+    if app.get_webview_window(PERSISTENCE_BROKER_LABEL).is_some() {
+        return Ok(());
+    }
+    WebviewWindowBuilder::new(
+        app,
+        PERSISTENCE_BROKER_LABEL,
+        WebviewUrl::App("index.html?persistence-broker=1".into()),
+    )
+    .title("Chrono Forge persistence validator")
+    .visible(false)
+    .skip_taskbar(true)
+    .build()
+    .map(|_| ())
+    .map_err(|error| error.to_string())
+}
+
+fn validate_persistence_broker_requester(label: &str) -> Result<(), String> {
+    if label == "main" {
+        Ok(())
+    } else {
+        Err("only the player window may request the isolated persistence validator".to_owned())
+    }
+}
+
+fn validate_persistence_broker_retirement_requester(label: &str) -> Result<(), String> {
+    if label == PERSISTENCE_BROKER_LABEL {
+        Ok(())
+    } else {
+        Err("only the isolated persistence validator may retire itself".to_owned())
+    }
+}
+
+fn validate_persistence_broker_request_id(request_id: &str) -> Result<(), String> {
+    if !request_id.is_empty()
+        && request_id.len() <= 64
+        && request_id
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+    {
+        Ok(())
+    } else {
+        Err("persistence validator request IDs must be bounded UUID-like text".to_owned())
+    }
+}
+
+#[tauri::command]
+async fn ensure_persistence_broker(
+    window: tauri::WebviewWindow,
+    app: tauri::AppHandle,
+) -> Result<(), String> {
+    validate_persistence_broker_requester(window.label())?;
+    create_persistence_broker(&app)
+}
+
+#[tauri::command]
+async fn retire_persistence_broker(
+    window: tauri::WebviewWindow,
+    app: tauri::AppHandle,
+    request_id: String,
+) -> Result<(), String> {
+    validate_persistence_broker_retirement_requester(window.label())?;
+    validate_persistence_broker_request_id(&request_id)?;
+    window.destroy().map_err(|error| error.to_string())?;
+    app.emit_to(
+        "main",
+        PERSISTENCE_BROKER_RETIRED_EVENT,
+        PersistenceBrokerRetiredEnvelope {
+            request_id,
+            value: (),
+        },
+    )
+    .map_err(|error| error.to_string())
+}
 
 fn persistence_directory(base: &Path, profile: Option<&OsStr>) -> Result<PathBuf, String> {
     let Some(profile) = profile else {
@@ -94,17 +177,6 @@ pub fn run() {
             app.manage(persistence::PersistenceState::open_app_local_data(
                 &app_local_data,
             )?);
-            WebviewWindowBuilder::new(
-                app,
-                PERSISTENCE_BROKER_LABEL,
-                WebviewUrl::App("index.html?persistence-broker=1".into()),
-            )
-            .title("Chrono Forge persistence validator")
-            .visible(false)
-            .skip_taskbar(true)
-            .build()?;
-            // Keep the player-facing window last so desktop automation and accessibility tools
-            // attach to the game rather than the deliberately hidden validation compartment.
             WebviewWindowBuilder::new(app, "main", WebviewUrl::App("index.html".into()))
                 .title("Chrono Forge")
                 .inner_size(1440.0, 900.0)
@@ -121,6 +193,8 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             app_info,
+            ensure_persistence_broker,
+            retire_persistence_broker,
             persistence::list_save_slots,
             persistence::load_save_slot_candidates,
             persistence::load_save_slot_fallback_candidates,
@@ -145,7 +219,8 @@ mod tests {
 
     use super::{
         AppInfo, WindowLifecycleEvent, app_info, persistence_directory,
-        should_exit_after_window_event,
+        should_exit_after_window_event, validate_persistence_broker_request_id,
+        validate_persistence_broker_requester, validate_persistence_broker_retirement_requester,
     };
 
     #[test]
@@ -219,6 +294,30 @@ mod tests {
             "main",
             WindowLifecycleEvent::Other,
         ));
+    }
+
+    #[test]
+    fn only_player_window_can_request_the_isolated_persistence_validator() {
+        assert!(validate_persistence_broker_requester("main").is_ok());
+        assert!(validate_persistence_broker_requester("persistence-broker").is_err());
+        assert!(validate_persistence_broker_requester("other").is_err());
+    }
+
+    #[test]
+    fn only_isolated_validator_can_retire_its_window() {
+        assert!(validate_persistence_broker_retirement_requester("persistence-broker").is_ok());
+        assert!(validate_persistence_broker_retirement_requester("main").is_err());
+        assert!(validate_persistence_broker_retirement_requester("other").is_err());
+    }
+
+    #[test]
+    fn persistence_validator_request_ids_are_bounded_uuid_like_text() {
+        assert!(
+            validate_persistence_broker_request_id("123e4567-e89b-12d3-a456-426614174000").is_ok()
+        );
+        for invalid in ["", "request id", "../request", &"a".repeat(65)] {
+            assert!(validate_persistence_broker_request_id(invalid).is_err());
+        }
     }
 
     #[test]

@@ -21,7 +21,7 @@ import {
 } from '../focus/session-review';
 import type { WorkerEvent } from '../protocol';
 import { systemFocusClock, useFocusController, type FocusClock } from './useFocusController';
-import type { WorldSimulationView } from './useWorldSimulation';
+import type { SimulationAdvancePriority, WorldSimulationView } from './useWorldSimulation';
 
 const PRIMARY_SLOT_ID = 'primary';
 const PRIMARY_SLOT_NAME = 'Founding world';
@@ -706,7 +706,13 @@ function FocusWorkspace({
           await alerts.notifyCompletion(settings).catch(() => undefined);
         }
       } catch (error) {
-        setOperationError(error instanceof Error ? error.message : 'Autosave failed.');
+        setOperationError(
+          error instanceof Error
+            ? error.message
+            : typeof error === 'string' && error.length > 0
+              ? error
+              : 'Autosave failed.',
+        );
         throw error;
       }
     },
@@ -766,7 +772,7 @@ function FocusWorkspace({
   );
 
   const advanceFocusTicks = useCallback(
-    (ticks: number): boolean => {
+    (ticks: number, priority: SimulationAdvancePriority): boolean => {
       const currentWorkspace = getCurrentWorkspace();
       if (
         currentWorkspace !== null &&
@@ -774,7 +780,7 @@ function FocusWorkspace({
       ) {
         return false;
       }
-      return simulation.advanceTicks(ticks) !== false;
+      return simulation.advanceTicks(ticks, priority) !== false;
     },
     [getCurrentWorkspace, simulation],
   );

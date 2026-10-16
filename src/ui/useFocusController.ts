@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 
 import type { FocusSession, FocusSessionStatus } from '../adapters/persistence';
+import type { SimulationAdvancePriority } from './useWorldSimulation';
 import {
   cancelFocus,
   checkpointFocus,
@@ -28,7 +29,10 @@ export interface UseFocusControllerOptions {
   readonly initialSession?: FocusSession | null;
   readonly slotId: string | null;
   /** False means Worker backpressure rejected this transition before it became accepted time. */
-  readonly onSimulationTicks: (ticks: number) => boolean | void;
+  readonly onSimulationTicks: (
+    ticks: number,
+    priority: SimulationAdvancePriority,
+  ) => boolean | void;
   readonly onSessionState?: (session: FocusSession) => void;
   readonly checkpointIntervalMs?: number;
   readonly createSessionId?: () => string;
@@ -154,7 +158,9 @@ export function useFocusController(options: UseFocusControllerOptions): FocusCon
       if (next === previous) return;
 
       const issuedDelta = next.totalIssuedSimulationTicks - previous.totalIssuedSimulationTicks;
-      if (issuedDelta > 0 && onSimulationTicks(issuedDelta) === false) return;
+      const priority: SimulationAdvancePriority =
+        next.phase === previous.phase ? 'ordinary' : 'terminal';
+      if (issuedDelta > 0 && onSimulationTicks(issuedDelta, priority) === false) return;
       // The Worker owns world authority. Do not commit accepted focus time locally until the
       // corresponding tick command has crossed that boundary successfully; a synchronous
       // dispatch failure must leave the same elapsed interval available for an exact retry.

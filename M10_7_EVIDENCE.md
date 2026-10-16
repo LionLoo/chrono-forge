@@ -3,7 +3,7 @@
 ## Contract and current status
 
 - Branch: `release/v1-backend-bug-hunt` from exact merged and merge-head-green M10.65 main `dfb79527828f9fefe86cef4b2b5bcb96b6e3158c`.
-- M10.7 remains active and release-blocking. This file records completed defect campaigns; it does not claim milestone acceptance before the complete backend matrix, independent final review, full local gate, exact-head CI, sequential merge, and exact merge-head CI pass.
+- M10.7 is delivered. This file records the completed defect campaigns, independent reviews, complete backend matrix and local gate, exact-head CI, sequential merge, and exact merge-head CI that closed the milestone.
 - Campaigns must preserve deterministic Worker-owned authority, exact canonical reload, factual event provenance, population/resource/reference conservation, bounded work and queues, and fail-closed native persistence.
 
 ## Campaign 1 — mature M9 resolution boundaries
@@ -127,6 +127,7 @@
 - Checkpoint `69a0fc3cad1f5e1234ac5b5386060ee9868c18e6` evaluates all position/zoom rounding corners and requires the before/after world-coordinate intervals to overlap on both axes. This is the strongest assertion supported by the visible native telemetry; the unchanged unit regression still requires exact `zoomCameraAt` equality. The camera/runner matrix passes 33/33, and the rebuilt installed suite passes all 4 spec files/6 tests plus exact SQLite integrity. Independent Terra/high review verifies the interval mathematics and reports no P0-P3 finding.
 - The first unchanged full-gate attempt after `69a0fc3` lost its monitor and exit evidence during an app-context refresh, so it earns no acceptance credit. A replacement uncontested complete gate on exact `69a0fc3` passed every stage with captured exit zero: formatting; zero-warning lint/clippy; all 71 covered files and 571 tests in 359.01 seconds at 88.51% statements, 81.37% branches, 94.20% functions, and 90.23% lines; all 14 long files and 31 tests in 1,365.88 seconds; Rust 40/40; browser E2E 6/6 in 31.4 seconds; installed desktop 4 spec files/6 tests with clean SQLite and exact 3-slot/7-generation/2-session cleanup; SBOM with 770 npm and 281 Cargo components; production exclusion; and x64 NSIS installer build.
 
-## Remaining release-blocking campaigns
+## Hosted delivery closure
 
-- Commit and push this documentation-only evidence checkpoint over exact fully gated product/test head `69a0fc3cad1f5e1234ac5b5386060ee9868c18e6`, update existing PR #23, and require replacement exact-head aggregate `Required`. Then merge sequentially and require exact merge-head aggregate `Required` before claiming milestone delivery. Any product-code or test change restarts affected validation plus the complete local gate.
+- M10.7 is delivered. Documentation/hosted-recovery head `6aca10501c08c1ad4bebe63aa623e03a7c88af69` passed PR #23 exact-head workflow `38102776945`: Windows native tests and installer completed in 11m19s, Web quality/tests/E2E completed in 39m23s, and aggregate `Required` passed. PR #23 then merged sequentially at `95ac97ec14b8f1b2d772f87dba6750a511e51e6b`.
+- Exact merge-head workflow `38104990166` passed on that merge commit: Windows native tests and installer completed in 8m26s, Web quality/tests/E2E completed in 39m12s, and aggregate `Required` passed. M10.8 begins from this exact green main; M10.7 supplies no advance acceptance for later whole-product, world-lifecycle, release-candidate, or release gates.

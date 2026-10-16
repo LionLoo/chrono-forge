@@ -523,7 +523,18 @@ export function advancePopulationScale(
 ): PopulationScaleState {
   assertPopulationScaleInvariants(input);
   assertNonNegativeInteger(logicalTicks, 'logicalTicks');
-  let state = input;
+  if (logicalTicks === 0) return input;
+  // Work on private arrays so each bounded quota can replace only the records it
+  // actually services. Re-mapping every resident and recomputing backlog telemetry
+  // after every internal quota made one public advance scale with quota count times
+  // population size even though no intermediate state can escape this function.
+  const detailedResidents = [...input.detailedResidents];
+  const cohorts = [...input.cohorts];
+  const detailedIndexById = new Map(
+    detailedResidents.map((resident, index) => [resident.id, index] as const),
+  );
+  const cohortIndexById = new Map(cohorts.map((cohort, index) => [cohort.id, index] as const));
+  let state: PopulationScaleState = { ...input, detailedResidents, cohorts };
   const endingTick = state.tick + logicalTicks;
   while (state.tick < endingTick) {
     const scheduledTick = nextScheduledTick(state);
@@ -534,41 +545,37 @@ export function advancePopulationScale(
       state = { ...state, tick, rng };
       continue;
     }
-    const selectedDetails = new Set(
-      due.filter((item) => item.kind === 'detail').map((item) => item.id),
-    );
-    const selectedCohorts = new Set(
-      due.filter((item) => item.kind === 'cohort').map((item) => item.id),
-    );
-    const detailedResidents = state.detailedResidents.map((resident) =>
-      selectedDetails.has(resident.id)
-        ? {
-            ...resident,
-            rng: nextRngState(resident.rng),
-            nextUpdateTick: tick + DETAILED_UPDATE_PERIOD_TICKS,
-            updateCount: resident.updateCount + 1,
-          }
-        : resident,
-    );
-    const cohorts = state.cohorts.map((cohort) =>
-      selectedCohorts.has(cohort.id)
-        ? {
-            ...cohort,
-            nextUpdateTick: tick + AGGREGATE_UPDATE_PERIOD_TICKS,
-            updateCount: cohort.updateCount + 1,
-          }
-        : cohort,
-    );
+    for (const item of due) {
+      if (item.kind === 'detail') {
+        const index = detailedIndexById.get(item.id)!;
+        const resident = detailedResidents[index]!;
+        detailedResidents[index] = {
+          ...resident,
+          rng: nextRngState(resident.rng),
+          nextUpdateTick: tick + DETAILED_UPDATE_PERIOD_TICKS,
+          updateCount: resident.updateCount + 1,
+        };
+      } else {
+        const index = cohortIndexById.get(item.id)!;
+        const cohort = cohorts[index]!;
+        cohorts[index] = {
+          ...cohort,
+          nextUpdateTick: tick + AGGREGATE_UPDATE_PERIOD_TICKS,
+          updateCount: cohort.updateCount + 1,
+        };
+      }
+    }
     state = {
       ...state,
       tick,
       rng,
-      detailedResidents,
-      cohorts,
-      backlog: normalizeBacklog(tick, detailedResidents, cohorts),
       operationCount: state.operationCount + due.length,
     };
   }
+  state = {
+    ...state,
+    backlog: normalizeBacklog(state.tick, detailedResidents, cohorts),
+  };
   assertPopulationScaleInvariants(state);
   return state;
 }

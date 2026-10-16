@@ -550,6 +550,69 @@ describe('persistence adapter', () => {
     );
   });
 
+  it('verifies a native commit receipt through Web Crypto when it is available', async () => {
+    const digest = vi.fn((_algorithm: AlgorithmIdentifier, data: BufferSource) => {
+      const source = ArrayBuffer.isView(data)
+        ? new Uint8Array(data.buffer, data.byteOffset, data.byteLength)
+        : new Uint8Array(data);
+      return Promise.resolve(Uint8Array.from(createHash('sha256').update(source).digest()).buffer);
+    });
+    vi.stubGlobal('crypto', { subtle: { digest } });
+    try {
+      const gateway = createTauriPersistenceGateway(async (command) => {
+        await Promise.resolve();
+        return (
+          command === 'commit_save_slot'
+            ? {
+                slotId: 'alpha',
+                name: 'Alpha',
+                headGeneration: 1,
+                savedAtMs: 1_000,
+                checksum: snapshotOneChecksum,
+              }
+            : undefined
+        ) as never;
+      });
+
+      await expect(
+        gateway.commitSaveSlot('alpha', 'Alpha', snapshot('one')),
+      ).resolves.toMatchObject({ checksum: snapshotOneChecksum });
+      expect(digest).toHaveBeenCalledOnce();
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it('uses the exact compatibility checksum when Web Crypto subtle is unavailable', async () => {
+    vi.stubGlobal('crypto', {});
+    try {
+      const gatewayForChecksum = (checksum: string) =>
+        createTauriPersistenceGateway(async (command) => {
+          await Promise.resolve();
+          return (
+            command === 'commit_save_slot'
+              ? {
+                  slotId: 'alpha',
+                  name: 'Alpha',
+                  headGeneration: 1,
+                  savedAtMs: 1_000,
+                  checksum,
+                }
+              : undefined
+          ) as never;
+        });
+
+      await expect(
+        gatewayForChecksum(snapshotOneChecksum).commitSaveSlot('alpha', 'Alpha', snapshot('one')),
+      ).resolves.toMatchObject({ checksum: snapshotOneChecksum });
+      await expect(
+        gatewayForChecksum('0'.repeat(64)).commitSaveSlot('alpha', 'Alpha', snapshot('one')),
+      ).rejects.toThrow('save checksum does not match its snapshot');
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
   it('rejects a well-formed native commit receipt checksum for different material', async () => {
     const gateway = createTauriPersistenceGateway(async () => {
       await Promise.resolve();

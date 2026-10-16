@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
-import { M5_SCENARIOS } from '../fixtures/m5-scenarios';
+import { M5_KNOWLEDGE_LOSS_SCENARIO, M5_SCENARIOS } from '../fixtures/m5-scenarios';
 import {
   assertWorldInvariants,
   createInitialWorld,
@@ -50,14 +50,20 @@ describe('M5 accelerated scenario acceptance', () => {
     expect(knowledgeSignature(river[1]!)).toContain('agriculture');
     expect(knowledgeSignature(storm[1]!)).toContain('metallurgy');
     expect(knowledgeSignature(river[1]!)).not.toBe(knowledgeSignature(storm[1]!));
-    expect(
-      [...river, ...ore, ...storm, ...renewed].some(
-        (world) =>
-          world.development.knowledge.some((record) => record.status === 'lost') ||
-          world.eventLog.some((event) => event.kind === 'knowledge-lost'),
-      ),
-    ).toBe(true);
     expect(knowledgeSignature(ore[2]!)).not.toBe(knowledgeSignature(renewed[2]!));
     expect(storm[2]!.eventLog.some((event) => event.kind === 'crisis-assisted')).toBe(true);
   }, 120_000);
+
+  it('keeps an explicit rare knowledge-loss witness in the M5 acceptance contract', () => {
+    const scenario = M5_KNOWLEDGE_LOSS_SCENARIO;
+    const world = stepWorld(
+      createInitialWorld(scenario.seed, { societyYearTicks: scenario.yearTicks }),
+      scenario.horizonYears * scenario.yearTicks,
+    );
+    assertWorldInvariants(world);
+    expect(hashWorldState(world)).toBe(scenario.expectedHash);
+    expect(
+      world.eventLog.filter((event) => event.kind === 'knowledge-lost').map((event) => event.tick),
+    ).toStrictEqual([scenario.expectedLossTick]);
+  }, 60_000);
 });

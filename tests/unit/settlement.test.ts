@@ -188,13 +188,22 @@ describe('autonomous settlement core', () => {
 
   it('uses contrasting geography, traits, and social state for different stable action-target signatures', () => {
     const actionSignature = (civilization: CivilizationState) =>
-      civilization.agents.map((agent) => [agent.action, agent.targetTileIndex]);
+      civilization.agents.map((agent) => [agent.action, agent.targetTileIndex] as const);
     const makeScenario = (kind: 'food' | 'water') => {
       const terrain = uniformTerrain();
       const civilization = createInitialCivilization([20, 21, 22, 23], terrain);
       const target = civilization.centerTileIndex + (kind === 'food' ? -1 : 1);
-      if (kind === 'food') terrain.food[target] = 30;
-      else terrain.freshWater[target] = 500;
+      if (kind === 'food') {
+        terrain.food[target] = 30;
+        for (const offset of [
+          1,
+          -terrain.width,
+          terrain.width,
+          terrain.width + 1,
+          -terrain.width - 1,
+        ])
+          terrain.food[civilization.centerTileIndex + offset] = 24;
+      } else terrain.freshWater[target] = 500;
       const social = kind === 'food' ? 0 : 100;
       const traits: readonly [number, number, number, number] =
         kind === 'food' ? [100, 0, 0, 0] : [0, 100, 0, 0];
@@ -248,10 +257,15 @@ describe('autonomous settlement core', () => {
 
     const foodResult = advanceCivilization(food.state, food.terrain, 100).civilization;
     const waterResult = advanceCivilization(water.state, water.terrain, 100).civilization;
-    expect(actionSignature(foodResult)).toEqual(
-      Array.from({ length: SETTLEMENT_FOUNDER_COUNT }, () => ['forage', food.target]),
-    );
-    expect(actionSignature(waterResult)).toEqual(
+    const foodSignature = actionSignature(foodResult);
+    const waterSignature = actionSignature(waterResult);
+    expect(foodSignature.every(([action]) => action === 'forage')).toBe(true);
+    expect(waterSignature.every(([action]) => action === 'collect-water')).toBe(true);
+    expect(foodSignature.some(([, target]) => target === food.target)).toBe(true);
+    expect(waterSignature.some(([, target]) => target === water.target)).toBe(true);
+    expect(foodSignature.every(([, target]) => food.terrain.food[target]! > 0)).toBe(true);
+    expect(new Set(foodSignature.map(([, target]) => target)).size).toBeGreaterThanOrEqual(4);
+    expect(waterSignature).toEqual(
       Array.from({ length: SETTLEMENT_FOUNDER_COUNT }, () => ['collect-water', water.target]),
     );
     expect(actionSignature(foodResult)).not.toEqual(actionSignature(waterResult));
@@ -263,6 +277,105 @@ describe('autonomous settlement core', () => {
     ).toEqual(actionSignature(waterResult));
     expect(() => assertCivilizationInvariants(foodResult, food.terrain)).not.toThrow();
     expect(() => assertCivilizationInvariants(waterResult, water.terrain)).not.toThrow();
+  });
+
+  it('ignores stale plans from dead agents when coordinating living work', () => {
+    const terrain = uniformTerrain();
+    const civilization = createInitialCivilization([24, 25, 26, 27], terrain);
+    for (const offset of [-1, 1, -terrain.width, terrain.width])
+      terrain.food[civilization.centerTileIndex + offset] = 30;
+    const inactive = inactiveFounders(civilization);
+    const baselineState: CivilizationState = {
+      ...civilization,
+      stockpile: { food: 0, water: 100, timber: 0, stone: 0 },
+      structures: [operationalShelter(civilization.centerTileIndex)],
+      agents: [
+        { ...civilization.agents[0]!, hunger: 0, thirst: 0, fatigue: 0 },
+        ...inactive.agents.slice(1),
+      ],
+    };
+    const baseline = advanceCivilization(baselineState, terrain, 100).civilization;
+    const baselineWorker = baseline.agents[0]!;
+    expect(baselineWorker.action).toBe('forage');
+
+    const stalePlanState: CivilizationState = {
+      ...baselineState,
+      agents: baselineState.agents.map((agent, index) =>
+        index === 1
+          ? {
+              ...agent,
+              plan: [
+                {
+                  action: 'forage' as const,
+                  targetTileIndex: baselineWorker.targetTileIndex,
+                  targetStructureId: 0,
+                },
+              ],
+              planIndex: 0,
+            }
+          : agent,
+      ),
+    };
+    const withStaleDeadPlan = advanceCivilization(stalePlanState, terrain, 100).civilization;
+    expect(withStaleDeadPlan.agents[0]).toMatchObject({
+      action: baselineWorker.action,
+      targetTileIndex: baselineWorker.targetTileIndex,
+      personalGoal: baselineWorker.personalGoal,
+      rng: baselineWorker.rng,
+    });
+  });
+
+  it('does not let a reservation from another source tile alter local work', () => {
+    const terrain = uniformTerrain();
+    const civilization = createInitialCivilization([28, 29, 30, 31], terrain);
+    const center = civilization.centerTileIndex;
+    terrain.food[center - 1] = 30;
+    terrain.food[center + 1] = 30;
+    const inactive = inactiveFounders(civilization);
+    const decidingAgent = {
+      ...civilization.agents[0]!,
+      hunger: 0,
+      thirst: 0,
+      fatigue: 0,
+    };
+    const baselineState: CivilizationState = {
+      ...civilization,
+      stockpile: { food: 0, water: 100, timber: 0, stone: 0 },
+      structures: [operationalShelter(center)],
+      agents: [decidingAgent, ...inactive.agents.slice(1)],
+    };
+    const baseline = advanceCivilization(baselineState, terrain, 100).civilization;
+    const baselineTarget = baseline.agents[0]!.targetTileIndex;
+
+    const remoteSource = center + terrain.width * 2;
+    const withRemoteReservation: CivilizationState = {
+      ...baselineState,
+      agents: baselineState.agents.map((agent, index) =>
+        index === 1
+          ? {
+              ...civilization.agents[1]!,
+              tileIndex: remoteSource,
+              action: 'forage' as const,
+              targetTileIndex: baselineTarget,
+              plan: [
+                {
+                  action: 'forage' as const,
+                  targetTileIndex: baselineTarget,
+                  targetStructureId: 0,
+                },
+              ],
+              planIndex: 0,
+            }
+          : agent,
+      ),
+    };
+    const coordinated = advanceCivilization(withRemoteReservation, terrain, 100).civilization;
+    expect(coordinated.agents[0]).toMatchObject({
+      action: baseline.agents[0]!.action,
+      targetTileIndex: baselineTarget,
+      personalGoal: baseline.agents[0]!.personalGoal,
+      rng: baseline.agents[0]!.rng,
+    });
   });
 
   it('naturally degrades an operational shelter through damaged and abandoned before deterministic repurposing', () => {

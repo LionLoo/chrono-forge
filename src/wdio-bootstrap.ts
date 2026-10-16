@@ -1,5 +1,6 @@
 /** Test-only bridge; Vite statically removes this module from production builds. */
 import '@wdio/tauri-plugin';
+import { invoke } from '@tauri-apps/api/core';
 
 import {
   requestSemanticSaveConfirmation,
@@ -12,4 +13,5 @@ declare global {
     ((identity: SemanticSaveIdentity) => Promise<void>) | undefined;
 }
 
-globalThis.__chronoForgeE2EConfirmSemanticSave = requestSemanticSaveConfirmation;
+globalThis.__chronoForgeE2EConfirmSemanticSave = (identity) =>
+  requestSemanticSaveConfirmation(invoke, identity);

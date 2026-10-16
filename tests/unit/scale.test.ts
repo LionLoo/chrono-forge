@@ -144,10 +144,13 @@ describe('M8 deterministic population scale authority', () => {
       detailedResidents: Array.from({ length: 300 }, (_, index) => resident(index + 1)),
       cohorts: [cohort(20)],
     });
+    const initialDto = populationScaleDto(initial);
+    expect(advancePopulationScale(initial, 0)).toBe(initial);
     const oneShot = advancePopulationScale(initial, 19);
     let partitioned = initial;
     for (const ticks of [1, 7, 2, 9]) partitioned = advancePopulationScale(partitioned, ticks);
 
+    expect(populationScaleDto(initial)).toStrictEqual(initialDto);
     expect(populationScaleDto(partitioned)).toStrictEqual(populationScaleDto(oneShot));
     expect(oneShot.operationCount).toBeGreaterThan(0);
     expect(oneShot.backlog.totalDue).toBeLessThanOrEqual(5_256);

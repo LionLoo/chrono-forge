@@ -21,6 +21,7 @@ import {
   createRuntimeProfileWorld,
 } from '../tests/support/runtime-profile-fixture';
 import { serializeWorldSnapshot } from '../src/simulation/persistence';
+import { waitForInstalledPlayerPage } from './installed-player-page';
 
 const PROFILE_VERSION = 1;
 const HEAP_LIMIT_BYTES = 512 * 1024 * 1024;
@@ -49,6 +50,15 @@ interface NamedLatency {
 interface ProcessTreeSample {
   readonly cpuSeconds: number;
   readonly processCount: number;
+  readonly processes: readonly ProcessTreeEntry[];
+  readonly workingSetBytes: number;
+}
+
+interface ProcessTreeEntry {
+  readonly cpuSeconds: number;
+  readonly kind: string;
+  readonly parentProcessId: number;
+  readonly processId: number;
   readonly workingSetBytes: number;
 }
 
@@ -67,12 +77,21 @@ interface RuntimeSample {
 interface IdleObservation {
   readonly durationSeconds: number;
   readonly processCpuSeconds: number | null;
+  readonly processCpuSecondsByProcess: readonly ProcessCpuDelta[] | null;
   readonly scriptDurationSeconds: number | null;
   readonly taskDurationSeconds: number | null;
 }
 
+interface ProcessCpuDelta {
+  readonly cpuSeconds: number;
+  readonly kind: string;
+  readonly processId: number;
+}
+
 interface ProcessRecord {
+  readonly CommandLine: string | null;
   readonly KernelModeTime: number | string | null;
+  readonly Name: string | null;
   readonly ParentProcessId: number;
   readonly ProcessId: number;
   readonly UserModeTime: number | string | null;
@@ -240,6 +259,39 @@ async function waitForTick(page: Page, minimumTick: number, timeoutMs = 30_000):
   );
 }
 
+async function activeSaveGeneration(page: Page): Promise<number> {
+  const text = await page.locator('.archive-panel > p').first().innerText();
+  const value = Number(/generation\s+([0-9]+)/u.exec(text)?.[1]);
+  if (!Number.isSafeInteger(value) || value < 1) {
+    throw new Error(`Invalid active save generation readout: ${text}`);
+  }
+  return value;
+}
+
+async function waitForSaveGenerationAfter(
+  page: Page,
+  previousGeneration: number,
+  checkpointLabel: string,
+  timeoutMs = 30_000,
+): Promise<void> {
+  const startedAt = nodePerformance.now();
+  while (nodePerformance.now() - startedAt < timeoutMs) {
+    if ((await activeSaveGeneration(page)) > previousGeneration) return;
+    await page.waitForTimeout(25);
+  }
+  const diagnostics = {
+    activeGeneration: await activeSaveGeneration(page),
+    alerts: await page.getByRole('alert').allInnerTexts(),
+    buttons: await page.getByRole('button').allInnerTexts(),
+    focusOutput: await page.locator('.timer-readout').allInnerTexts(),
+    persistenceStatus: await page.locator('.persistence-status').allInnerTexts(),
+    simulationStatus: await page.locator('.simulation-status').allInnerTexts(),
+  };
+  throw new Error(
+    `${checkpointLabel} did not advance the active save generation beyond ${previousGeneration} within ${timeoutMs} ms: ${JSON.stringify(diagnostics)}`,
+  );
+}
+
 async function waitForTextChange(
   read: () => Promise<string>,
   previous: string,
@@ -332,6 +384,16 @@ function numericProcessValue(value: number | string | null): number {
   return Number.isFinite(parsed) ? parsed : 0;
 }
 
+function processKind(record: ProcessRecord): string {
+  const commandLine = record.CommandLine ?? '';
+  const type = /--type=([^ ]+)/u.exec(commandLine)?.[1];
+  if (type === 'renderer') {
+    const clientId = /--renderer-client-id=([0-9]+)/u.exec(commandLine)?.[1];
+    return clientId === undefined ? type : `${type}-${clientId}`;
+  }
+  return type ?? record.Name ?? 'unknown';
+}
+
 function windowsProcessTree(rootProcessId: number | null): ProcessTreeSample | null {
   if (rootProcessId === null || process.platform !== 'win32') return null;
   try {
@@ -341,7 +403,7 @@ function windowsProcessTree(rootProcessId: number | null): ProcessTreeSample | n
         '-NoProfile',
         '-NonInteractive',
         '-Command',
-        'Get-CimInstance Win32_Process | Select-Object ProcessId,ParentProcessId,WorkingSetSize,KernelModeTime,UserModeTime | ConvertTo-Json -Compress',
+        'Get-CimInstance Win32_Process | Select-Object ProcessId,ParentProcessId,Name,CommandLine,WorkingSetSize,KernelModeTime,UserModeTime | ConvertTo-Json -Compress',
       ],
       { encoding: 'utf8', maxBuffer: 16 * 1024 * 1024 },
     );
@@ -360,20 +422,22 @@ function windowsProcessTree(rootProcessId: number | null): ProcessTreeSample | n
     }
     const tree = processes.filter((entry) => included.has(entry.ProcessId));
     if (!tree.some((entry) => entry.ProcessId === rootProcessId)) return null;
+    const processSamples = tree
+      .map((entry) => ({
+        cpuSeconds:
+          (numericProcessValue(entry.KernelModeTime) + numericProcessValue(entry.UserModeTime)) /
+          10_000_000,
+        kind: processKind(entry),
+        parentProcessId: entry.ParentProcessId,
+        processId: entry.ProcessId,
+        workingSetBytes: numericProcessValue(entry.WorkingSetSize),
+      }))
+      .sort((left, right) => left.processId - right.processId);
     return Object.freeze({
-      cpuSeconds:
-        tree.reduce(
-          (total, entry) =>
-            total +
-            numericProcessValue(entry.KernelModeTime) +
-            numericProcessValue(entry.UserModeTime),
-          0,
-        ) / 10_000_000,
+      cpuSeconds: processSamples.reduce((total, entry) => total + entry.cpuSeconds, 0),
       processCount: tree.length,
-      workingSetBytes: tree.reduce(
-        (total, entry) => total + numericProcessValue(entry.WorkingSetSize),
-        0,
-      ),
+      processes: processSamples,
+      workingSetBytes: processSamples.reduce((total, entry) => total + entry.workingSetBytes, 0),
     });
   } catch {
     return null;
@@ -533,12 +597,17 @@ async function profileRuntime(
 
   for (let step = 1; step <= steps; step += 1) {
     const expectedTick = startTick + step * stepMinutes * 60 * ratio;
+    const previousGeneration = await activeSaveGeneration(page);
     const startedAt = nodePerformance.now();
     await advanceControlledClock(page, stepMinutes * 60_000);
     const pauseLatency = await measureTransition(
       `checkpoint-pause-${step}`,
       () => page.getByRole('button', { name: 'Pause' }).click(),
-      () => page.getByRole('button', { name: 'Resume' }).waitFor({ state: 'visible' }),
+      () =>
+        Promise.all([
+          page.getByRole('button', { name: 'Resume' }).waitFor({ state: 'visible' }),
+          waitForSaveGenerationAfter(page, previousGeneration, `checkpoint-pause-${step}`),
+        ]).then(() => undefined),
     );
     await waitForTick(page, expectedTick);
     stepLatenciesMs.push(nodePerformance.now() - startedAt);
@@ -565,12 +634,30 @@ async function profileRuntime(
       const idleScriptEnd = performanceMetric(idlePerformanceEnd, 'ScriptDuration');
       const idleTaskStart = performanceMetric(idlePerformanceStart, 'TaskDuration');
       const idleTaskEnd = performanceMetric(idlePerformanceEnd, 'TaskDuration');
+      const idleProcessStartById = new Map(
+        idleProcessStart?.processes.map((process) => [process.processId, process]) ?? [],
+      );
       idleObservation = Object.freeze({
         durationSeconds: (nodePerformance.now() - idleStartedAt) / 1_000,
         processCpuSeconds:
           idleProcessStart === null || idleProcessEnd === null
             ? null
             : idleProcessEnd.cpuSeconds - idleProcessStart.cpuSeconds,
+        processCpuSecondsByProcess:
+          idleProcessStart === null || idleProcessEnd === null
+            ? null
+            : idleProcessEnd.processes
+                .map((process) => ({
+                  cpuSeconds:
+                    process.cpuSeconds -
+                    (idleProcessStartById.get(process.processId)?.cpuSeconds ?? 0),
+                  kind: process.kind,
+                  processId: process.processId,
+                }))
+                .sort(
+                  (left, right) =>
+                    right.cpuSeconds - left.cpuSeconds || left.processId - right.processId,
+                ),
         scriptDurationSeconds:
           idleScriptStart === null || idleScriptEnd === null
             ? null
@@ -824,6 +911,7 @@ async function profileRuntime(
       earlyBrowserFrameObservationP95Ms: earlyFrameP95,
       lateBrowserFrameObservationP95Ms: lateFrameP95,
       checkpointTransactionP95Ms: checkpointTransactionP95,
+      checkpointTransactionLatenciesMs: stepLatenciesMs,
       peakHeapBytes,
       warmedHeapBytes,
       finalHeapBytes,
@@ -869,11 +957,9 @@ try {
     const endpoint = process.env.CHRONO_FORGE_CDP_URL ?? 'http://127.0.0.1:9333';
     browser = await chromium.connectOverCDP(endpoint);
     const context = browser.contexts()[0];
-    const page = context
-      ?.pages()
-      .find((candidate) => candidate.url().startsWith('http://tauri.localhost'));
+    const page = context === undefined ? undefined : await waitForInstalledPlayerPage(context);
     if (context === undefined || page === undefined) {
-      throw new Error('No installed Chrono Forge WebView page was exposed over CDP.');
+      throw new Error('No installed Chrono Forge player WebView page was exposed over CDP.');
     }
     await page.setViewportSize({ width: 1440, height: 900 });
     await profileRuntime(target, browser, context, page, outputFile);

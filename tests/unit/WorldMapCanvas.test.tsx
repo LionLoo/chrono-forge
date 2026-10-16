@@ -2,7 +2,12 @@ import { act, fireEvent, render, waitFor } from '@testing-library/react';
 import { vi } from 'vitest';
 
 import { INITIAL_WORLD_CAMERA, type WorldCamera } from '../../src/rendering/camera';
-import { STRUCTURE_KIND_CODES, STRUCTURE_STATE_CODES } from '../../src/protocol';
+import { createRenderModel } from '../../src/rendering/render-model';
+import {
+  AGENT_ACTION_CODES,
+  STRUCTURE_KIND_CODES,
+  STRUCTURE_STATE_CODES,
+} from '../../src/protocol';
 import { WorldMapCanvas, type WorldMapProjection } from '../../src/rendering/WorldMapCanvas';
 import { createInitialWorld, stepWorld } from '../../src/simulation/world';
 import { createTestRuntimeActivityRecorder } from '../../src/testing/runtime-activity';
@@ -427,10 +432,16 @@ describe('Pixi world projection', () => {
   it('renders dense factual agent updates without scheduling continuous interpolation', async () => {
     const requestAnimationFrame = vi.spyOn(window, 'requestAnimationFrame');
     const agentCount = 513;
+    const actions = new Uint8Array(agentCount);
+    actions[1] = AGENT_ACTION_CODES.collectWater;
+    actions[2] = AGENT_ACTION_CODES.construct;
+    const health = new Uint16Array(agentCount).fill(1_000);
+    health[1] = 500;
+    health[2] = 100;
     const initial = {
       ...projection,
-      agentActions: new Uint8Array(agentCount),
-      agentHealth: new Uint16Array(agentCount).fill(1_000),
+      agentActions: actions,
+      agentHealth: health,
       agentIds: Uint32Array.from({ length: agentCount }, (_, index) => index + 10_000),
       agentTiles: new Uint32Array(agentCount),
     } satisfies WorldMapProjection;
@@ -441,7 +452,7 @@ describe('Pixi world projection', () => {
     } satisfies WorldMapProjection;
     const view = render(
       <WorldMapCanvas
-        camera={INITIAL_WORLD_CAMERA}
+        camera={{ ...INITIAL_WORLD_CAMERA, zoom: 1 }}
         onCameraChange={vi.fn()}
         overlay="terrain"
         projection={initial}
@@ -449,9 +460,62 @@ describe('Pixi world projection', () => {
     );
 
     await waitFor(() => expect(view.getByRole('application')).toBeVisible());
+    const agentGraphics = pixiMocks.graphics[5]!;
+    const model = createRenderModel(initial, {
+      detailLevel: 'overview',
+      overlay: 'terrain',
+      reducedEffects: false,
+      selection: null,
+      viewport: { heightTiles: initial.height, leftTile: 0, topTile: 0, widthTiles: initial.width },
+    });
+    const expected = model.agents.slice(0, 3);
+    const center = (index: number): readonly [number, number] => {
+      const agent = expected[index]!;
+      const tileX = (agent.tileIndex % initial.width) * 6 + 3;
+      const tileY = Math.floor(agent.tileIndex / initial.width) * 6 + 3;
+      return [
+        tileX + ((agent.selectable.id % 3) - 1) * 0.45,
+        tileY + ((Math.floor(agent.selectable.id / 3) % 3) - 1) * 0.3,
+      ];
+    };
+    const soundCenter = center(0);
+    const wornCenter = center(1);
+    const criticalCenter = center(2);
+    expect(agentGraphics.rect).toHaveBeenCalledTimes(agentCount + 2);
+    expect(agentGraphics.rect).toHaveBeenNthCalledWith(
+      1,
+      soundCenter[0] - 0.9,
+      soundCenter[1] - 0.9,
+      1.8,
+      1.8,
+    );
+    expect(agentGraphics.rect).toHaveBeenNthCalledWith(
+      2,
+      wornCenter[0] - 1.15,
+      wornCenter[1] - 1.15,
+      2.3,
+      2.3,
+    );
+    expect(agentGraphics.rect).toHaveBeenNthCalledWith(
+      4,
+      criticalCenter[0] - 1.35,
+      criticalCenter[1] - 1.35,
+      2.7,
+      2.7,
+    );
+    expect(agentGraphics.fill).toHaveBeenNthCalledWith(1, expected[0]!.identity.clothingColor);
+    expect(agentGraphics.fill).toHaveBeenNthCalledWith(2, expected[1]!.identity.clothingColor);
+    expect(agentGraphics.fill).toHaveBeenNthCalledWith(3, expected[1]!.identity.accentColor);
+    expect(agentGraphics.fill).toHaveBeenNthCalledWith(4, expected[2]!.identity.clothingColor);
+    expect(agentGraphics.fill).toHaveBeenNthCalledWith(5, expected[2]!.identity.accentColor);
+    expect(agentGraphics.stroke).toHaveBeenNthCalledWith(1, { color: 0x17211c, width: 0.35 });
+    expect(agentGraphics.stroke).toHaveBeenNthCalledWith(2, { color: 0xe2ac55, width: 0.55 });
+    expect(agentGraphics.stroke).toHaveBeenNthCalledWith(3, { color: 0xd75d55, width: 0.55 });
+    expect(agentGraphics.circle).not.toHaveBeenCalled();
+    expect(agentGraphics.moveTo).not.toHaveBeenCalled();
     view.rerender(
       <WorldMapCanvas
-        camera={INITIAL_WORLD_CAMERA}
+        camera={{ ...INITIAL_WORLD_CAMERA, zoom: 1 }}
         onCameraChange={vi.fn()}
         overlay="terrain"
         projection={advanced}
@@ -459,6 +523,133 @@ describe('Pixi world projection', () => {
     );
 
     expect(requestAnimationFrame).not.toHaveBeenCalled();
+    expect(agentGraphics.rect).toHaveBeenCalledTimes((agentCount + 2) * 2);
+    expect(agentGraphics.fill).toHaveBeenCalledTimes((agentCount + 2) * 2);
+    expect(agentGraphics.stroke).toHaveBeenCalledTimes(agentCount * 2);
+    expect(agentGraphics.circle).not.toHaveBeenCalled();
+    expect(agentGraphics.moveTo).not.toHaveBeenCalled();
+
+    agentGraphics.circle.mockClear();
+    agentGraphics.fill.mockClear();
+    agentGraphics.moveTo.mockClear();
+    agentGraphics.rect.mockClear();
+    agentGraphics.stroke.mockClear();
+    view.rerender(
+      <WorldMapCanvas
+        camera={{ ...INITIAL_WORLD_CAMERA, zoom: 1.5 }}
+        onCameraChange={vi.fn()}
+        overlay="terrain"
+        projection={advanced}
+      />,
+    );
+    expect(agentGraphics.circle).toHaveBeenCalledTimes(agentCount);
+
+    agentGraphics.circle.mockClear();
+    agentGraphics.fill.mockClear();
+    agentGraphics.moveTo.mockClear();
+    agentGraphics.rect.mockClear();
+    agentGraphics.stroke.mockClear();
+    view.rerender(
+      <WorldMapCanvas
+        camera={{ ...INITIAL_WORLD_CAMERA, zoom: 1 }}
+        onCameraChange={vi.fn()}
+        overlay="terrain"
+        projection={advanced}
+      />,
+    );
+    expect(agentGraphics.rect).toHaveBeenCalledTimes(agentCount + 2);
+    expect(agentGraphics.fill).toHaveBeenCalledTimes(agentCount + 2);
+    expect(agentGraphics.stroke).toHaveBeenCalledTimes(agentCount);
+    expect(agentGraphics.circle).not.toHaveBeenCalled();
+    expect(agentGraphics.moveTo).not.toHaveBeenCalled();
+    requestAnimationFrame.mockRestore();
+  });
+
+  it('bounds spatially distributed whole-world geometry while detailed views retain every agent', async () => {
+    const requestAnimationFrame = vi.spyOn(window, 'requestAnimationFrame');
+    const agentCount = 5_000;
+    const overviewMarkerCount = 1_536;
+    const selectedIndex = 2;
+    const selectedId = 10_000 + selectedIndex;
+    const health = new Uint16Array(agentCount).fill(1_000);
+    health[selectedIndex] = 100;
+    const largeProjection = {
+      ...projection,
+      agentActions: new Uint8Array(agentCount),
+      agentHealth: health,
+      agentIds: Uint32Array.from({ length: agentCount }, (_, index) => index + 10_000),
+      agentTiles: Uint32Array.from({ length: agentCount }, (_, index) => index % 2),
+    } satisfies WorldMapProjection;
+    const view = render(
+      <WorldMapCanvas
+        camera={{ ...INITIAL_WORLD_CAMERA, zoom: 1 }}
+        onCameraChange={vi.fn()}
+        overlay="terrain"
+        projection={largeProjection}
+        selection={{ id: selectedId, kind: 'agent' }}
+      />,
+    );
+
+    await waitFor(() => expect(view.getByRole('application')).toBeVisible());
+    const agentGraphics = pixiMocks.graphics[5]!;
+    const markerCenter = (id: number, tileIndex: number): readonly [number, number] => [
+      (tileIndex % largeProjection.width) * 6 + 3 + ((id % 3) - 1) * 0.45,
+      Math.floor(tileIndex / largeProjection.width) * 6 + 3 + ((Math.floor(id / 3) % 3) - 1) * 0.3,
+    ];
+    const firstCenter = markerCenter(10_000, 0);
+    const lastCenter = markerCenter(14_999, 1);
+    const selectedCenter = markerCenter(selectedId, selectedIndex % 2);
+    expect(agentGraphics.rect).toHaveBeenCalledTimes(overviewMarkerCount);
+    expect(agentGraphics.rect).toHaveBeenNthCalledWith(
+      1,
+      firstCenter[0] - 0.9,
+      firstCenter[1] - 0.9,
+      1.8,
+      1.8,
+    );
+    expect(agentGraphics.rect).toHaveBeenNthCalledWith(
+      overviewMarkerCount,
+      lastCenter[0] - 0.9,
+      lastCenter[1] - 0.9,
+      1.8,
+      1.8,
+    );
+    expect(agentGraphics.rect).toHaveBeenCalledWith(
+      selectedCenter[0] - 1.35,
+      selectedCenter[1] - 1.35,
+      2.7,
+      2.7,
+    );
+    expect(agentGraphics.circle).not.toHaveBeenCalled();
+    expect(agentGraphics.moveTo).not.toHaveBeenCalled();
+    expect(requestAnimationFrame).not.toHaveBeenCalled();
+
+    agentGraphics.circle.mockClear();
+    agentGraphics.rect.mockClear();
+    view.rerender(
+      <WorldMapCanvas
+        camera={{ ...INITIAL_WORLD_CAMERA, zoom: 1.5 }}
+        onCameraChange={vi.fn()}
+        overlay="terrain"
+        projection={largeProjection}
+        selection={{ id: selectedId, kind: 'agent' }}
+      />,
+    );
+    expect(agentGraphics.circle).toHaveBeenCalledTimes(agentCount);
+
+    agentGraphics.circle.mockClear();
+    agentGraphics.rect.mockClear();
+    view.rerender(
+      <WorldMapCanvas
+        camera={{ ...INITIAL_WORLD_CAMERA, zoom: 1 }}
+        onCameraChange={vi.fn()}
+        overlay="terrain"
+        projection={largeProjection}
+        selection={{ id: selectedId, kind: 'agent' }}
+      />,
+    );
+    expect(agentGraphics.rect).toHaveBeenCalledTimes(overviewMarkerCount);
+    expect(agentGraphics.circle).not.toHaveBeenCalled();
     requestAnimationFrame.mockRestore();
   });
 

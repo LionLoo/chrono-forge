@@ -5908,6 +5908,15 @@ export function migrateWorldSnapshot(snapshot: string): string {
 
 /** Loads and validates a supported snapshot without mutating its input. */
 export function deserializeWorldSnapshot(snapshot: string): WorldState {
+  const envelope = parseEnvelope(snapshot);
+  const formatVersion = safeInteger(envelope.formatVersion, 'World snapshot formatVersion');
+  if (formatVersion === WORLD_SNAPSHOT_VERSION_FOURTEEN) {
+    // Current snapshots are already in their final canonical shape. Sending them through the
+    // migration entry point would fully parse, validate, serialize, parse, and validate the same
+    // multi-megabyte world twice on every checkpoint. Keep migrations deliberately conservative,
+    // while making the overwhelmingly common load/save path perform one complete validation.
+    return deserializeVersionFourteen(envelope);
+  }
   const migrated = migrateWorldSnapshot(snapshot);
   return deserializeVersionFourteen(parseEnvelope(migrated));
 }

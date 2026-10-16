@@ -4,6 +4,7 @@ import { confirmSemanticSaveThroughBroker } from './persistence-broker';
 import {
   createInMemoryPersistenceGateway,
   createTauriPersistenceGateway,
+  type NativeSemanticSaveConfirmer,
   type PersistenceGateway,
   type TauriInvoke,
 } from './persistence';
@@ -18,10 +19,22 @@ export interface RuntimePersistence {
 interface RuntimePersistenceDependencies {
   readonly detectTauri?: () => boolean;
   readonly invokeTauri?: TauriInvoke;
+  readonly confirmSemanticSave?: NativeSemanticSaveConfirmer;
   readonly createBrowserGateway?: () => PersistenceGateway;
 }
 
 const invokeTauri: TauriInvoke = (command, arguments_) => invoke(command, arguments_);
+
+export function confirmFirstSemanticSavePerSlot(
+  confirmSemanticSave: NativeSemanticSaveConfirmer,
+): NativeSemanticSaveConfirmer {
+  const attemptedSlotIds = new Set<string>();
+  return async (invokeConfirmation, loaded) => {
+    if (attemptedSlotIds.has(loaded.slotId)) return;
+    attemptedSlotIds.add(loaded.slotId);
+    await confirmSemanticSave(invokeConfirmation, loaded);
+  };
+}
 
 /**
  * Selects the narrow native command boundary without making browser preview
@@ -35,7 +48,9 @@ export function createRuntimePersistence(
     return {
       gateway: createTauriPersistenceGateway(
         dependencies.invokeTauri ?? invokeTauri,
-        confirmSemanticSaveThroughBroker,
+        confirmFirstSemanticSavePerSlot(
+          dependencies.confirmSemanticSave ?? confirmSemanticSaveThroughBroker,
+        ),
       ),
       mode: 'native',
     };

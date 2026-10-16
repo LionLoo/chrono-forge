@@ -17,6 +17,7 @@ import {
   buildPreparedRenderModel,
   prepareRenderProjection,
   renderDetailForZoom,
+  type AgentDescriptor,
   type PreparedRenderProjection,
   type RenderModel,
   type RenderViewport,
@@ -67,6 +68,7 @@ const VIEWPORT_CACHE_MARGIN_TILES = 32;
 const MIN_AGENT_MOTION_DURATION_MS = 120;
 const MAX_AGENT_MOTION_DURATION_MS = 480;
 const MAX_INTERPOLATED_AGENT_COUNT = 512;
+const MAX_DENSE_OVERVIEW_AGENT_MARKERS = 1_536;
 
 interface AgentMotion {
   readonly durationMs: number;
@@ -683,14 +685,38 @@ function agentMotionPoint(motion: AgentMotion, now: number): readonly [number, n
   ];
 }
 
+function denseOverviewAgents(model: RenderModel): readonly AgentDescriptor[] {
+  if (model.agents.length <= MAX_DENSE_OVERVIEW_AGENT_MARKERS) return model.agents;
+  const lastSourceIndex = model.agents.length - 1;
+  const lastMarkerIndex = MAX_DENSE_OVERVIEW_AGENT_MARKERS - 1;
+  const sampled = Array.from({ length: MAX_DENSE_OVERVIEW_AGENT_MARKERS }, (_, markerIndex) => {
+    const sourceIndex = Math.floor((markerIndex * lastSourceIndex) / lastMarkerIndex);
+    return model.agents[sourceIndex]!;
+  });
+  if (model.selected?.kind !== 'agent') return sampled;
+  const selectedAgent = model.agents.find((agent) => agent.selectable.id === model.selected?.id);
+  if (
+    selectedAgent !== undefined &&
+    !sampled.some((agent) => agent.selectable.id === selectedAgent.selectable.id)
+  ) {
+    sampled[Math.floor(sampled.length / 2)] = selectedAgent;
+  }
+  return sampled;
+}
+
 function drawAgents(
   graphics: Graphics,
   model: RenderModel,
   motions: ReadonlyMap<number, AgentMotion>,
   now: number,
 ): void {
+  const useDenseOverviewMarkers =
+    model.detailLevel === 'overview' && model.agents.length > MAX_INTERPOLATED_AGENT_COUNT;
   graphics.clear();
-  for (const agent of model.agents) {
+  // At whole-world scale, cap only presentation geometry with an evenly spaced,
+  // stable sample. Simulation, projections, selection, and closer views keep all agents.
+  const visibleAgents = useDenseOverviewMarkers ? denseOverviewAgents(model) : model.agents;
+  for (const agent of visibleAgents) {
     const motion = motions.get(agent.selectable.id);
     const [x, y] =
       motion === undefined
@@ -716,6 +742,20 @@ function drawAgents(
     const bodyBottom = centerY + height * 0.34;
     const healthOutline =
       agent.healthTier === 'sound' ? 0x17211c : agent.healthTier === 'worn' ? 0xe2ac55 : 0xd75d55;
+    if (useDenseOverviewMarkers) {
+      const markerSize =
+        agent.healthTier === 'sound' ? 1.8 : agent.healthTier === 'worn' ? 2.3 : 2.7;
+      graphics
+        .rect(centerX - markerSize / 2, centerY - markerSize / 2, markerSize, markerSize)
+        .fill(agent.identity.clothingColor)
+        .stroke({ color: healthOutline, width: agent.healthTier === 'sound' ? 0.35 : 0.55 });
+      if (agent.activityVisual !== 'idle') {
+        graphics
+          .rect(centerX + direction * 0.95 - 0.22, centerY - 0.22, 0.44, 0.44)
+          .fill(agent.identity.accentColor);
+      }
+      continue;
+    }
     if (model.detailLevel !== 'overview') {
       graphics
         .ellipse(centerX, centerY + height * 0.58, halfWidth * 1.45, height * 0.12)

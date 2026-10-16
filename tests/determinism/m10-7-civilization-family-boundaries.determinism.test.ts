@@ -30,8 +30,12 @@ const RELOAD_ENDPOINTS = Object.freeze([
   220_000,
   234_999,
   235_000,
+  239_999,
+  240_000,
   244_999,
   245_000,
+  259_999,
+  260_000,
   269_999,
   270_000,
   HORIZON_TICK,
@@ -72,13 +76,12 @@ describe('M10.7 civilization, disaster, and family boundaries', () => {
     for (const kind of ['crisis-assisted', 'flood-started'])
       expect(eventKindsAt(200_000)).toContain(kind);
     expect(eventKindsAt(220_000)).toContain('flood-recovered');
-    for (const kind of [
-      'conflict-resolved',
-      'household-formed',
-      'person-born',
-      'refugees-relocated',
-    ])
+    for (const kind of ['household-formed', 'long-term-partnership-formed', 'person-born'])
       expect(eventKindsAt(235_000)).toContain(kind);
+    for (const kind of ['communal-child-arrival', 'conflict-started', 'person-born'])
+      expect(eventKindsAt(240_000)).toContain(kind);
+    for (const kind of ['conflict-resolved', 'refugees-relocated'])
+      expect(eventKindsAt(260_000)).toContain(kind);
     for (const kind of ['family-inheritance', 'person-born', 'person-died', 'partner-widowed'])
       expect(eventKindsAt(270_000)).toContain(kind);
 

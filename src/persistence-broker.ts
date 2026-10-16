@@ -46,6 +46,10 @@ export async function startPersistenceBroker(): Promise<void> {
           PERSISTENCE_BROKER_CONFIRM_RESULT_EVENT,
           brokerEnvelope(requestId, brokerResult(requestId, error)),
         );
+        // Canonical parsing briefly materializes the full world in this isolated renderer. Close
+        // after the result is delivered so repeated checkpoints cannot retain that parse heap for
+        // the life of the player window. The caller recreates this isolated boundary on demand.
+        await invoke('retire_persistence_broker', { requestId });
       })();
     },
   );
