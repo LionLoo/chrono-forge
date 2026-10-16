@@ -980,13 +980,13 @@ function FocusWorkspace({
 
   const enqueueExclusiveWorldAuthorityTransition = useCallback<OperationEnqueuer>(
     (operation) => {
-      if (exclusiveWorldAuthorityTransitionIsPending()) {
-        return Promise.reject(new Error('Wait for the active world reset to finish.'));
+      if (worldAuthorityTransitionIsPending()) {
+        return Promise.reject(new Error('Wait for the active world change to finish.'));
       }
       const release = beginWorldAuthorityTransition(true);
       return enqueue(operation).finally(release);
     },
-    [beginWorldAuthorityTransition, enqueue, exclusiveWorldAuthorityTransitionIsPending],
+    [beginWorldAuthorityTransition, enqueue, worldAuthorityTransitionIsPending],
   );
 
   const adoptCommittedWorld = useCallback(
@@ -1914,6 +1914,7 @@ function FocusWorkspace({
             <button
               disabled={
                 worldMutationFrozen ||
+                worldAuthorityTransitionPending ||
                 !canSwitchWorld ||
                 parsedNewWorldSeed === null ||
                 resetConfirmation !== activeSave.name

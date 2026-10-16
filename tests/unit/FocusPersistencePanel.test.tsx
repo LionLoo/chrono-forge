@@ -829,6 +829,74 @@ describe('FocusPersistencePanel offline progression', () => {
     ]);
   });
 
+  it('refuses a same-turn reset behind a pending switch even when slot names match', async () => {
+    const user = userEvent.setup();
+    const base = createInMemoryPersistenceGateway(() => 1_000);
+    const secondSnapshot = serializeWorldSnapshot(
+      stepWorld(createInitialWorld([5, 6, 7, 8], { width: 2, height: 2, chunkSize: 2 }), 42),
+    );
+    await base.commitSaveSlot('primary', 'Shared world', snapshot);
+    await base.commitSaveSlot('world-2', 'Shared world', secondSnapshot);
+    await base.saveSettings({
+      ...DEFAULT_APP_SETTINGS,
+      activeSlotId: 'primary',
+      offlineProgressionEnabled: false,
+    });
+    let releaseSecondWorld = (): void => undefined;
+    const secondWorldGate = new Promise<void>((resolve) => {
+      releaseSecondWorld = resolve;
+    });
+    let secondWorldLoadStarted = false;
+    let lifecycleCommitCalls = 0;
+    const gateway: PersistenceGateway = {
+      ...base,
+      async commitSaveSlot(slotId, name, savedSnapshot) {
+        lifecycleCommitCalls += 1;
+        return base.commitSaveSlot(slotId, name, savedSnapshot);
+      },
+      async loadSaveSlot(slotId) {
+        if (slotId === 'world-2') {
+          secondWorldLoadStarted = true;
+          await secondWorldGate;
+        }
+        return base.loadSaveSlot(slotId);
+      },
+    };
+    const stateful = createStatefulSimulation();
+
+    render(
+      <FocusPersistencePanel
+        alerts={{ notifyCompletion: () => Promise.resolve() }}
+        clock={{ now: () => 1_000 }}
+        createWorldSeed={() => [109, 113, 127, 131]}
+        runtime={{ gateway, mode: 'browser-preview' }}
+        simulation={stateful.simulation}
+      />,
+    );
+
+    await user.click(await screen.findByText('World lifecycle'));
+    await user.type(screen.getByLabelText('Reset confirmation'), 'Shared world');
+    const slots = screen.getByRole('combobox', { name: 'Load local slot' });
+    const resetButton = screen.getByRole('button', { name: 'Reset active world' });
+    act(() => {
+      fireEvent.change(slots, { target: { value: 'world-2' } });
+      fireEvent.click(resetButton);
+    });
+
+    await waitFor(() => expect(secondWorldLoadStarted).toBe(true));
+    expect(resetButton).toBeDisabled();
+    expect(lifecycleCommitCalls).toBe(0);
+    releaseSecondWorld();
+
+    await waitFor(() =>
+      expect(screen.getByRole('combobox', { name: 'Load local slot' })).toHaveValue('world-2'),
+    );
+    expect(stateful.currentTick()).toBe(42);
+    expect(lifecycleCommitCalls).toBe(0);
+    expect(deserializeWorldSnapshot((await base.loadSaveSlot('primary'))!.snapshot).tick).toBe(0);
+    expect(deserializeWorldSnapshot((await base.loadSaveSlot('world-2'))!.snapshot).tick).toBe(42);
+  });
+
   it('blocks immediate focus and save actions while a successful reset is in flight', async () => {
     const user = userEvent.setup();
     const base = createInMemoryPersistenceGateway(() => 1_000);
