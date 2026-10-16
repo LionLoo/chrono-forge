@@ -219,6 +219,37 @@ describe('deterministic world lab', () => {
     expect(within(society!).getByText('The founding world formed.')).toBeVisible();
   });
 
+  it('shows the authoritative seed of the loaded slot instead of the bootstrap seed', async () => {
+    const gateway = createInMemoryPersistenceGateway();
+    await gateway.commitSaveSlot(
+      'other-world',
+      'Other world',
+      serializeWorldSnapshot(createInitialWorld([5, 6, 7, 8], DEMO_WORLD_CONFIG)),
+    );
+    await gateway.saveSettings({
+      ...DEFAULT_APP_SETTINGS,
+      activeSlotId: 'other-world',
+      offlineProgressionEnabled: false,
+    });
+
+    render(
+      <App
+        persistence={{ gateway, mode: 'browser-preview' }}
+        workerFactory={createRuntimeWorker}
+      />,
+    );
+
+    await screen.findByText('Loaded Other world.', {}, UI_READY_TIMEOUT);
+    const visibleSeeds = await screen.findAllByText(
+      '00000005-00000006-00000007-00000008',
+      {},
+      UI_READY_TIMEOUT,
+    );
+    expect(visibleSeeds).toHaveLength(2);
+    for (const seed of visibleSeeds) expect(seed).toBeVisible();
+    expect(screen.queryByText('4348524f-4e4f464f-52474531-00000001')).not.toBeInTheDocument();
+  });
+
   it('reduces map motion when the operating system requests reduced motion', async () => {
     const preference = {
       addEventListener: vi.fn(),
@@ -665,8 +696,8 @@ describe('deterministic world lab', () => {
     render(<App persistence={persistence} workerFactory={createRuntimeWorker} />);
     await screen.findByRole('button', { name: 'Start focus' }, UI_READY_TIMEOUT);
 
-    await user.click(screen.getByText('Create another slot'));
-    await user.click(screen.getByRole('button', { name: 'Save as new slot' }));
+    await user.click(screen.getByText('World lifecycle'));
+    await user.click(screen.getByRole('button', { name: 'Duplicate current world' }));
     await waitFor(async () => {
       expect(await persistence.gateway.listSaveSlots()).toHaveLength(2);
     });
@@ -775,8 +806,8 @@ describe('deterministic world lab', () => {
       );
     });
 
-    await user.click(screen.getByText('Create another slot'));
-    await user.click(screen.getByRole('button', { name: 'Save as new slot' }));
+    await user.click(screen.getByText('World lifecycle'));
+    await user.click(screen.getByRole('button', { name: 'Duplicate current world' }));
     await waitFor(() => {
       expect(screen.getByRole('combobox', { name: 'Load local slot' })).toHaveValue('world-2');
     });

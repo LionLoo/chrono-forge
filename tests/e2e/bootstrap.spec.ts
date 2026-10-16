@@ -129,9 +129,9 @@ test('production frontend renders a Worker-owned autonomous settlement', async (
   const savedStructure = await structure.innerText();
   await page.getByRole('button', { name: 'Save now' }).click();
   await expect(page.getByText('World saved manually.')).toBeVisible();
-  await page.getByText('Create another slot').click();
-  await page.getByRole('button', { name: 'Save as new slot' }).click();
-  await expect(page.getByText('New save slot created.')).toBeVisible();
+  await page.getByText('World lifecycle').click();
+  await page.getByRole('button', { name: 'Duplicate current world' }).click();
+  await expect(page.getByText('Current world duplicated into Second world.')).toBeVisible();
   await page.getByRole('button', { name: 'Start focus' }).click();
   await page.clock.fastForward(10_000);
   await page.getByRole('button', { name: 'Pause' }).click();

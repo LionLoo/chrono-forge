@@ -83,12 +83,15 @@ Durable saves are available in the installed desktop app. The browser developmen
 - **Save now** commits a new immutable generation for the active slot.
 - Chrono Forge retains the newest three fully recoverable generations. If the newest checksum-valid generation is semantically invalid, loading falls back to an older valid generation without deleting the failed evidence. The archive shows the loaded generation number.
 - **Load local slot** replaces the current world with the selected slot. Slot switching is disabled during an active focus session.
+- Open **World lifecycle** for three deliberately different operations:
+  - **Create new world** writes a new slot containing a tick-zero 256×192 world. It inherits no people, structures, resources, events, or progress from the active world.
+  - **Duplicate current world** copies the canonical current snapshot into a new slot when you intentionally want the same world and progress under another slot identity.
+  - **Reset active world** keeps the active slot identity but replaces only that slot with a fresh tick-zero generation. Type the displayed active world name to enable this permanent action. Other slots are untouched.
+- The new/reset seed is shown as four groups of eight hexadecimal characters. Use **Generate another seed** for a new Web Crypto selection, or paste an exact previously recorded seed to reproduce that starting world within the same content version.
 - **Export** creates a text package for the exact accepted generation. Copy it to a separate trusted location for backup.
 - **Validate and import** checks the package, version, checksum, and world references before creating/selecting the imported slot. Hand-edited, corrupt, oversized, or future-version packages are rejected without replacing a valid world.
 
-Important current lifecycle limitation: **Create another slot → Save as new slot** duplicates the active world at its current tick under a new slot ID and name. It does not create a fresh world. Separate **New World**, **Duplicate Current World**, and **Reset World** operations remain release-blocking M10.9 work. Until that milestone lands, do not use **Save as new slot** when you intend to start over.
-
-There is no finished player-facing reset/delete-world workflow in the current build. Preserve an export before experimenting with development builds or local data.
+New and Duplicate refuse an existing destination slot ID instead of overwriting it. If a newly committed slot cannot load, it remains safely inactive and the prior world stays selected. If Reset cannot commit, Chrono Forge restores the retained pre-reset Worker snapshot. In the rare case that the durable reset result or that rollback cannot be verified, all focus, archive, import/export, and settings-write controls freeze until Chrono Forge is reopened so neither possible world can overwrite the other. Preserve an export before experimenting with development builds or local data.
 
 ## Offline and interrupted-session behavior
 
@@ -174,8 +177,7 @@ Close other Chrono Forge instances and retry. Do not copy, replace, or edit the 
 - The current package version is a private `0.1.0` development build, not the final v1.0.0 release.
 - Only Windows 10/11 x64 is a supported native target for v1.
 - Current installers are unsigned and use manual trusted distribution; there is no embedded private-repository token or anonymous auto-updater.
-- **Save as new slot** currently duplicates a world; fresh-world and reset semantics remain M10.9 work.
-- Long-session performance/power/responsiveness, backend and whole-product stabilization, world-lifecycle semantics, clean release-candidate verification, signing/release packaging, tag, and private GitHub v1.0.0 release are not complete.
+- Clean release-candidate verification, final packaging, tag, and the private GitHub v1.0.0 release are not complete.
 - macOS and Linux may be architecturally possible but are not supported or release-verified.
 
 For development and exact validation commands, see [README.md](README.md), [CONTRIBUTING.md](CONTRIBUTING.md), and [PLAN.md](PLAN.md). The current evidence and known blockers are in [PROGRESS.md](PROGRESS.md).

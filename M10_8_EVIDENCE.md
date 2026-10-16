@@ -7,7 +7,7 @@ Last updated: 2026-10-15
 - Branch: `release/v1-whole-product-stabilization`.
 - Exact baseline: merged and merge-head-green M10.7 main `95ac97ec14b8f1b2d772f87dba6750a511e51e6b`.
 - M10.7 PR #23 final head `6aca10501c08c1ad4bebe63aa623e03a7c88af69` passed exact-head workflow `38102776945`; merge commit `95ac97e` passed exact merge-head workflow `38104990166`. Both workflows passed Web, Windows native/installer, and aggregate `Required`.
-- M10.8 is active and release-blocking. It owns cross-system player-flow, long-session responsiveness, Worker/UI/native integration, installed reopening, installer, and end-to-end stabilization. M10.9 world-lifecycle semantics remain separate and are not pre-accepted here.
+- M10.8 is delivered. It owns cross-system player-flow, long-session responsiveness, Worker/UI/native integration, installed reopening, installer, and end-to-end stabilization. M10.9 world-lifecycle semantics remain separate and are not pre-accepted here.
 
 ## Campaign 1 — long focus-session freeze
 
@@ -63,8 +63,8 @@ Locked observable acceptance before product edits:
 - The first complete local gate passed every product assertion and native phase but correctly stopped at post-exit evidence because the verifier still expected seven generations from the pre-performance policy. Read-only inspection of its isolated E2E database proved `integrity_check=ok`, empty foreign-key violations, exact expected slot heads/settings/sessions, and the designed eight rows: one verified baseline plus the newest three unverified primary generations, with one verified plus one unverified generation for each imported M9 slot. No player profile was touched.
 - Checkpoint `ba084552ce07b76a865dcc7ea741feae41509d6a` updates that stale expectation and strengthens the gate with an exact ordered `(slot_id, generation, semantically_verified)` assertion plus a negative marker-drift regression. Independent review reports no P0-P3 finding and confirms the change does not mask a product defect or weaken integrity. Focused validation passes 26/26, TypeScript, lint, formatting, diff hygiene, the corrected read-only verifier against the failed database, and a fresh complete installed run with four phase files/six tests plus exact eight-generation evidence.
 - Exact product/test head `ba08455` then passed the complete local `npm run ci` gate: formatting; zero-warning web/Rust lint; TypeScript; 72 covered files/596 tests at 88.87% statements, 81.62% branches, 94.69% functions, and 90.58% lines; 14 long files/32 tests in 1,440.91 seconds; Rust 43/43; browser 7/7; all four installed phase files/six tests; SQLite integrity/FK and exact retained state; SBOM generation; production exclusion; and the x64 NSIS installer.
-- M10.8 local acceptance is green. Hosted acceptance is not claimed until the final documentation head passes exact-head Web, Windows native/installer, and aggregate `Required`, merges sequentially, and the exact merge head passes aggregate `Required`.
+- M10.8 local and hosted acceptance are green. PR #24 final head `651a97964f78ac2e2d74f344bc638352c7247ed7` passed exact-head workflow `38797193065`, including Web, Windows native/installer, and aggregate `Required`. It merged sequentially at `691e02b08774e54cb83a814c8e7f4014475c3c6d`; exact merge-head workflow `38838394863` passed the same three required jobs. No PR review or issue comment remained open.
 
 ## Exact next action
 
-Commit this durable local-acceptance evidence, push `release/v1-whole-product-stabilization`, open or update one PR, and require exact-head Web, Windows native/installer, and aggregate `Required` before sequential merge. Require exact merge-head aggregate `Required` on main before declaring M10.8 delivered or starting M10.9.
+Continue M10.9 from exact delivered main `691e02b08774e54cb83a814c8e7f4014475c3c6d` on `release/v1-world-lifecycle-save-slots`. Do not reopen M10.8 unless a reproduced regression invalidates this evidence.

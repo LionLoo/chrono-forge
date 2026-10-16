@@ -130,6 +130,11 @@ export interface WorldSimulationView {
   readonly performOfflineCatchUp: (elapsedMilliseconds: number, rate: number) => Promise<void>;
   readonly queueCommand: (command: QueuedCommand) => Promise<void>;
   readonly requestSave: () => Promise<string>;
+  /** Create a canonical tick-zero snapshot without replacing the active Worker world. */
+  readonly requestFreshWorldSnapshot: (
+    seed: WorldSeed,
+    config?: Partial<WorldConfig>,
+  ) => Promise<string>;
   readonly requestFocusCheckpoint: (
     baselineEventId: number | null,
   ) => Promise<FocusCheckpointResult>;
@@ -200,6 +205,7 @@ export function useWorldSimulation(
   const pendingAdvanceRequestsRef = useRef(new Map<string, PendingAdvanceRequest>());
   const failWorkerRef = useRef<((reason: Error) => void) | null>(null);
   const pendingSavesRef = useRef(new Map<string, PendingSaveRequest>());
+  const pendingFreshWorldSnapshotsRef = useRef(new Map<string, PendingSaveRequest>());
   const pendingFocusCheckpointsRef = useRef(new Map<string, PendingFocusCheckpointRequest>());
   const pendingLoadsRef = useRef(new Map<string, PendingVoidRequest>());
   const pendingOfflineRef = useRef(new Map<string, PendingOfflineRequest>());
@@ -233,6 +239,7 @@ export function useWorldSimulation(
     workerRef.current = worker;
     const pendingAdvanceRequests = pendingAdvanceRequestsRef.current;
     const pendingSaves = pendingSavesRef.current;
+    const pendingFreshWorldSnapshots = pendingFreshWorldSnapshotsRef.current;
     const pendingFocusCheckpoints = pendingFocusCheckpointsRef.current;
     const pendingLoads = pendingLoadsRef.current;
     const pendingOffline = pendingOfflineRef.current;
@@ -242,13 +249,20 @@ export function useWorldSimulation(
     const rejectRequest = (
       requestId: string,
       reason: Error,
-    ): 'command' | 'focus-checkpoint' | 'load' | 'offline' | 'save' | null => {
-      let rejected: 'command' | 'focus-checkpoint' | 'load' | 'offline' | 'save' | null = null;
+    ): 'command' | 'focus-checkpoint' | 'fresh-world' | 'load' | 'offline' | 'save' | null => {
+      let rejected:
+        'command' | 'focus-checkpoint' | 'fresh-world' | 'load' | 'offline' | 'save' | null = null;
       const pendingSave = pendingSaves.get(requestId);
       if (pendingSave !== undefined) {
         pendingSaves.delete(requestId);
         pendingSave.reject(reason);
         rejected = 'save';
+      }
+      const pendingFreshWorldSnapshot = pendingFreshWorldSnapshots.get(requestId);
+      if (pendingFreshWorldSnapshot !== undefined) {
+        pendingFreshWorldSnapshots.delete(requestId);
+        pendingFreshWorldSnapshot.reject(reason);
+        rejected = 'fresh-world';
       }
       const pendingFocusCheckpoint = pendingFocusCheckpoints.get(requestId);
       if (pendingFocusCheckpoint !== undefined) {
@@ -278,11 +292,13 @@ export function useWorldSimulation(
     };
     const rejectAll = (reason: Error) => {
       for (const pending of pendingSaves.values()) pending.reject(reason);
+      for (const pending of pendingFreshWorldSnapshots.values()) pending.reject(reason);
       for (const pending of pendingFocusCheckpoints.values()) pending.reject(reason);
       for (const pending of pendingLoads.values()) pending.reject(reason);
       for (const pending of pendingOffline.values()) pending.reject(reason);
       for (const pending of pendingCommands.values()) pending.reject(reason);
       pendingSaves.clear();
+      pendingFreshWorldSnapshots.clear();
       pendingFocusCheckpoints.clear();
       pendingLoads.clear();
       pendingOffline.clear();
@@ -449,9 +465,12 @@ export function useWorldSimulation(
           });
           return;
         case 'saveSnapshot': {
-          const pending = pendingSaves.get(message.requestId);
+          const pending =
+            pendingSaves.get(message.requestId) ??
+            pendingFreshWorldSnapshots.get(message.requestId);
           if (pending !== undefined) {
             pendingSaves.delete(message.requestId);
+            pendingFreshWorldSnapshots.delete(message.requestId);
             pending.resolve(message.snapshot);
           }
           return;
@@ -484,7 +503,8 @@ export function useWorldSimulation(
           const reason = new Error(message.message);
           const requestKind = rejectRequest(message.requestId, reason);
           const isRecoverableRequestFault =
-            message.code === 'world-error' && (requestKind === 'load' || requestKind === 'command');
+            message.code === 'world-error' &&
+            (requestKind === 'load' || requestKind === 'command' || requestKind === 'fresh-world');
           if (!isRecoverableRequestFault) {
             failWorker(reason);
           }
@@ -607,6 +627,39 @@ export function useWorldSimulation(
     );
     return promise;
   }, [nextRequestId]);
+
+  const requestFreshWorldSnapshot = useCallback(
+    (seed: WorldSeed, config?: Partial<WorldConfig>): Promise<string> => {
+      const worker = workerRef.current;
+      if (worker === null)
+        return Promise.reject(new Error('The simulation worker is unavailable.'));
+      const requestId = nextRequestId('fresh-world');
+      const promise = new Promise<string>((resolve, reject) => {
+        pendingFreshWorldSnapshotsRef.current.set(requestId, { resolve, reject });
+      });
+      postPendingWorkerMessage(
+        worker,
+        config === undefined
+          ? {
+              type: 'requestFreshWorldSnapshot',
+              protocolVersion: WORKER_PROTOCOL_VERSION,
+              requestId,
+              seed,
+            }
+          : {
+              type: 'requestFreshWorldSnapshot',
+              protocolVersion: WORKER_PROTOCOL_VERSION,
+              requestId,
+              seed,
+              config,
+            },
+        pendingFreshWorldSnapshotsRef.current,
+        activityRecorderRef.current,
+      );
+      return promise;
+    },
+    [nextRequestId],
+  );
 
   const requestFocusCheckpoint = useCallback(
     (baselineEventId: number | null): Promise<FocusCheckpointResult> => {
@@ -791,6 +844,7 @@ export function useWorldSimulation(
       loadSnapshot,
       performOfflineCatchUp,
       queueCommand,
+      requestFreshWorldSnapshot,
       requestSave,
       requestFocusCheckpoint,
       relationshipEventPage,
@@ -811,6 +865,7 @@ export function useWorldSimulation(
       loadSnapshot,
       performOfflineCatchUp,
       queueCommand,
+      requestFreshWorldSnapshot,
       requestSave,
       requestFocusCheckpoint,
       relationshipEventPage,

@@ -602,6 +602,44 @@ describe('versioned worker protocol', () => {
     }
   });
 
+  it('validates a fresh-world snapshot request with an explicit deterministic seed and config', () => {
+    expect(
+      validateUiToWorkerMessage({
+        type: 'requestFreshWorldSnapshot',
+        protocolVersion: WORKER_PROTOCOL_VERSION,
+        requestId: 'fresh-world',
+        seed: [101, 202, 303, 404],
+        config: { width: 12, height: 8, chunkSize: 4, societyYearTicks: 5_000 },
+      }),
+    ).toStrictEqual({
+      kind: 'valid',
+      message: {
+        type: 'requestFreshWorldSnapshot',
+        protocolVersion: WORKER_PROTOCOL_VERSION,
+        requestId: 'fresh-world',
+        seed: [101, 202, 303, 404],
+        config: { width: 12, height: 8, chunkSize: 4, societyYearTicks: 5_000 },
+      },
+    });
+
+    for (const request of [
+      { seed: [1, 2, 3] },
+      { seed: [1, 2, 3, -1] },
+      { seed: [1, 2, 3, 0x1_0000_0000] },
+      { seed: [1, 2, 3, 4], config: { width: 0 } },
+      { seed: [1, 2, 3, 4], config: { societyYearTicks: 7_500 } },
+    ]) {
+      expect(
+        validateUiToWorkerMessage({
+          type: 'requestFreshWorldSnapshot',
+          protocolVersion: WORKER_PROTOCOL_VERSION,
+          requestId: 'invalid-fresh-world',
+          ...request,
+        }),
+      ).toMatchObject({ kind: 'invalid' });
+    }
+  });
+
   it('accepts only the closed typed M5 intervention command surface', () => {
     const valid = validateUiToWorkerMessage({
       type: 'queueCommand',

@@ -15,6 +15,7 @@ import {
   type RequestRelationshipEventPageRequest,
   type RequestRelationshipPageRequest,
   type RequestFocusCheckpointRequest,
+  type RequestFreshWorldSnapshotRequest,
   type RequestSaveRequest,
   type RequestTimelinePageRequest,
   type RunMode,
@@ -1055,9 +1056,16 @@ export function projectWorldFrame(state: WorldState): WorldFrameProjection {
   const development = projectDevelopment(state);
   const civilizations = projectCivilizations(state);
   const space = projectSpace(state);
+  const projectedSeed: WorldFrameProjection['seed'] = Object.freeze([
+    state.seed[0],
+    state.seed[1],
+    state.seed[2],
+    state.seed[3],
+  ]);
 
   return Object.freeze({
     version: WORKER_PROTOCOL_VERSION,
+    seed: projectedSeed,
     width,
     height,
     tick: state.tick,
@@ -1209,6 +1217,16 @@ export function createSimulationRuntime(post: RuntimePost): SimulationRuntime {
       protocolVersion: WORKER_PROTOCOL_VERSION,
       requestId: request.requestId,
       snapshot: serializeWorldSnapshot(world),
+    });
+  }
+
+  function requestFreshWorldSnapshot(request: RequestFreshWorldSnapshotRequest): void {
+    const freshWorld = createInitialWorld(request.seed, request.config);
+    emit({
+      type: 'saveSnapshot',
+      protocolVersion: WORKER_PROTOCOL_VERSION,
+      requestId: request.requestId,
+      snapshot: serializeWorldSnapshot(freshWorld),
     });
   }
 
@@ -1376,6 +1394,9 @@ export function createSimulationRuntime(post: RuntimePost): SimulationRuntime {
             return;
           case 'requestSave':
             requestSave(message);
+            return;
+          case 'requestFreshWorldSnapshot':
+            requestFreshWorldSnapshot(message);
             return;
           case 'requestFocusCheckpoint':
             requestFocusCheckpoint(message);

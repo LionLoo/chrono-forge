@@ -361,6 +361,59 @@ describe('simulation worker runtime', () => {
     expect(lastMessageOfType(responses, 'timelinePage').timeline[0]).toMatchObject({ id: 1 });
   });
 
+  it('creates a canonical fresh-world snapshot without mutating the active world', () => {
+    const responses: WorkerToUiMessage[] = [];
+    const runtime = createSimulationRuntime((message) => responses.push(message));
+    runtime.handleMessage({
+      type: 'initialize',
+      protocolVersion: WORKER_PROTOCOL_VERSION,
+      requestId: 'active-world',
+      seed: [2, 3, 5, 7],
+      config: { width: 12, height: 8, chunkSize: 4 },
+    });
+    runtime.handleMessage({
+      type: 'advanceTicks',
+      protocolVersion: WORKER_PROTOCOL_VERSION,
+      requestId: 'advance-active-world',
+      ticks: 25,
+    });
+    runtime.handleMessage({
+      type: 'requestFreshWorldSnapshot',
+      protocolVersion: WORKER_PROTOCOL_VERSION,
+      requestId: 'fresh-world',
+      seed: [11, 13, 17, 19],
+      config: { width: 10, height: 6, chunkSize: 2 },
+    });
+
+    const fresh = deserializeWorldSnapshot(
+      responses.find(
+        (message): message is Extract<WorkerToUiMessage, { type: 'saveSnapshot' }> =>
+          message.type === 'saveSnapshot' && message.requestId === 'fresh-world',
+      )!.snapshot,
+    );
+    expect(fresh.seed).toStrictEqual([11, 13, 17, 19]);
+    expect(fresh.config).toMatchObject({ width: 10, height: 6, chunkSize: 2 });
+    expect(fresh.tick).toBe(0);
+    expect(fresh.eventLog.map((event) => event.kind)).toStrictEqual([
+      'world-generated',
+      'founders-arrived',
+    ]);
+
+    runtime.handleMessage({
+      type: 'requestSave',
+      protocolVersion: WORKER_PROTOCOL_VERSION,
+      requestId: 'save-active-world',
+    });
+    const active = deserializeWorldSnapshot(
+      responses.find(
+        (message): message is Extract<WorkerToUiMessage, { type: 'saveSnapshot' }> =>
+          message.type === 'saveSnapshot' && message.requestId === 'save-active-world',
+      )!.snapshot,
+    );
+    expect(active.seed).toStrictEqual([2, 3, 5, 7]);
+    expect(active.tick).toBe(25);
+  });
+
   it('returns typed faults for uninitialized, unsupported, and wrong-version operations', () => {
     const responses: WorkerToUiMessage[] = [];
     const runtime = createSimulationRuntime((message) => responses.push(message));

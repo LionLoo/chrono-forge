@@ -54,6 +54,9 @@ function createSimulation(): {
         }),
       ),
       requestSave: vi.fn<() => Promise<string>>().mockResolvedValue(snapshot),
+      requestFreshWorldSnapshot: vi.fn<WorldSimulationView['requestFreshWorldSnapshot']>(
+        (seed, config) => Promise.resolve(serializeWorldSnapshot(createInitialWorld(seed, config))),
+      ),
       requestRelationshipEventPage: vi.fn(),
       requestRelationshipPage: vi.fn(),
       requestTimelinePage: vi.fn(),
@@ -76,6 +79,7 @@ function createSimulation(): {
 
 function createStatefulSimulation(initialWorld?: WorldState): {
   readonly simulation: WorldSimulationView;
+  readonly currentWorld: () => WorldState;
   readonly currentTick: () => number;
   readonly advanceTicks: ReturnType<typeof vi.fn>;
 } {
@@ -107,6 +111,12 @@ function createStatefulSimulation(initialWorld?: WorldState): {
         await Promise.resolve();
         return serializeWorldSnapshot(world);
       }),
+      requestFreshWorldSnapshot: vi.fn<WorldSimulationView['requestFreshWorldSnapshot']>(
+        async (seed, config) => {
+          await Promise.resolve();
+          return serializeWorldSnapshot(createInitialWorld(seed, config));
+        },
+      ),
       requestTimelinePage: vi.fn(),
       requestRelationshipEventPage: vi.fn(),
       requestRelationshipPage: vi.fn(),
@@ -122,6 +132,7 @@ function createStatefulSimulation(initialWorld?: WorldState): {
       status: 'ready',
       timeline: { entries: [], offset: 0, total: 0 },
     },
+    currentWorld: () => world,
     currentTick: () => world.tick,
     advanceTicks,
   };
@@ -489,7 +500,7 @@ describe('FocusPersistencePanel offline progression', () => {
     expect(restored.currentTick()).toBe(42);
   });
 
-  it('persists a focus session after Save as new slot changes archive authority', async () => {
+  it('persists a focus session after duplicating the current world changes archive authority', async () => {
     const user = userEvent.setup();
     const gateway = createInMemoryPersistenceGateway(() => 1_000);
 
@@ -502,9 +513,9 @@ describe('FocusPersistencePanel offline progression', () => {
       />,
     );
 
-    await user.click(await screen.findByText('Create another slot'));
-    await user.click(screen.getByRole('button', { name: 'Save as new slot' }));
-    await screen.findByText('New save slot created.');
+    await user.click(await screen.findByText('World lifecycle'));
+    await user.click(screen.getByRole('button', { name: 'Duplicate current world' }));
+    await screen.findByText('Current world duplicated into Second world.');
     expect(screen.getByRole('combobox', { name: 'Load local slot' })).toHaveValue('world-2');
 
     await user.click(screen.getByRole('button', { name: 'Start focus' }));
@@ -518,7 +529,7 @@ describe('FocusPersistencePanel offline progression', () => {
     expect((await gateway.loadSaveSlot('primary'))?.focusSession).toBeNull();
   });
 
-  it('applies queued Save as new to the final Worker-owned world and remounts that slot', async () => {
+  it('applies a queued duplicate to the final Worker-owned world and remounts that slot', async () => {
     const user = userEvent.setup();
     const base = createInMemoryPersistenceGateway(() => 1_000);
     const secondSnapshot = serializeWorldSnapshot(
@@ -562,15 +573,15 @@ describe('FocusPersistencePanel offline progression', () => {
       'world-2',
     );
     await waitFor(() => expect(secondWorldLoadStarted).toBe(true));
-    await user.click(screen.getByText('Create another slot'));
+    await user.click(screen.getByText('World lifecycle'));
     await user.clear(screen.getByLabelText('Slot ID'));
     await user.type(screen.getByLabelText('Slot ID'), 'world-copy');
     await user.clear(screen.getByLabelText('Slot name'));
     await user.type(screen.getByLabelText('Slot name'), 'World copy');
-    await user.click(screen.getByRole('button', { name: 'Save as new slot' }));
+    await user.click(screen.getByRole('button', { name: 'Duplicate current world' }));
 
     releaseSecondWorld();
-    await screen.findByText('New save slot created.');
+    await screen.findByText('Current world duplicated into World copy.');
     expect(screen.getByRole('combobox', { name: 'Load local slot' })).toHaveValue('world-copy');
     expect(stateful.currentTick()).toBe(42);
     expect((await base.loadSettings()).activeSlotId).toBe('world-copy');
@@ -579,6 +590,572 @@ describe('FocusPersistencePanel offline progression', () => {
     expect(deserializeWorldSnapshot((await base.loadSaveSlot('world-copy'))!.snapshot).tick).toBe(
       42,
     );
+  });
+
+  it('creates a genuinely fresh seeded world without changing the source slot', async () => {
+    const user = userEvent.setup();
+    const gateway = createInMemoryPersistenceGateway(() => 1_000);
+    const sourceWorld = stepWorld(
+      createInitialWorld([2, 3, 5, 7], { width: 8, height: 6, chunkSize: 2 }),
+      42,
+    );
+    const stateful = createStatefulSimulation(sourceWorld);
+
+    render(
+      <FocusPersistencePanel
+        alerts={{ notifyCompletion: () => Promise.resolve() }}
+        clock={{ now: () => 1_000 }}
+        createWorldSeed={() => [11, 13, 17, 19]}
+        runtime={{ gateway, mode: 'browser-preview' }}
+        simulation={stateful.simulation}
+      />,
+    );
+
+    await user.click(await screen.findByText('World lifecycle'));
+    expect(screen.getByLabelText('New world seed')).toHaveValue(
+      '0000000b-0000000d-00000011-00000013',
+    );
+    await user.click(screen.getByRole('button', { name: 'Create new world' }));
+    await screen.findByText('Fresh world Second world created.');
+
+    const source = deserializeWorldSnapshot((await gateway.loadSaveSlot('primary'))!.snapshot);
+    const fresh = deserializeWorldSnapshot((await gateway.loadSaveSlot('world-2'))!.snapshot);
+    expect(source.seed).toStrictEqual([2, 3, 5, 7]);
+    expect(source.tick).toBe(42);
+    expect(fresh.seed).toStrictEqual([11, 13, 17, 19]);
+    expect(fresh.tick).toBe(0);
+    expect(fresh.eventLog.map((event) => event.kind)).toStrictEqual([
+      'world-generated',
+      'founders-arrived',
+    ]);
+    expect(stateful.currentWorld().seed).toStrictEqual([11, 13, 17, 19]);
+    expect(stateful.currentTick()).toBe(0);
+    expect((await gateway.loadSettings()).activeSlotId).toBe('world-2');
+  });
+
+  it('resets only the active slot and rolls Worker authority back if the durable reset fails', async () => {
+    const user = userEvent.setup();
+    const base = createInMemoryPersistenceGateway(() => 1_000);
+    const primaryWorld = stepWorld(
+      createInitialWorld([2, 3, 5, 7], { width: 8, height: 6, chunkSize: 2 }),
+      42,
+    );
+    const otherWorld = stepWorld(
+      createInitialWorld([23, 29, 31, 37], { width: 8, height: 6, chunkSize: 2 }),
+      84,
+    );
+    await base.commitSaveSlot('primary', 'Founding world', serializeWorldSnapshot(primaryWorld));
+    await base.commitSaveSlot('world-2', 'Second world', serializeWorldSnapshot(otherWorld));
+    await base.saveSettings({
+      ...DEFAULT_APP_SETTINGS,
+      activeSlotId: 'primary',
+      offlineProgressionEnabled: false,
+    });
+    let rejectReset = true;
+    const gateway: PersistenceGateway = {
+      ...base,
+      async commitSaveSlot(slotId, name, savedSnapshot) {
+        const savedWorld = deserializeWorldSnapshot(savedSnapshot);
+        if (rejectReset && slotId === 'primary' && savedWorld.seed[0] === 41) {
+          throw new Error('Injected reset commit failure');
+        }
+        return base.commitSaveSlot(slotId, name, savedSnapshot);
+      },
+    };
+    const stateful = createStatefulSimulation();
+
+    render(
+      <FocusPersistencePanel
+        alerts={{ notifyCompletion: () => Promise.resolve() }}
+        clock={{ now: () => 1_000 }}
+        createWorldSeed={() => [41, 43, 47, 53]}
+        runtime={{ gateway, mode: 'browser-preview' }}
+        simulation={stateful.simulation}
+      />,
+    );
+
+    await user.click(await screen.findByText('World lifecycle'));
+    await user.type(screen.getByLabelText('Reset confirmation'), 'Founding world');
+    await user.click(screen.getByRole('button', { name: 'Reset active world' }));
+    expect(await screen.findByText('Archive fault: Injected reset commit failure')).toBeVisible();
+    expect(stateful.currentWorld().seed).toStrictEqual([2, 3, 5, 7]);
+    expect(stateful.currentTick()).toBe(42);
+    expect(deserializeWorldSnapshot((await base.loadSaveSlot('primary'))!.snapshot).tick).toBe(42);
+    expect(deserializeWorldSnapshot((await base.loadSaveSlot('world-2'))!.snapshot).tick).toBe(84);
+    expect((await base.loadSettings()).activeSlotId).toBe('primary');
+
+    rejectReset = false;
+    await user.click(screen.getByRole('button', { name: 'Reset active world' }));
+    await screen.findByText('Founding world was reset with a fresh seed.');
+    expect(stateful.currentWorld().seed).toStrictEqual([41, 43, 47, 53]);
+    expect(stateful.currentTick()).toBe(0);
+    expect(deserializeWorldSnapshot((await base.loadSaveSlot('world-2'))!.snapshot).tick).toBe(84);
+  });
+
+  it('keeps the old world active when a committed fresh slot cannot load', async () => {
+    const user = userEvent.setup();
+    const base = createInMemoryPersistenceGateway(() => 1_000);
+    const sourceWorld = stepWorld(
+      createInitialWorld([2, 3, 5, 7], { width: 8, height: 6, chunkSize: 2 }),
+      42,
+    );
+    await base.commitSaveSlot('primary', 'Founding world', serializeWorldSnapshot(sourceWorld));
+    await base.saveSettings({
+      ...DEFAULT_APP_SETTINGS,
+      activeSlotId: 'primary',
+      offlineProgressionEnabled: false,
+    });
+    const stateful = createStatefulSimulation();
+    const loadSnapshot = stateful.simulation.loadSnapshot;
+    const simulation: WorldSimulationView = {
+      ...stateful.simulation,
+      loadSnapshot: vi.fn(async (savedSnapshot: string) => {
+        if (deserializeWorldSnapshot(savedSnapshot).seed[0] === 61) {
+          throw new Error('Injected fresh-world load failure');
+        }
+        await loadSnapshot(savedSnapshot);
+      }),
+    };
+
+    render(
+      <FocusPersistencePanel
+        alerts={{ notifyCompletion: () => Promise.resolve() }}
+        clock={{ now: () => 1_000 }}
+        createWorldSeed={() => [61, 67, 71, 73]}
+        runtime={{ gateway: base, mode: 'browser-preview' }}
+        simulation={simulation}
+      />,
+    );
+
+    await user.click(await screen.findByText('World lifecycle'));
+    await user.click(screen.getByRole('button', { name: 'Create new world' }));
+    expect(
+      await screen.findByText('Archive fault: Injected fresh-world load failure'),
+    ).toBeVisible();
+    expect(screen.getByRole('combobox', { name: 'Load local slot' })).toHaveValue('primary');
+    expect(stateful.currentWorld().seed).toStrictEqual([2, 3, 5, 7]);
+    expect(stateful.currentTick()).toBe(42);
+    expect(await base.loadSaveSlot('world-2')).not.toBeNull();
+    expect((await base.loadSettings()).activeSlotId).toBe('primary');
+  });
+
+  it('adopts a durable fresh world before reporting an active-slot preference failure', async () => {
+    const user = userEvent.setup();
+    const base = createInMemoryPersistenceGateway(() => 1_000);
+    let rejectFreshPreference = false;
+    const gateway: PersistenceGateway = {
+      ...base,
+      async saveSettings(settings) {
+        if (rejectFreshPreference && settings.activeSlotId === 'world-2') {
+          throw new Error('Injected fresh preference failure');
+        }
+        return base.saveSettings(settings);
+      },
+    };
+    const stateful = createStatefulSimulation();
+
+    render(
+      <FocusPersistencePanel
+        alerts={{ notifyCompletion: () => Promise.resolve() }}
+        clock={{ now: () => 1_000 }}
+        createWorldSeed={() => [79, 83, 89, 97]}
+        runtime={{ gateway, mode: 'browser-preview' }}
+        simulation={stateful.simulation}
+      />,
+    );
+
+    await screen.findByRole('button', { name: 'Start focus' });
+    rejectFreshPreference = true;
+    await user.click(screen.getByText('World lifecycle'));
+    await user.click(screen.getByRole('button', { name: 'Create new world' }));
+
+    expect(
+      await screen.findByText('Archive fault: Injected fresh preference failure'),
+    ).toBeVisible();
+    expect(screen.getByRole('combobox', { name: 'Load local slot' })).toHaveValue('world-2');
+    expect(stateful.currentWorld().seed).toStrictEqual([79, 83, 89, 97]);
+    expect(stateful.currentTick()).toBe(0);
+    expect(await base.loadSaveSlot('world-2')).not.toBeNull();
+    expect((await base.loadSettings()).activeSlotId).toBe('primary');
+  });
+
+  it('adopts a reset that committed durably before its gateway receipt failed', async () => {
+    const user = userEvent.setup();
+    const base = createInMemoryPersistenceGateway(() => 1_000);
+    const primaryWorld = stepWorld(
+      createInitialWorld([2, 3, 5, 7], { width: 8, height: 6, chunkSize: 2 }),
+      42,
+    );
+    await base.commitSaveSlot('primary', 'Founding world', serializeWorldSnapshot(primaryWorld));
+    await base.saveSettings({
+      ...DEFAULT_APP_SETTINGS,
+      activeSlotId: 'primary',
+      offlineProgressionEnabled: false,
+    });
+    let failAfterCommit = true;
+    const gateway: PersistenceGateway = {
+      ...base,
+      async commitSaveSlot(slotId, name, savedSnapshot) {
+        const committed = await base.commitSaveSlot(slotId, name, savedSnapshot);
+        if (failAfterCommit && deserializeWorldSnapshot(savedSnapshot).seed[0] === 101) {
+          failAfterCommit = false;
+          throw new Error('Injected post-commit receipt failure');
+        }
+        return committed;
+      },
+    };
+    const stateful = createStatefulSimulation();
+
+    render(
+      <FocusPersistencePanel
+        alerts={{ notifyCompletion: () => Promise.resolve() }}
+        clock={{ now: () => 1_000 }}
+        createWorldSeed={() => [101, 103, 107, 109]}
+        runtime={{ gateway, mode: 'browser-preview' }}
+        simulation={stateful.simulation}
+      />,
+    );
+
+    await user.click(await screen.findByText('World lifecycle'));
+    await user.type(screen.getByLabelText('Reset confirmation'), 'Founding world');
+    await user.click(screen.getByRole('button', { name: 'Reset active world' }));
+    await screen.findByText('Founding world was reset with a fresh seed.');
+
+    expect(screen.queryByText(/Injected post-commit receipt failure/)).not.toBeInTheDocument();
+    expect(stateful.currentWorld().seed).toStrictEqual([101, 103, 107, 109]);
+    expect(stateful.currentTick()).toBe(0);
+    expect(deserializeWorldSnapshot((await base.loadSaveSlot('primary'))!.snapshot).seed).toEqual([
+      101, 103, 107, 109,
+    ]);
+  });
+
+  it('refuses a same-turn reset behind a pending switch even when slot names match', async () => {
+    const user = userEvent.setup();
+    const base = createInMemoryPersistenceGateway(() => 1_000);
+    const secondSnapshot = serializeWorldSnapshot(
+      stepWorld(createInitialWorld([5, 6, 7, 8], { width: 2, height: 2, chunkSize: 2 }), 42),
+    );
+    await base.commitSaveSlot('primary', 'Shared world', snapshot);
+    await base.commitSaveSlot('world-2', 'Shared world', secondSnapshot);
+    await base.saveSettings({
+      ...DEFAULT_APP_SETTINGS,
+      activeSlotId: 'primary',
+      offlineProgressionEnabled: false,
+    });
+    let releaseSecondWorld = (): void => undefined;
+    const secondWorldGate = new Promise<void>((resolve) => {
+      releaseSecondWorld = resolve;
+    });
+    let secondWorldLoadStarted = false;
+    let lifecycleCommitCalls = 0;
+    const gateway: PersistenceGateway = {
+      ...base,
+      async commitSaveSlot(slotId, name, savedSnapshot) {
+        lifecycleCommitCalls += 1;
+        return base.commitSaveSlot(slotId, name, savedSnapshot);
+      },
+      async loadSaveSlot(slotId) {
+        if (slotId === 'world-2') {
+          secondWorldLoadStarted = true;
+          await secondWorldGate;
+        }
+        return base.loadSaveSlot(slotId);
+      },
+    };
+    const stateful = createStatefulSimulation();
+
+    render(
+      <FocusPersistencePanel
+        alerts={{ notifyCompletion: () => Promise.resolve() }}
+        clock={{ now: () => 1_000 }}
+        createWorldSeed={() => [109, 113, 127, 131]}
+        runtime={{ gateway, mode: 'browser-preview' }}
+        simulation={stateful.simulation}
+      />,
+    );
+
+    await user.click(await screen.findByText('World lifecycle'));
+    await user.type(screen.getByLabelText('Reset confirmation'), 'Shared world');
+    const slots = screen.getByRole('combobox', { name: 'Load local slot' });
+    const resetButton = screen.getByRole('button', { name: 'Reset active world' });
+    act(() => {
+      fireEvent.change(slots, { target: { value: 'world-2' } });
+      fireEvent.click(resetButton);
+    });
+
+    await waitFor(() => expect(secondWorldLoadStarted).toBe(true));
+    expect(resetButton).toBeDisabled();
+    expect(lifecycleCommitCalls).toBe(0);
+    releaseSecondWorld();
+
+    await waitFor(() =>
+      expect(screen.getByRole('combobox', { name: 'Load local slot' })).toHaveValue('world-2'),
+    );
+    expect(stateful.currentTick()).toBe(42);
+    expect(lifecycleCommitCalls).toBe(0);
+    expect(deserializeWorldSnapshot((await base.loadSaveSlot('primary'))!.snapshot).tick).toBe(0);
+    expect(deserializeWorldSnapshot((await base.loadSaveSlot('world-2'))!.snapshot).tick).toBe(42);
+  });
+
+  it('blocks immediate focus and save actions while a successful reset is in flight', async () => {
+    const user = userEvent.setup();
+    const base = createInMemoryPersistenceGateway(() => 1_000);
+    const primaryWorld = stepWorld(
+      createInitialWorld([2, 3, 5, 7], { width: 8, height: 6, chunkSize: 2 }),
+      42,
+    );
+    await base.commitSaveSlot('primary', 'Founding world', serializeWorldSnapshot(primaryWorld));
+    await base.saveSettings({
+      ...DEFAULT_APP_SETTINGS,
+      activeSlotId: 'primary',
+      offlineProgressionEnabled: false,
+    });
+    let resetCommitStarted = false;
+    let resetCommitCalls = 0;
+    let releaseResetCommit = (): void => undefined;
+    const resetCommitGate = new Promise<void>((resolve) => {
+      releaseResetCommit = resolve;
+    });
+    const gateway: PersistenceGateway = {
+      ...base,
+      async commitSaveSlot(slotId, name, savedSnapshot) {
+        resetCommitCalls += 1;
+        resetCommitStarted = true;
+        await resetCommitGate;
+        return base.commitSaveSlot(slotId, name, savedSnapshot);
+      },
+    };
+    const stateful = createStatefulSimulation();
+
+    render(
+      <FocusPersistencePanel
+        alerts={{ notifyCompletion: () => Promise.resolve() }}
+        clock={{ now: () => 1_000 }}
+        createWorldSeed={() => [113, 127, 131, 137]}
+        runtime={{ gateway, mode: 'browser-preview' }}
+        simulation={stateful.simulation}
+      />,
+    );
+
+    await user.click(await screen.findByText('World lifecycle'));
+    await user.type(screen.getByLabelText('Reset confirmation'), 'Founding world');
+    const resetButton = screen.getByRole('button', { name: 'Reset active world' });
+    const startButton = screen.getByRole('button', { name: 'Start focus' });
+    const saveButton = screen.getByRole('button', { name: 'Save now' });
+    act(() => {
+      fireEvent.click(resetButton);
+      fireEvent.click(startButton);
+      fireEvent.click(saveButton);
+    });
+
+    await waitFor(() => expect(resetCommitStarted).toBe(true));
+    expect(startButton).toBeDisabled();
+    expect(saveButton).toBeDisabled();
+    expect(screen.getByRole('button', { name: 'Export' })).toBeDisabled();
+    expect(stateful.advanceTicks).not.toHaveBeenCalled();
+    expect(resetCommitCalls).toBe(1);
+
+    releaseResetCommit();
+    await screen.findByText('Founding world was reset with a fresh seed.');
+
+    expect(screen.getByRole('button', { name: 'Start focus' })).toBeEnabled();
+    expect(stateful.advanceTicks).not.toHaveBeenCalled();
+    expect(stateful.currentWorld().seed).toStrictEqual([113, 127, 131, 137]);
+    expect(stateful.currentTick()).toBe(0);
+    expect(deserializeWorldSnapshot((await base.loadSaveSlot('primary'))!.snapshot).tick).toBe(0);
+    expect(resetCommitCalls).toBe(1);
+  });
+
+  it('freezes queued world operations when a reset result cannot be verified', async () => {
+    const user = userEvent.setup();
+    const base = createInMemoryPersistenceGateway(() => 1_000);
+    const primaryWorld = stepWorld(
+      createInitialWorld([2, 3, 5, 7], { width: 8, height: 6, chunkSize: 2 }),
+      42,
+    );
+    await base.commitSaveSlot('primary', 'Founding world', serializeWorldSnapshot(primaryWorld));
+    await base.saveSettings({
+      ...DEFAULT_APP_SETTINGS,
+      activeSlotId: 'primary',
+      offlineProgressionEnabled: false,
+    });
+    let rejectVerificationRead = false;
+    let resetCommitCalls = 0;
+    let releaseReceiptFailure = (): void => undefined;
+    const receiptFailureGate = new Promise<void>((resolve) => {
+      releaseReceiptFailure = resolve;
+    });
+    const gateway: PersistenceGateway = {
+      ...base,
+      async commitSaveSlot(slotId, name, savedSnapshot) {
+        resetCommitCalls += 1;
+        await base.commitSaveSlot(slotId, name, savedSnapshot);
+        rejectVerificationRead = true;
+        await receiptFailureGate;
+        throw new Error('Injected post-commit receipt failure');
+      },
+      async loadSaveSlot(slotId) {
+        if (rejectVerificationRead && slotId === 'primary') {
+          throw new Error('Injected verification read failure');
+        }
+        return base.loadSaveSlot(slotId);
+      },
+    };
+    const stateful = createStatefulSimulation();
+
+    render(
+      <FocusPersistencePanel
+        alerts={{ notifyCompletion: () => Promise.resolve() }}
+        clock={{ now: () => 1_000 }}
+        createWorldSeed={() => [127, 131, 137, 139]}
+        runtime={{ gateway, mode: 'browser-preview' }}
+        simulation={stateful.simulation}
+      />,
+    );
+
+    await user.click(await screen.findByText('World lifecycle'));
+    await user.type(screen.getByLabelText('Reset confirmation'), 'Founding world');
+    const resetButton = screen.getByRole('button', { name: 'Reset active world' });
+    const startButton = screen.getByRole('button', { name: 'Start focus' });
+    const saveButton = screen.getByRole('button', { name: 'Save now' });
+    act(() => {
+      fireEvent.click(resetButton);
+      fireEvent.click(startButton);
+      fireEvent.click(saveButton);
+    });
+    await waitFor(() => expect(resetCommitCalls).toBe(1));
+    expect(startButton).toBeDisabled();
+    expect(saveButton).toBeDisabled();
+    releaseReceiptFailure();
+
+    expect(
+      await screen.findByText(/World controls are frozen because the reset's durable outcome/),
+    ).toBeVisible();
+    expect(startButton).toBeDisabled();
+    expect(screen.getByRole('combobox', { name: 'Load local slot' })).toBeDisabled();
+    expect(screen.getByRole('button', { name: 'Save now' })).toBeDisabled();
+    expect(screen.getByRole('button', { name: 'Export' })).toBeDisabled();
+    expect(screen.getByRole('button', { name: 'Create new world' })).toBeDisabled();
+    expect(screen.getByRole('button', { name: 'Duplicate current world' })).toBeDisabled();
+    expect(screen.getByRole('button', { name: 'Reset active world' })).toBeDisabled();
+    await user.click(screen.getByText('Focus and accessibility settings'));
+    expect(screen.getByRole('button', { name: 'Save settings' })).toBeDisabled();
+    await waitFor(() => expect(resetCommitCalls).toBe(1));
+    expect(stateful.advanceTicks).not.toHaveBeenCalled();
+    expect(stateful.currentWorld().seed).toStrictEqual([127, 131, 137, 139]);
+    expect(deserializeWorldSnapshot((await base.loadSaveSlot('primary'))!.snapshot).seed).toEqual([
+      127, 131, 137, 139,
+    ]);
+  });
+
+  it('freezes world operations if reset rollback cannot restore Worker authority', async () => {
+    const user = userEvent.setup();
+    const base = createInMemoryPersistenceGateway(() => 1_000);
+    const primaryWorld = stepWorld(
+      createInitialWorld([2, 3, 5, 7], { width: 8, height: 6, chunkSize: 2 }),
+      42,
+    );
+    await base.commitSaveSlot('primary', 'Founding world', serializeWorldSnapshot(primaryWorld));
+    await base.saveSettings({
+      ...DEFAULT_APP_SETTINGS,
+      activeSlotId: 'primary',
+      offlineProgressionEnabled: false,
+    });
+    let rejectRollback = false;
+    const gateway: PersistenceGateway = {
+      ...base,
+      commitSaveSlot() {
+        rejectRollback = true;
+        return Promise.reject(new Error('Injected reset commit failure'));
+      },
+    };
+    const stateful = createStatefulSimulation();
+    const loadSnapshot = stateful.simulation.loadSnapshot;
+    const simulation: WorldSimulationView = {
+      ...stateful.simulation,
+      loadSnapshot: vi.fn(async (savedSnapshot: string) => {
+        if (rejectRollback && deserializeWorldSnapshot(savedSnapshot).seed[0] === 2) {
+          throw new Error('Injected Worker rollback failure');
+        }
+        await loadSnapshot(savedSnapshot);
+      }),
+    };
+
+    render(
+      <FocusPersistencePanel
+        alerts={{ notifyCompletion: () => Promise.resolve() }}
+        clock={{ now: () => 1_000 }}
+        createWorldSeed={() => [149, 151, 157, 163]}
+        runtime={{ gateway, mode: 'browser-preview' }}
+        simulation={simulation}
+      />,
+    );
+
+    await user.click(await screen.findByText('World lifecycle'));
+    await user.type(screen.getByLabelText('Reset confirmation'), 'Founding world');
+    await user.click(screen.getByRole('button', { name: 'Reset active world' }));
+
+    expect(
+      await screen.findByText(/World controls are frozen because the reset's durable outcome/),
+    ).toBeVisible();
+    expect(screen.getByRole('button', { name: 'Save now' })).toBeDisabled();
+    expect(screen.getByRole('button', { name: 'Export' })).toBeDisabled();
+    expect(stateful.currentWorld().seed).toStrictEqual([149, 151, 157, 163]);
+    expect(deserializeWorldSnapshot((await base.loadSaveSlot('primary'))!.snapshot).seed).toEqual([
+      2, 3, 5, 7,
+    ]);
+  });
+
+  it('freezes world operations if a committed reset cannot refresh archive state', async () => {
+    const user = userEvent.setup();
+    const base = createInMemoryPersistenceGateway(() => 1_000);
+    const primaryWorld = stepWorld(
+      createInitialWorld([2, 3, 5, 7], { width: 8, height: 6, chunkSize: 2 }),
+      42,
+    );
+    await base.commitSaveSlot('primary', 'Founding world', serializeWorldSnapshot(primaryWorld));
+    await base.saveSettings({
+      ...DEFAULT_APP_SETTINGS,
+      activeSlotId: 'primary',
+      offlineProgressionEnabled: false,
+    });
+    let rejectArchiveRefresh = false;
+    const gateway: PersistenceGateway = {
+      ...base,
+      async commitSaveSlot(slotId, name, savedSnapshot) {
+        const committed = await base.commitSaveSlot(slotId, name, savedSnapshot);
+        rejectArchiveRefresh = true;
+        return committed;
+      },
+      async listSaveSlots() {
+        if (rejectArchiveRefresh) throw new Error('Injected archive refresh failure');
+        return base.listSaveSlots();
+      },
+    };
+    const stateful = createStatefulSimulation();
+
+    render(
+      <FocusPersistencePanel
+        alerts={{ notifyCompletion: () => Promise.resolve() }}
+        clock={{ now: () => 1_000 }}
+        createWorldSeed={() => [167, 173, 179, 181]}
+        runtime={{ gateway, mode: 'browser-preview' }}
+        simulation={stateful.simulation}
+      />,
+    );
+
+    await user.click(await screen.findByText('World lifecycle'));
+    await user.type(screen.getByLabelText('Reset confirmation'), 'Founding world');
+    await user.click(screen.getByRole('button', { name: 'Reset active world' }));
+
+    expect(
+      await screen.findByText(/World controls are frozen because the reset's durable outcome/),
+    ).toBeVisible();
+    expect(screen.getByRole('button', { name: 'Save now' })).toBeDisabled();
+    expect(stateful.currentWorld().seed).toStrictEqual([167, 173, 179, 181]);
+    expect(deserializeWorldSnapshot((await base.loadSaveSlot('primary'))!.snapshot).seed).toEqual([
+      167, 173, 179, 181,
+    ]);
   });
 
   it('does not replay stale bootstrap state when the simulation projection changes', async () => {

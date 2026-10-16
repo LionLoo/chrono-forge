@@ -64,7 +64,7 @@ Status vocabulary:
 ## Player documentation
 
 - `USER_GUIDE.md` is the current-build player contract for Windows installation, checksum verification and unsigned SmartScreen handling; focus presets/custom bounds, pause/resume/complete/cancel/break behavior; pointer and keyboard map controls; inspectors and overlays; closed condition-changing interventions; immutable save generations, recovery, import/export, and browser-preview limits; bounded offline progression; deterministic simulation rules; accessibility and calm-use settings; local data/privacy; troubleshooting; and candid pre-release constraints.
-- The guide explicitly warns that **Save as new slot** currently duplicates the active world and does not create a fresh world. It does not pre-accept M10.9's New/Duplicate/Reset semantics, M10.2's atmosphere and soundscape, M10.5's graphics overhaul, M10.6-M10.8 stabilization, signing, release-candidate evidence, tag, or private v1.0.0 release.
+- At the M10 gate, the guide explicitly warned that **Save as new slot** duplicated the active world and did not create a fresh world. That evidence did not pre-accept M10.9's later New/Duplicate/Reset semantics, M10.2's atmosphere and soundscape, M10.5's graphics overhaul, M10.6-M10.8 stabilization, signing, release-candidate evidence, tag, or private v1.0.0 release.
 - `README.md`, `ARCHITECTURE.md`, and ADR-038 point to the player guide and record the v13 display-copy and recap-provenance rules without broadening simulation authority.
 
 ## Content and asset gate

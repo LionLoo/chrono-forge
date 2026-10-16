@@ -10,7 +10,7 @@ import type {
 import { ACCELERATED_YEAR_TICKS, NORMAL_YEAR_TICKS } from '../simulation/society';
 import type { FocusCheckpointProjection } from '../focus/session-review';
 
-export const WORKER_PROTOCOL_VERSION = 10;
+export const WORKER_PROTOCOL_VERSION = 11;
 export const MAX_ADVANCE_TICKS_PER_REQUEST = 1_000_000;
 
 export type WorkerProtocolVersion = typeof WORKER_PROTOCOL_VERSION;
@@ -445,6 +445,8 @@ export interface SpaceProjection {
 
 export interface WorldFrameProjection {
   readonly version: WorkerProtocolVersion;
+  /** The exact authoritative seed that created this world. */
+  readonly seed: WorldSeed;
   readonly width: number;
   readonly height: number;
   readonly tick: number;
@@ -519,6 +521,13 @@ export interface RequestSaveRequest extends RequestBase {
   readonly type: 'requestSave';
 }
 
+/** Build a canonical tick-zero world snapshot without replacing Worker authority. */
+export interface RequestFreshWorldSnapshotRequest extends RequestBase {
+  readonly type: 'requestFreshWorldSnapshot';
+  readonly seed: WorldSeed;
+  readonly config?: Partial<WorldConfig>;
+}
+
 /** Request one snapshot and its bounded focus facts from the same authoritative state. */
 export interface RequestFocusCheckpointRequest extends RequestBase {
   readonly type: 'requestFocusCheckpoint';
@@ -559,6 +568,7 @@ export type UiToWorkerMessage =
   | SetRunModeRequest
   | AdvanceTicksRequest
   | RequestSaveRequest
+  | RequestFreshWorldSnapshotRequest
   | RequestFocusCheckpointRequest
   | RequestTimelinePageRequest
   | RequestRelationshipPageRequest
@@ -635,6 +645,11 @@ function optionalConfig(value: unknown): Partial<WorldConfig> | undefined | 'inv
   return config;
 }
 
+function worldSeed(value: unknown): WorldSeed | 'invalid' {
+  if (!Array.isArray(value) || value.length !== 4 || !value.every(isUint32)) return 'invalid';
+  return [value[0]!, value[1]!, value[2]!, value[3]!];
+}
+
 function commandFrom(value: unknown): QueuedCommand | 'invalid' {
   if (
     !isRecord(value) ||
@@ -706,14 +721,14 @@ export function validateUiToWorkerMessage(input: unknown): WorkerRequestValidati
 
   switch (input.type) {
     case 'initialize': {
-      if (!Array.isArray(input.seed) || input.seed.length !== 4 || !input.seed.every(isUint32)) {
+      const seed = worldSeed(input.seed);
+      if (seed === 'invalid') {
         return invalid(requestId, 'initialize.seed must contain four uint32 values.');
       }
       const config = optionalConfig(input.config);
       if (config === 'invalid') {
         return invalid(requestId, 'initialize.config must contain positive integer dimensions.');
       }
-      const seed: WorldSeed = [input.seed[0]!, input.seed[1]!, input.seed[2]!, input.seed[3]!];
       return {
         kind: 'valid',
         message:
@@ -786,6 +801,40 @@ export function validateUiToWorkerMessage(input: unknown): WorkerRequestValidati
         kind: 'valid',
         message: { type: 'requestSave', protocolVersion: WORKER_PROTOCOL_VERSION, requestId },
       };
+    case 'requestFreshWorldSnapshot': {
+      const seed = worldSeed(input.seed);
+      if (seed === 'invalid') {
+        return invalid(
+          requestId,
+          'requestFreshWorldSnapshot.seed must contain four uint32 values.',
+        );
+      }
+      const config = optionalConfig(input.config);
+      if (config === 'invalid') {
+        return invalid(
+          requestId,
+          'requestFreshWorldSnapshot.config must contain positive integer dimensions.',
+        );
+      }
+      return {
+        kind: 'valid',
+        message:
+          config === undefined
+            ? {
+                type: 'requestFreshWorldSnapshot',
+                protocolVersion: WORKER_PROTOCOL_VERSION,
+                requestId,
+                seed,
+              }
+            : {
+                type: 'requestFreshWorldSnapshot',
+                protocolVersion: WORKER_PROTOCOL_VERSION,
+                requestId,
+                seed,
+                config,
+              },
+      };
+    }
     case 'requestFocusCheckpoint':
       return input.baselineEventId === null || isNonNegativeSafeInteger(input.baselineEventId)
         ? {
