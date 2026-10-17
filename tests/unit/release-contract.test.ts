@@ -11,6 +11,9 @@ import {
 } from '../../src/simulation/persistence';
 
 const releaseNotes = readFileSync(path.resolve('RELEASE_NOTES.md'), 'utf8');
+const packageJson = JSON.parse(readFileSync(path.resolve('package.json'), 'utf8')) as {
+  readonly scripts: Readonly<Record<string, string>>;
+};
 
 describe('v1.0.0 release contract', () => {
   it('freezes authoritative save and Worker protocol versions for the release candidate', () => {
@@ -27,10 +30,19 @@ describe('v1.0.0 release contract', () => {
     expect(releaseNotes).toContain('unsigned');
     expect(releaseNotes).toContain('SHA-256 checksum');
     expect(releaseNotes).toContain('CycloneDX SBOM');
+    expect(releaseNotes).toContain('release manifest');
+    expect(releaseNotes).toContain('exact source commit');
     expect(releaseNotes).toContain('Uninstalling the application intentionally leaves');
     expect(releaseNotes).toContain('snapshot, engine, and content version 14');
     expect(releaseNotes).toContain('Worker protocol version 11');
     expect(releaseNotes).toContain('Known non-blocking limitations');
     expect(releaseNotes).toContain('no account or online service');
+  });
+
+  it('builds release artifacts only from a clean source and writes their manifest', () => {
+    expect(packageJson.scripts['build:release']).toBe(
+      'node scripts/release-manifest.mjs --check-source && npm run generate:sbom && npm run build:desktop && node scripts/release-manifest.mjs',
+    );
+    expect(packageJson.scripts['verify:production-exclusion']).toContain('npm run build:release');
   });
 });

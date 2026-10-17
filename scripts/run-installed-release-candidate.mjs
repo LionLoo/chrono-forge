@@ -17,6 +17,8 @@ import { pathToFileURL } from 'node:url';
 
 import { chromium } from '@playwright/test';
 
+import { loadReleaseManifest } from './release-manifest.mjs';
+
 const APPLICATION_IDENTIFIER = 'com.lionloo.chronoforge';
 const PROFILE_PATTERN = /^m11-rc-[a-z0-9-]{1,48}$/u;
 const EXPECTED_SLOT_IDS = Object.freeze([
@@ -539,11 +541,25 @@ async function runInstalledReleaseCandidate() {
   if (npmCli === undefined) {
     throw new Error('Run through `npm run verify:installed-release-candidate`.');
   }
+  const workspaceDirectory = realpathSync(process.cwd());
+  const commit = repositoryCommit();
+  const packageVersion = JSON.parse(
+    readFileSync(path.join(workspaceDirectory, 'package.json'), 'utf8'),
+  ).version;
+  const releaseManifest = loadReleaseManifest({
+    expectedCommit: commit,
+    expectedPackageVersion: packageVersion,
+    workspace: workspaceDirectory,
+  });
   const installerDirectory = path.resolve('src-tauri/target/release/bundle/nsis');
   const installerName = selectSingleInstaller(
     readdirSync(installerDirectory).map((name) => path.join(installerDirectory, name)),
   );
-  const workspaceDirectory = realpathSync(process.cwd());
+  if (realpathSync(installerName) !== releaseManifest.installer.absolutePath) {
+    throw new Error(
+      `Release manifest installer ${releaseManifest.installer.path} does not match ${installerName}.`,
+    );
+  }
   const outputRoot = path.resolve(workspaceDirectory, 'test-results');
   mkdirSync(outputRoot, { recursive: true });
   validatedChildPath(workspaceDirectory, realpathSync(outputRoot));
@@ -588,6 +604,13 @@ async function runInstalledReleaseCandidate() {
     path.join(installDirectory, 'uninstall.exe'),
   );
   const installerHash = sha256(installerName);
+  const installerBytes = statSync(installerName).size;
+  if (
+    installerHash !== releaseManifest.installer.sha256 ||
+    installerBytes !== releaseManifest.installer.bytes
+  ) {
+    throw new Error('Release installer changed after manifest validation.');
+  }
   const checksumPath = validatedChildPath(
     outputDirectory,
     path.join(outputDirectory, `${path.basename(installerName)}.sha256`),
@@ -656,12 +679,23 @@ async function runInstalledReleaseCandidate() {
       archiveAfterReinstall: afterReinstall,
       archiveBeforeUninstall: beforeUninstall,
       canonicalCheckpoint,
-      commit: repositoryCommit(),
+      artifactCommit: releaseManifest.artifactCommit,
+      commit,
       installedExecutable: installedExecutableEvidence,
       installer: {
-        bytes: statSync(installerName).size,
+        bytes: installerBytes,
         filename: path.basename(installerName),
         sha256: installerHash,
+      },
+      releaseManifest: {
+        bytes: releaseManifest.manifest.bytes,
+        path: releaseManifest.manifest.path,
+        sha256: releaseManifest.manifest.sha256,
+      },
+      sbom: {
+        bytes: releaseManifest.sbom.bytes,
+        path: releaseManifest.sbom.path,
+        sha256: releaseManifest.sbom.sha256,
       },
       profile,
       profilePreservedAcrossUninstall: true,

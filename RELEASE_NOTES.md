@@ -20,7 +20,7 @@ Chrono Forge is a private, local-first Windows focus timer and autonomous civili
 
 ## Install and trust
 
-This private v1.0.0 build is unsigned because no Windows signing credential is established. Obtain the installer, its `.sha256` file, and the CycloneDX SBOM from the same trusted private GitHub release. Verify the SHA-256 checksum before running the installer. Windows may show **Unknown publisher** or Microsoft Defender SmartScreen; proceed only when the filename and checksum match the trusted release.
+This private v1.0.0 build is unsigned because no Windows signing credential is established. Obtain the installer, its `.sha256` file, the CycloneDX SBOM, and the release manifest from the same trusted private GitHub release. The manifest binds the exact source commit to the immutable installer and SBOM hashes. Verify the manifest and SHA-256 checksum before running the installer. Windows may show **Unknown publisher** or Microsoft Defender SmartScreen; proceed only when the filename and checksum match the trusted release.
 
 Chrono Forge requires no account or online service. Saves, settings, and focus history remain in local application data. Uninstalling the application intentionally leaves that local archive in place so reinstalling can recover it; export important worlds before manually deleting local data.
 
@@ -41,4 +41,5 @@ The release candidate freezes snapshot, engine, and content version 14 plus Work
 - Usable Windows x64 NSIS installer.
 - Installer SHA-256 checksum file.
 - CycloneDX JSON SBOM covering npm and Cargo components.
+- Atomic release manifest binding the exact source commit, package version, installer, and SBOM hashes.
 - Repository evidence for the clean release-candidate and exact tagged-release gates.
