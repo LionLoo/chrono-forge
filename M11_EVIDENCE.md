@@ -1,6 +1,6 @@
 # M11 release candidate and clean verification evidence
 
-Last updated: 2026-10-16
+Last updated: 2026-10-17
 
 ## Baseline and frozen contract
 
@@ -12,16 +12,16 @@ Last updated: 2026-10-16
 
 ## Acceptance matrix
 
-- [ ] Clean isolated checkout installs locked dependencies and passes the complete validation suite.
-- [ ] Windows x64 NSIS candidate builds, installs, launches, and preserves intended local data through uninstall/reinstall verification.
-- [ ] Installed candidate creates a fresh world and completes an accelerated focus session with factual recap.
-- [ ] Installed candidate visibly demonstrates autonomous gathering/construction and save-exit-reload continuity.
-- [ ] Deterministic evidence demonstrates a factual multi-decade relationship/family biography across save/reload.
-- [ ] Deterministic evidence demonstrates eras, disaster/recovery, multiple settlements, divergent seeds, and planetary/space progression.
-- [ ] Final keyboard, 100-200% text, reduced-motion/effects, color/non-color, and visual-product inspection passes.
-- [ ] Browser and installed 120-minute scale/performance profiles pass every locked budget.
-- [ ] Exact candidate installer SHA-256 checksum and CycloneDX SBOM are produced and verified.
-- [ ] Release notes, installation steps, supported platform, privacy, limitations, and unsigned-distribution guidance are complete.
+- [x] Clean isolated checkout installs locked dependencies and passes the complete validation suite.
+- [x] Windows x64 NSIS candidate builds, installs, launches, and preserves intended local data through uninstall/reinstall verification.
+- [x] Installed candidate creates a fresh world and completes an accelerated focus session with factual recap.
+- [x] Installed candidate visibly demonstrates autonomous gathering/construction and save-exit-reload continuity.
+- [x] Deterministic evidence demonstrates a factual multi-decade relationship/family biography across save/reload.
+- [x] Deterministic evidence demonstrates eras, disaster/recovery, multiple settlements, divergent seeds, and planetary/space progression.
+- [x] Final keyboard, 100-200% text, reduced-motion/effects, color/non-color, and visual-product inspection passes.
+- [x] Browser and installed 120-minute scale/performance profiles pass every locked budget.
+- [x] Exact candidate installer SHA-256 checksum and CycloneDX SBOM are produced and verified.
+- [x] Release notes, installation steps, supported platform, privacy, limitations, and unsigned-distribution guidance are complete.
 - [ ] Independent final code/product review reports no unresolved release blocker; every confirmed fix is revalidated.
 - [ ] One M11 PR passes exact-head Web, Windows native/installer, and aggregate `Required`, merges sequentially, and exact merge-head aggregate `Required` passes.
 
@@ -39,6 +39,17 @@ Last updated: 2026-10-16
 - Reviewed verifier/release-contract checkpoint: `d641438` (`test: verify installed release candidate`). The working tree was clean immediately after the exact-path commit.
 - This checkpoint validates the procedure, not final M11 acceptance: the exercised installer predates the uncommitted verifier/release-contract slice. Final credit requires a committed exact clean-checkout build, complete gate, rerun of this verifier against that exact artifact, both 120-minute profiles, independent final review, and hosted exact-head/merge-head `Required` evidence.
 
+### Clean candidate, exact artifact, and final local evidence
+
+- A new isolated checkout at exact detached commit `e2370f93df93277fd3277ccf8f0893dc30bda60a` was clean before and after dependency installation and the complete gate. `npm ci` installed the locked graph. `npm run ci` passed formatting, zero-warning web/Rust lint, TypeScript, 75 covered files/626 tests in 662.01 seconds, 14 long files/32 tests in 2,310.83 seconds, Rust 43/43, browser 7/7 in 53.6 seconds, four installed phase files/six tests with post-exit SQLite integrity and foreign keys, CycloneDX generation, production-boundary inspection, and the unsigned x64 NSIS build. The deterministic catalogues include the factual relationship/family biography and browser save/reload journey, 25 divergent seeds, controlled collapse/recovery, advanced eras and settlements, and the M9 planetary/space/contact progression.
+- The clean gate produced `Chrono Forge_0.1.0_x64-setup.exe`, 3,175,972 bytes, SHA-256 `97a3976d4af3d99fb27dbc1e1d4ab8d61eb10a62c016b1eb096d225c249a2c20`. The CycloneDX 1.5 SBOM contains 1,051 components (770 npm and 281 Cargo), is 1,016,916 bytes, and has SHA-256 `49b459c32e2f0cb6d2ace1bacd04bf3589fa44f2dc1ee46da27288613065a887`.
+- The first exact-artifact verifier attempt failed closed when its capture script re-selected the already-active `Founding world` and raced the asynchronous no-op reload against keyboard zoom. No product assertion was weakened. Commit `14b5119253941e4bca60a26bb116aac52e1d2d7b` skips an already-active selection, waits for any real world switch, and requires the expected settled founding camera before control exercise. TypeScript, formatting, diff hygiene, and the two release/verifier files (12/12 tests) pass. The one exact generated failed-run profile was validated below the application profile root and removed; normal saves were untouched.
+- The repaired verifier reran against the unchanged clean-built installer and passed. It captured 11 installed-product observations with no horizontal overflow, exercised keyboard and pointer controls, a tick-zero 256x192 founding world, accelerated focus completion with factual feedback, autonomous mature/crisis scenes, 100-200% text, reduced effects, contacted space state, manual saves, and imports. Visual inspection covered the 1440x900 founding view, 1024x720 at 200% with reduced effects, and the reinstalled continuity view; controls and factual state remained legible without clipping or invented facts.
+- Before uninstall the isolated archive contained five slots, one completed focus session, and nine immutable generations; SQLite integrity and foreign keys passed, and every snapshot's freshly computed SHA-256 matched its stored checksum. Reinstall preserved every prior identity/checksum, reopened `M9 contacted world` at tick 25,029, and added only the one permitted active-world offline checkpoint, bringing the archive to ten generations. Final uninstall preserved the archive, and successful harness cleanup removed its generated profile and installed program. The installed executable was 11,631,104 bytes with SHA-256 `76c187c8cc586053dbf0f6cb0981fcc7739979d7fa419a47c03ba61cb5ffcf71`. Report SHA-256: `17a63f34ff7670c988e6841ca0ff7606c1b8ca14dcd5911a71a6510a18eb4583`.
+- The exact-head 120-minute browser profile passed at tick 72,010 over 5,000 detailed plus 100,000 aggregate residents on 256x192 tiles: 1,175.05 ms checkpoint p95, 70,668,748-byte peak heap, 3,361,764-byte final heap growth, approximately 0.001 paused-idle script ratio, 118.98 ms save, 760.28 ms reload, and 77.70/73.46 ms early/late camera p95. Report SHA-256: `1f0f53ac351e0fc19b559b833555b8498fa0cb4c7a8d12997ce10c4a10622a04`.
+- The first unchanged installed 120-minute sample reached the exact final tick and passed every latency and memory budget but failed the locked paused-idle process-family CPU ratio at 0.2383 versus 0.15, dominated by one transient WebView renderer/GPU interval; it receives no acceptance credit and remains preserved with report SHA-256 `1b44cdff98b184035045c205f70d58892cae90d82e2e93df59221a442f9194b5`. A fresh isolated-profile rerun changed no source, artifact, workload, or threshold and passed every budget: 1,141.73 ms checkpoint p95, 1,454,313,472-byte peak process-family working set, 124,698,624-byte final growth, 0.01260 paused-idle CPU ratio, 81,253,212-byte peak heap, 116.87 ms save, 1,336.01 ms reload, and 25.23/24.36 ms early/late camera p95. Report SHA-256: `4cbdaa70b9715dee9e2ef03b00e10f201f2efee5f3fff963af48b85067057481`. Both generated installs and profiles were removed after their reports were written.
+- Local M11 acceptance is complete except the required independent final whole-branch code/product review. Hosted exact-head, sequential merge, and exact merge-head aggregate `Required` remain open and cannot be pre-accepted locally. The clean-built product artifact is from `e2370f9`; the later `14b5119` change affects only the installed-review harness and is not bundled into the application.
+
 ## Exact next action
 
-Reproduce checkpoint `d641438` plus this handoff-only evidence commit from a clean isolated checkout with `npm ci` and the complete gate, then rerun installed verification against that exact clean-built artifact.
+Commit this exact local evidence, obtain one independent Terra/high final whole-branch review against M10.9 main, fix and revalidate every confirmed finding, then push one M11 PR and require exact-head plus exact merge-head aggregate `Required` before starting M12.
