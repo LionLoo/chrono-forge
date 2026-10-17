@@ -99,9 +99,9 @@ Last updated: 2026-10-16
 ## Root rotation state
 
 - This Sol/xhigh root owns task `INPROGRESS` and branch `release/v1.0.0-rc`; no second root may edit concurrently.
-- Exact branch baseline is delivered M10.9 main `d7fbb74f1ff55e331ccfc80a28e53ec76059699d`; branch commit `459a8ee8b34596ad953ed5f72e715355b08a741c` records its hosted closure and M11 start. The intended uncommitted work is the M11 release-contract, notes, installed verifier, tests, and current evidence.
+- Exact branch baseline is delivered M10.9 main `d7fbb74f1ff55e331ccfc80a28e53ec76059699d`; branch commit `459a8ee8b34596ad953ed5f72e715355b08a741c` records its hosted closure and M11 start, and reviewed M11 verifier/release-contract checkpoint `d641438` records the current procedure, notes, tests, and evidence.
 - A true same-project Sol/xhigh successor cannot be created through the available desktop task API without an explicit user request for a new task, so repository-only handoff state remains authoritative.
 
 ## Exact next action
 
-Commit the reviewed M11 verifier/release-contract checkpoint, then reproduce that exact commit from a clean isolated checkout with `npm ci` and `npm run ci` before rerunning installed verification against the exact clean-built artifact.
+Commit this handoff-only checkpoint update, then reproduce its exact commit from a clean isolated checkout with `npm ci` and `npm run ci` before rerunning installed verification against the exact clean-built artifact.
