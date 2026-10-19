@@ -357,15 +357,13 @@ async function waitForChildExit(child, timeoutMs) {
 
 export async function ensureProcessTreeStopped(child, waitForExit, forceKill) {
   if (child.exitCode !== null || child.signalCode !== null) return;
-  try {
-    child.kill();
-  } catch {
-    // A failed graceful request still proceeds through required forced termination below.
-  }
-  if (await waitForExit()) return;
   if (child.pid === undefined) {
     throw new Error('Installed application remained live without a process ID for forced cleanup.');
   }
+
+  // Kill the complete Windows process tree while the host PID still exists. Killing the host
+  // first can make it exit before taskkill enumerates its WebView2 descendants, leaving those
+  // children alive and holding the isolated profile or installer files.
   await forceKill(child.pid);
   if (!(await waitForExit())) {
     throw new Error(

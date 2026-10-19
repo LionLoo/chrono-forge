@@ -127,23 +127,19 @@ describe('installed release-candidate verifier', () => {
     await expect(
       ensureProcessTreeStopped(child, () => Promise.resolve(false), failedTaskkill),
     ).rejects.toThrow('taskkill.exe exited 1');
+    expect(child.kill).not.toHaveBeenCalled();
 
     const successfulTaskkill = vi.fn().mockResolvedValue(undefined);
-    const stillRunning = vi
-      .fn<() => Promise<boolean>>()
-      .mockResolvedValueOnce(false)
-      .mockResolvedValueOnce(false);
+    const stillRunning = vi.fn<() => Promise<boolean>>().mockResolvedValue(false);
     await expect(ensureProcessTreeStopped(child, stillRunning, successfulTaskkill)).rejects.toThrow(
       'remained live after taskkill',
     );
 
-    const exitsAfterTaskkill = vi
-      .fn<() => Promise<boolean>>()
-      .mockResolvedValueOnce(false)
-      .mockResolvedValueOnce(true);
+    const exitsAfterTaskkill = vi.fn<() => Promise<boolean>>().mockResolvedValue(true);
     await expect(
       ensureProcessTreeStopped(child, exitsAfterTaskkill, successfulTaskkill),
     ).resolves.toBeUndefined();
+    expect(successfulTaskkill).toHaveBeenLastCalledWith(42);
   });
 
   it('preserves every prior generation while accepting one bounded offline checkpoint', () => {
