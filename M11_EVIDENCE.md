@@ -1,6 +1,6 @@
 # M11 release candidate and clean verification evidence
 
-Last updated: 2026-10-17
+Last updated: 2026-10-19
 
 ## Baseline and frozen contract
 
