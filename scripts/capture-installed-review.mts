@@ -272,7 +272,11 @@ try {
     ) as HTMLOptionElement | undefined;
     return founding?.value ?? null;
   });
-  if (foundingValue !== null) await localSlot.selectOption(foundingValue);
+  if (foundingValue !== null && (await localSlot.inputValue()) !== foundingValue) {
+    await localSlot.selectOption(foundingValue);
+    await page.getByText('Loaded Founding world.').waitFor({ state: 'visible', timeout: 30_000 });
+  }
+  await page.getByLabel('Camera position').getByText('1.50×').waitFor({ state: 'visible' });
   await exerciseInstalledControls(page);
   await page.getByRole('button', { name: 'Overview' }).click();
   await capture(page, observations, 'founding-wide', 1440, 900, 100);

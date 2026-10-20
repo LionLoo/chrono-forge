@@ -22,6 +22,7 @@
     "build": "npm run typecheck && npm run build:web",
     "build:web": "vite build",
     "build:desktop": "tauri build",
+    "build:release": "node scripts/release-manifest.mjs --check-source && npm run generate:sbom && npm run build:desktop && node scripts/release-manifest.mjs",
     "build:e2e:web": "vite build --mode desktop-e2e",
     "build:e2e:desktop": "tauri build --config src-tauri/tauri.e2e.conf.json --features desktop-e2e",
     "format": "prettier . --write && cargo fmt --manifest-path src-tauri/Cargo.toml --all",
@@ -42,15 +43,16 @@
     "test:e2e:web": "npm run build:web && playwright test",
     "test:e2e:desktop": "node scripts/run-native-e2e-ci.mjs --single-attempt",
     "test:e2e:desktop:ci": "node scripts/run-native-e2e-ci.mjs",
-    "verify:production-exclusion": "npm run build:desktop && node tests/e2e-desktop/verify-production-exclusion.mjs",
+    "verify:production-exclusion": "npm run build:release && node tests/e2e-desktop/verify-production-exclusion.mjs",
     "bench": "vitest bench --run",
     "generate:sbom": "node scripts/generate-sbom.mjs release-artifacts/chrono-forge.cdx.json",
     "generate:render-baselines": "tsx scripts/generate-render-baselines.mts",
     "capture:installed-review": "tsx scripts/capture-installed-review.mts",
+    "verify:installed-release-candidate": "node scripts/run-installed-release-candidate.mjs",
     "profile:runtime:web": "npm run build:web && tsx scripts/profile-runtime.mts --browser",
     "profile:runtime:installed": "tsx scripts/profile-runtime.mts --installed",
     "ci:web": "npm run format:check:web && npm run lint:web && npm run typecheck && npm run test && npm run test:sim:long && npm run build:web",
-    "ci": "npm run format:check && npm run lint && npm run typecheck && npm run test && npm run test:sim:long && npm run test:rust && npm run test:e2e:web && npm run test:e2e:desktop && npm run generate:sbom && npm run verify:production-exclusion"
+    "ci": "npm run format:check && npm run lint && npm run typecheck && npm run test && npm run test:sim:long && npm run test:rust && npm run test:e2e:web && npm run test:e2e:desktop && npm run verify:production-exclusion"
   },
   "dependencies": {
     "@tauri-apps/api": "2.11.1",

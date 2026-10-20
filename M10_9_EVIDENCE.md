@@ -41,5 +41,6 @@ Last updated: 2026-10-16
 
 ## Delivery state and exact next action
 
-- M10.9 is locally implemented, independently reviewed, and complete-gate green. It is not delivered until the exact committed PR head passes aggregate `Required`, merges sequentially, and the exact merge head also passes aggregate `Required`.
-- Commit only the reviewed M10.9 paths, push `release/v1-world-lifecycle-save-slots`, open one PR, wait for exact-head Web/Windows/aggregate `Required`, merge only when green, then require exact merge-head `Required`. Continue immediately to M11 from that delivered main.
+- M10.9 is delivered. PR #25 final head `39b42db96a0c421e1136f136ed2542eec99ea8f5` passed exact-head workflow `38944274911`, with Web, Windows native/installer, and aggregate `Required` all green and the corrected review thread resolved.
+- PR #25 merged sequentially at `d7fbb74f1ff55e331ccfc80a28e53ec76059699d`. Exact merge-head workflow `38948993359` passed Web, Windows native/installer, and aggregate `Required`.
+- Continue from that exact delivered main on `release/v1.0.0-rc` with M11 clean release-candidate verification. M10.9 does not pre-accept M11 or M12.
