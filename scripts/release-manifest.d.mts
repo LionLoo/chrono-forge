@@ -32,6 +32,8 @@ export function createReleaseManifest(options: {
   readonly workspace?: string;
 }): ReleaseManifestDocument;
 
+export function cleanReleaseArtifacts(workspace?: string): void;
+
 export function loadReleaseManifest(options: {
   readonly expectedCommit: string;
   readonly expectedPackageVersion: string;

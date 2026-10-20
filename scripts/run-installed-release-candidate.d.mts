@@ -29,6 +29,11 @@ export function releaseCandidateOutputDirectory(
   workspace?: string,
 ): string;
 
+export function releaseCandidateArtifactDirectory(
+  requestedRoot: string,
+  workspace?: string,
+): string;
+
 export function selectSingleInstaller(paths: readonly string[]): string;
 
 export function checksumLine(hash: string, filename: string): string;

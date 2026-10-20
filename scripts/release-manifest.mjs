@@ -200,6 +200,25 @@ function releaseSource() {
   return commit;
 }
 
+export function cleanReleaseArtifacts(workspace = process.cwd()) {
+  const root = canonicalWorkspace(workspace);
+  const generatedDirectories = [
+    path.join(root, 'release-artifacts'),
+    path.join(root, 'src-tauri', 'target', 'release', 'bundle', 'nsis'),
+  ];
+  for (const directory of generatedDirectories) {
+    const relation = path.relative(root, directory);
+    if (
+      relation.length === 0 ||
+      relation.startsWith(`..${path.sep}`) ||
+      path.isAbsolute(relation)
+    ) {
+      throw new Error(`Generated release directory escapes the workspace: ${directory}`);
+    }
+    rmSync(directory, { recursive: true, force: true });
+  }
+}
+
 function writeReleaseManifest() {
   const workspace = canonicalWorkspace(process.cwd());
   const commit = releaseSource();
@@ -247,9 +266,12 @@ const entry = process.argv[1];
 if (entry !== undefined && import.meta.url === pathToFileURL(path.resolve(entry)).href) {
   if (process.argv[2] === '--check-source') {
     process.stdout.write(`Release source is clean at ${releaseSource()}.\n`);
+  } else if (process.argv[2] === '--clean') {
+    cleanReleaseArtifacts();
+    process.stdout.write('Removed prior generated release artifacts.\n');
   } else if (process.argv.length === 2) {
     writeReleaseManifest();
   } else {
-    throw new Error('Usage: node scripts/release-manifest.mjs [--check-source]');
+    throw new Error('Usage: node scripts/release-manifest.mjs [--check-source|--clean]');
   }
 }

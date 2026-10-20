@@ -52,6 +52,21 @@ export function releaseCandidateOutputDirectory(requestedOutput, workspace = pro
   return outputDirectory;
 }
 
+export function releaseCandidateArtifactDirectory(requestedRoot, workspace = process.cwd()) {
+  const artifactRoot = releaseCandidateOutputDirectory(requestedRoot, workspace);
+  if (!existsSync(artifactRoot)) {
+    throw new Error(`Release-candidate artifact root does not exist: ${artifactRoot}`);
+  }
+  const canonicalArtifactRoot = realpathSync(artifactRoot);
+  const canonicalTestResultsRoot = realpathSync(path.resolve(workspace, 'test-results'));
+  if (path.dirname(canonicalArtifactRoot) !== canonicalTestResultsRoot) {
+    throw new Error(
+      `Release-candidate artifact root resolves outside test-results: ${artifactRoot}`,
+    );
+  }
+  return canonicalArtifactRoot;
+}
+
 export function selectSingleInstaller(paths) {
   const installers = paths.filter((candidate) => candidate.toLowerCase().endsWith('.exe')).sort();
   if (installers.length !== 1) {
@@ -544,12 +559,24 @@ async function runInstalledReleaseCandidate() {
   const packageVersion = JSON.parse(
     readFileSync(path.join(workspaceDirectory, 'package.json'), 'utf8'),
   ).version;
+  const requestedArtifactRoot = process.env.CHRONO_FORGE_RC_ARTIFACT_ROOT;
+  const artifactWorkspace =
+    requestedArtifactRoot === undefined
+      ? workspaceDirectory
+      : releaseCandidateArtifactDirectory(requestedArtifactRoot, workspaceDirectory);
   const releaseManifest = loadReleaseManifest({
     expectedCommit: commit,
     expectedPackageVersion: packageVersion,
-    workspace: workspaceDirectory,
+    workspace: artifactWorkspace,
   });
-  const installerDirectory = path.resolve('src-tauri/target/release/bundle/nsis');
+  const installerDirectory = path.join(
+    artifactWorkspace,
+    'src-tauri',
+    'target',
+    'release',
+    'bundle',
+    'nsis',
+  );
   const installerName = selectSingleInstaller(
     readdirSync(installerDirectory).map((name) => path.join(installerDirectory, name)),
   );
@@ -677,6 +704,10 @@ async function runInstalledReleaseCandidate() {
       archiveAfterReinstall: afterReinstall,
       archiveBeforeUninstall: beforeUninstall,
       canonicalCheckpoint,
+      artifactRoot:
+        artifactWorkspace === workspaceDirectory
+          ? '.'
+          : path.relative(workspaceDirectory, artifactWorkspace).split(path.sep).join('/'),
       artifactCommit: releaseManifest.artifactCommit,
       commit,
       installedExecutable: installedExecutableEvidence,

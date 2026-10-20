@@ -11,8 +11,10 @@ import {
 } from '../../src/simulation/persistence';
 
 const releaseNotes = readFileSync(path.resolve('RELEASE_NOTES.md'), 'utf8');
+const releaseWorkflow = readFileSync(path.resolve('.github/workflows/release.yml'), 'utf8');
 const packageJson = JSON.parse(readFileSync(path.resolve('package.json'), 'utf8')) as {
   readonly scripts: Readonly<Record<string, string>>;
+  readonly version: string;
 };
 
 describe('v1.0.0 release contract', () => {
@@ -41,8 +43,34 @@ describe('v1.0.0 release contract', () => {
 
   it('builds release artifacts only from a clean source and writes their manifest', () => {
     expect(packageJson.scripts['build:release']).toBe(
-      'node scripts/release-manifest.mjs --check-source && npm run generate:sbom && npm run build:desktop && node scripts/release-manifest.mjs',
+      'node scripts/release-manifest.mjs --check-source && node scripts/release-manifest.mjs --clean && npm run generate:sbom && npm run build:desktop && node scripts/release-manifest.mjs',
     );
     expect(packageJson.scripts['verify:production-exclusion']).toContain('npm run build:release');
+  });
+
+  it('stages a draft download, smokes it, and only then publishes the release', () => {
+    const orderedSteps = [
+      'Create or refresh private draft release',
+      'Download exact draft assets',
+      'Verify and stage downloaded assets',
+      'Smoke downloaded installer',
+      'Publish verified private release',
+    ];
+    let previous = -1;
+    for (const step of orderedSteps) {
+      const index = releaseWorkflow.indexOf(`- name: ${step}`);
+      expect(index, `${step} must exist after the previous release gate`).toBeGreaterThan(previous);
+      previous = index;
+    }
+    expect(releaseWorkflow).toContain('--notes-file RELEASE_NOTES.md --draft');
+    expect(releaseWorkflow).toContain('already published; refusing to mutate it on a rerun');
+    expect(releaseWorkflow).toContain('CHRONO_FORGE_RC_ARTIFACT_ROOT: test-results/release-staged');
+    expect(releaseWorkflow).toContain(
+      'gh release edit $env:GITHUB_REF_NAME --draft=false --latest',
+    );
+  });
+
+  it('uses the final v1.0.0 package version', () => {
+    expect(packageJson.version).toBe('1.0.0');
   });
 });

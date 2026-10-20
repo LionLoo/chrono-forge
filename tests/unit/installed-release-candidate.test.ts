@@ -1,4 +1,6 @@
 import { createHash } from 'node:crypto';
+import { mkdirSync, mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import path from 'node:path';
 
 import { describe, expect, it, vi } from 'vitest';
@@ -8,6 +10,7 @@ import {
   awaitLaunchReadiness,
   checksumLine,
   ensureProcessTreeStopped,
+  releaseCandidateArtifactDirectory,
   releaseCandidateOutputDirectory,
   selectSingleInstaller,
   validatedChildPath,
@@ -38,6 +41,25 @@ describe('installed release-candidate verifier', () => {
     ).toThrow('direct child');
   });
 
+  it('accepts only an existing direct test-results child as an alternate artifact root', () => {
+    const workspace = mkdtempSync(path.join(tmpdir(), 'chrono-forge-artifact-root-'));
+    try {
+      const artifactRoot = path.join(workspace, 'test-results', 'downloaded-release');
+      mkdirSync(artifactRoot, { recursive: true });
+      expect(releaseCandidateArtifactDirectory('test-results/downloaded-release', workspace)).toBe(
+        artifactRoot,
+      );
+      expect(() =>
+        releaseCandidateArtifactDirectory('test-results/missing-release', workspace),
+      ).toThrow('does not exist');
+      expect(() =>
+        releaseCandidateArtifactDirectory('test-results/nested/downloaded-release', workspace),
+      ).toThrow('direct child');
+    } finally {
+      rmSync(workspace, { recursive: true, force: true });
+    }
+  });
+
   it('requires one exact executable installer', () => {
     expect(selectSingleInstaller(['candidate.exe'])).toBe('candidate.exe');
     expect(() => selectSingleInstaller([])).toThrow('found 0');
@@ -47,8 +69,8 @@ describe('installed release-candidate verifier', () => {
 
   it('writes a conventional lowercase SHA-256 line', () => {
     const hash = 'a'.repeat(64);
-    expect(checksumLine(hash, 'Chrono Forge_0.1.0_x64-setup.exe')).toBe(
-      `${hash}  Chrono Forge_0.1.0_x64-setup.exe\n`,
+    expect(checksumLine(hash, 'Chrono Forge_1.0.0_x64-setup.exe')).toBe(
+      `${hash}  Chrono Forge_1.0.0_x64-setup.exe\n`,
     );
     expect(() => checksumLine('ABC', 'candidate.exe')).toThrow('lowercase hex');
     expect(() => checksumLine(hash, 'bad\nname.exe')).toThrow('filename is invalid');

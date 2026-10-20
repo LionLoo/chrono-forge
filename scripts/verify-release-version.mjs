@@ -7,14 +7,25 @@ if (!tag?.startsWith('v')) {
 
 const expectedVersion = tag.slice(1);
 const packageManifest = JSON.parse(await readFile('package.json', 'utf8'));
+const packageLock = JSON.parse(await readFile('package-lock.json', 'utf8'));
 const tauriManifest = JSON.parse(await readFile('src-tauri/tauri.conf.json', 'utf8'));
 const cargoManifest = await readFile('src-tauri/Cargo.toml', 'utf8');
 const cargoVersion = cargoManifest.match(/^version\s*=\s*"([^"]+)"/m)?.[1];
+const cargoLock = await readFile('src-tauri/Cargo.lock', 'utf8');
+const cargoLockVersion = cargoLock.match(
+  /\[\[package\]\]\s+name\s*=\s*"chrono-forge"\s+version\s*=\s*"([^"]+)"/m,
+)?.[1];
+const projectMeta = await readFile('src/project-meta.ts', 'utf8');
+const projectMetaVersion = projectMeta.match(/^\s*version:\s*'([^']+)'/m)?.[1];
 
 const versions = new Map([
   ['package.json', packageManifest.version],
+  ['package-lock.json', packageLock.version],
+  ['package-lock.json root package', packageLock.packages?.['']?.version],
   ['src-tauri/tauri.conf.json', tauriManifest.version],
   ['src-tauri/Cargo.toml', cargoVersion],
+  ['src-tauri/Cargo.lock chrono-forge package', cargoLockVersion],
+  ['src/project-meta.ts', projectMetaVersion],
 ]);
 
 for (const [file, version] of versions) {

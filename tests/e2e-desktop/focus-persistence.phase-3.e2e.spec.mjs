@@ -125,7 +125,7 @@ describe('native focus persistence phase 3', () => {
 
     expect(await invoke('app_info')).toEqual({
       name: 'Chrono Forge',
-      version: '0.1.0',
+      version: '1.0.0',
       localFirst: true,
     });
     const initialSlots = await invoke('list_save_slots');

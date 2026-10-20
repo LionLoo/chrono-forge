@@ -37,7 +37,14 @@ jobs:
       - name: Install locked dependencies
         run: npm ci
       - name: Verify tag and manifest versions
-        run: node scripts/verify-release-version.mjs $env:GITHUB_REF_NAME
+        shell: pwsh
+        run: |
+          node scripts/verify-release-version.mjs $env:GITHUB_REF_NAME
+          if ($LASTEXITCODE -ne 0) { throw 'Release version verification failed.' }
+          $tagCommit = (git rev-list -n 1 $env:GITHUB_REF_NAME).Trim()
+          if ($tagCommit -ne $env:GITHUB_SHA) {
+            throw "Tag $env:GITHUB_REF_NAME resolves to $tagCommit instead of workflow commit $env:GITHUB_SHA."
+          }
       - name: Install Chromium
         run: npx playwright install chromium
       - name: Run full release gate
@@ -49,12 +56,84 @@ jobs:
           if ($installer.Count -ne 1) { throw "Expected exactly one NSIS installer, found $($installer.Count)." }
           $hash = Get-FileHash -LiteralPath $installer.FullName -Algorithm SHA256
           "$($hash.Hash.ToLowerInvariant())  $($installer.Name)" | Set-Content -LiteralPath "$($installer.FullName).sha256" -Encoding utf8NoBOM
-      - name: Publish private GitHub release
+      - name: Create or refresh private draft release
         shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
+          $ErrorActionPreference = 'Stop'
+          $PSNativeCommandUseErrorActionPreference = $false
           $tag = $env:GITHUB_REF_NAME
-          $assets = @(Get-ChildItem -LiteralPath 'src-tauri/target/release/bundle/nsis' -File | ForEach-Object { $_.FullName })
-          $assets += (Resolve-Path -LiteralPath 'release-artifacts/chrono-forge.cdx.json').Path
-          gh release create $tag $assets --verify-tag --title "Chrono Forge $tag" --generate-notes
+          $installers = @(Get-ChildItem -LiteralPath 'src-tauri/target/release/bundle/nsis' -Filter '*.exe' -File)
+          if ($installers.Count -ne 1) { throw "Expected exactly one NSIS installer, found $($installers.Count)." }
+          $installer = $installers[0]
+          $checksum = Get-Item -LiteralPath "$($installer.FullName).sha256"
+          $sbom = Get-Item -LiteralPath 'release-artifacts/chrono-forge.cdx.json'
+          $manifest = Get-Item -LiteralPath 'release-artifacts/release-manifest.json'
+          $assets = @($installer.FullName, $checksum.FullName, $sbom.FullName, $manifest.FullName)
+          $expectedNames = @($installer.Name, $checksum.Name, $sbom.Name, $manifest.Name) | Sort-Object
+
+          $existingJson = gh release view $tag --json isDraft,assets 2>$null
+          $viewExit = $LASTEXITCODE
+          if ($viewExit -eq 0) {
+            $existing = $existingJson | ConvertFrom-Json
+            if (-not $existing.isDraft) {
+              throw "Release $tag is already published; refusing to mutate it on a rerun."
+            }
+            foreach ($asset in @($existing.assets)) {
+              if ($expectedNames -notcontains $asset.name) {
+                gh release delete-asset $tag $asset.name --yes
+                if ($LASTEXITCODE -ne 0) { throw "Could not remove unexpected draft asset $($asset.name)." }
+              }
+            }
+            gh release edit $tag --title "Chrono Forge $tag" --notes-file RELEASE_NOTES.md --draft
+            if ($LASTEXITCODE -ne 0) { throw "Could not refresh draft metadata for $tag." }
+            gh release upload $tag $assets --clobber
+            if ($LASTEXITCODE -ne 0) { throw "Could not refresh draft assets for $tag." }
+          } else {
+            gh release create $tag $assets --verify-tag --title "Chrono Forge $tag" --notes-file RELEASE_NOTES.md --draft
+            if ($LASTEXITCODE -ne 0) { throw "Could not create draft release $tag." }
+          }
+
+          $draft = gh release view $tag --json isDraft,assets | ConvertFrom-Json
+          if ($LASTEXITCODE -ne 0 -or -not $draft.isDraft) { throw "Release $tag is not a readable draft." }
+          $actualNames = @($draft.assets | ForEach-Object { $_.name }) | Sort-Object
+          if (($actualNames -join "`n") -ne ($expectedNames -join "`n")) {
+            throw "Draft assets do not match the exact release contract: $($actualNames -join ', ')."
+          }
+      - name: Download exact draft assets
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $downloadDirectory = Join-Path $env:GITHUB_WORKSPACE 'test-results/release-download'
+          if (Test-Path -LiteralPath $downloadDirectory) { throw "Download directory already exists: $downloadDirectory" }
+          New-Item -ItemType Directory -Path $downloadDirectory | Out-Null
+          gh release download $env:GITHUB_REF_NAME --dir $downloadDirectory
+          if ($LASTEXITCODE -ne 0) { throw 'Draft release download failed.' }
+      - name: Verify and stage downloaded assets
+        run: npm run stage:downloaded-release -- test-results/release-download test-results/release-staged
+      - name: Smoke downloaded installer
+        env:
+          CHRONO_FORGE_RC_ARTIFACT_ROOT: test-results/release-staged
+          CHRONO_FORGE_RC_OUTPUT: test-results/release-download-smoke
+        run: npm run verify:installed-release-candidate
+      - name: Upload downloaded-release smoke evidence
+        if: always()
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
+        with:
+          name: v1.0.0-downloaded-release-smoke
+          path: test-results/release-download-smoke
+          if-no-files-found: ignore
+          retention-days: 30
+      - name: Publish verified private release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $release = gh release view $env:GITHUB_REF_NAME --json isDraft | ConvertFrom-Json
+          if ($LASTEXITCODE -ne 0 -or -not $release.isDraft) {
+            throw 'Verified release is not an unpublished draft.'
+          }
+          gh release edit $env:GITHUB_REF_NAME --draft=false --latest
+          if ($LASTEXITCODE -ne 0) { throw 'Verified release could not be published.' }
