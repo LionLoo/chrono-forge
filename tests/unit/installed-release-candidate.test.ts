@@ -138,6 +138,38 @@ describe('installed release-candidate verifier', () => {
     expect(cleanup).toHaveBeenCalledOnce();
   });
 
+  it('accepts the HTTPS Tauri player target exposed by an installed WebView', async () => {
+    const httpsPlayerFetch = vi.fn<typeof fetch>(() =>
+      Promise.resolve({
+        ok: true,
+        json: () =>
+          Promise.resolve([
+            { type: 'page', url: 'https://tauri.localhost/' },
+            { type: 'page', url: 'https://tauri.localhost/?persistence-broker=1' },
+          ]),
+      } as Response),
+    );
+
+    await expect(
+      waitForCdp('http://127.0.0.1:1', { exitCode: null }, 20, httpsPlayerFetch),
+    ).resolves.toBeUndefined();
+    expect(httpsPlayerFetch).toHaveBeenCalledOnce();
+  });
+
+  it('reports bounded observed page targets when installed readiness expires', async () => {
+    const unexpectedTargetFetch = vi.fn<typeof fetch>(() =>
+      Promise.resolve({
+        ok: true,
+        json: () =>
+          Promise.resolve([{ type: 'page', url: 'https://tauri.localhost/?persistence-broker=1' }]),
+      } as Response),
+    );
+
+    await expect(
+      waitForCdp('http://127.0.0.1:1', { exitCode: null }, 20, unexpectedTargetFetch),
+    ).rejects.toThrow('Observed page targets: ["https://tauri.localhost/?persistence-broker=1"]');
+  });
+
   it('requires forced process-tree cleanup to succeed and confirm exit', async () => {
     const child = {
       exitCode: null,

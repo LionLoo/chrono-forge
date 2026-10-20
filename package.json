@@ -43,6 +43,7 @@
     "test:e2e:web": "npm run build:web && playwright test",
     "test:e2e:desktop": "node scripts/run-native-e2e-ci.mjs --single-attempt",
     "test:e2e:desktop:ci": "node scripts/run-native-e2e-ci.mjs",
+    "verify:release-ci": "node scripts/verify-release-ci.mjs",
     "verify:production-exclusion": "npm run build:release && node tests/e2e-desktop/verify-production-exclusion.mjs",
     "bench": "vitest bench --run",
     "generate:sbom": "node scripts/generate-sbom.mjs release-artifacts/chrono-forge.cdx.json",

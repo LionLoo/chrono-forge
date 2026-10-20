@@ -1,6 +1,4 @@
-import type { BrowserContext, Page } from '@playwright/test';
-
-export function isInstalledPlayerPageUrl(value: string): boolean {
+export function isInstalledPlayerPageUrl(value) {
   try {
     const url = new URL(value);
     return (
@@ -14,22 +12,18 @@ export function isInstalledPlayerPageUrl(value: string): boolean {
   }
 }
 
-export function installedPlayerPage(context: BrowserContext): Page | undefined {
+export function installedPlayerPage(context) {
   return context.pages().find((candidate) => isInstalledPlayerPageUrl(candidate.url()));
 }
 
-export async function waitForInstalledPlayerPage(
-  context: BrowserContext,
-  timeoutMs = 30_000,
-  pollIntervalMs = 50,
-): Promise<Page | undefined> {
+export async function waitForInstalledPlayerPage(context, timeoutMs = 30_000, pollIntervalMs = 50) {
   const deadline = Date.now() + timeoutMs;
   while (true) {
     const playerPage = installedPlayerPage(context);
     if (playerPage !== undefined) return playerPage;
     const remainingMs = deadline - Date.now();
     if (remainingMs <= 0) return undefined;
-    await new Promise<void>((resolve) =>
+    await new Promise((resolve) =>
       globalThis.setTimeout(resolve, Math.min(pollIntervalMs, remainingMs)),
     );
   }

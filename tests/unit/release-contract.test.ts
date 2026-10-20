@@ -46,6 +46,32 @@ describe('v1.0.0 release contract', () => {
       'node scripts/release-manifest.mjs --check-source && node scripts/release-manifest.mjs --clean && npm run generate:sbom && npm run build:desktop && node scripts/release-manifest.mjs',
     );
     expect(packageJson.scripts['verify:production-exclusion']).toContain('npm run build:release');
+    expect(packageJson.scripts['verify:release-ci']).toBe('node scripts/verify-release-ci.mjs');
+  });
+
+  it('reuses exact green main CI while rebuilding and checking the tagged artifacts', () => {
+    const ciEvidence = releaseWorkflow.indexOf('- name: Require exact green main CI');
+    const releaseBuild = releaseWorkflow.indexOf('- name: Build exact release artifacts');
+    const productionExclusion = releaseWorkflow.indexOf(
+      '- name: Verify production excludes the test harness',
+    );
+    const draft = releaseWorkflow.indexOf('- name: Create or refresh private draft release');
+    const smoke = releaseWorkflow.indexOf('- name: Smoke downloaded installer');
+    const reconfirm = releaseWorkflow.indexOf(
+      '- name: Reconfirm exact green main CI before publish',
+    );
+    const publish = releaseWorkflow.indexOf('- name: Publish verified private release');
+
+    expect(releaseWorkflow).toContain('actions: read');
+    expect(releaseWorkflow).toContain('run: npm run verify:release-ci');
+    expect(ciEvidence).toBeGreaterThan(-1);
+    expect(releaseBuild).toBeGreaterThan(ciEvidence);
+    expect(productionExclusion).toBeGreaterThan(releaseBuild);
+    expect(draft).toBeGreaterThan(productionExclusion);
+    expect(reconfirm).toBeGreaterThan(smoke);
+    expect(publish).toBeGreaterThan(reconfirm);
+    expect(releaseWorkflow).not.toContain('- name: Run full release gate');
+    expect(releaseWorkflow).not.toContain('run: npm run ci\n');
   });
 
   it('stages a draft download, smokes it, and only then publishes the release', () => {
