@@ -104,4 +104,4 @@ Last updated: 2026-10-20
 
 ## Exact next action
 
-Commit this final evidence-handoff correction, obtain the same reviewer's confirmation, push the branch, and open its PR. Require exact-head and exact merge-head Web/Windows/aggregate `Required`; replace the still-unpublished tag only after corrected main is green, and require the optimized tag workflow to pass hosted installed smoke and publish. Record final release evidence afterward.
+Push the independently reviewed recovery branch and open its PR. Require exact-head and exact merge-head Web/Windows/aggregate `Required`; replace the still-unpublished tag only after corrected main is green, and require the optimized tag workflow to pass hosted installed smoke and publish. Record final release evidence afterward.
