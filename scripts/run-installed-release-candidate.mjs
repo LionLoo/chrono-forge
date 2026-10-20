@@ -17,9 +17,12 @@ import { pathToFileURL } from 'node:url';
 
 import { chromium } from '@playwright/test';
 
+import { isInstalledPlayerPageUrl, waitForInstalledPlayerPage } from './installed-player-page.mjs';
 import { loadReleaseManifest } from './release-manifest.mjs';
 
 const APPLICATION_IDENTIFIER = 'com.lionloo.chronoforge';
+const INSTALLED_STARTUP_TIMEOUT_MS = 60_000;
+const MAX_DIAGNOSTIC_TARGET_URLS = 8;
 const PROFILE_PATTERN = /^m11-rc-[a-z0-9-]{1,48}$/u;
 const EXPECTED_SLOT_IDS = Object.freeze([
   'installed-crisis-review',
@@ -284,8 +287,15 @@ async function readCdpTargetsBeforeDeadline(fetchImplementation, url, timeoutMs)
   });
 }
 
-export async function waitForCdp(endpoint, child, timeoutMs = 30_000, fetchImplementation = fetch) {
+export async function waitForCdp(
+  endpoint,
+  child,
+  timeoutMs = INSTALLED_STARTUP_TIMEOUT_MS,
+  fetchImplementation = fetch,
+) {
   const deadline = Date.now() + timeoutMs;
+  const observedPageUrls = new Set();
+  let lastProbeFailure;
   while (Date.now() < deadline) {
     if (child.exitCode !== null) {
       throw new Error(
@@ -301,26 +311,38 @@ export async function waitForCdp(endpoint, child, timeoutMs = 30_000, fetchImple
         remainingMs,
       );
       if (ok) {
-        if (
-          Array.isArray(targets) &&
-          targets.some(
-            (target) =>
-              target?.type === 'page' &&
-              (target.url === 'http://tauri.localhost/' ||
-                target.url === 'http://tauri.localhost/index.html'),
-          )
-        ) {
-          return;
+        if (Array.isArray(targets)) {
+          for (const target of targets) {
+            if (target?.type !== 'page' || typeof target.url !== 'string') continue;
+            if (observedPageUrls.size < MAX_DIAGNOSTIC_TARGET_URLS) {
+              observedPageUrls.add(target.url.replace(/[\r\n]/gu, '').slice(0, 240));
+            }
+            if (isInstalledPlayerPageUrl(target.url)) return;
+          }
         }
       }
-    } catch {
+    } catch (error) {
       // The endpoint is expected to refuse connections until WebView2 is ready.
+      lastProbeFailure =
+        error instanceof Error
+          ? error.message.replace(/[\r\n]/gu, ' ').slice(0, 240)
+          : String(error)
+              .replace(/[\r\n]/gu, ' ')
+              .slice(0, 240);
     }
     const remainingMs = deadline - Date.now();
     if (remainingMs <= 0) break;
     await delay(Math.min(100, remainingMs));
   }
-  throw new Error('Installed Chrono Forge did not expose its player page before the deadline.');
+  const diagnostic =
+    observedPageUrls.size > 0
+      ? ` Observed page targets: ${JSON.stringify([...observedPageUrls])}.`
+      : lastProbeFailure === undefined
+        ? ' No page targets were observed.'
+        : ` No page targets were observed; last diagnostics probe failed: ${lastProbeFailure}.`;
+  throw new Error(
+    `Installed Chrono Forge did not expose its player page before the deadline.${diagnostic}`,
+  );
 }
 
 async function launchInstalledApplication(executable, profile) {
@@ -400,18 +422,8 @@ async function stopProcessTree(child) {
 async function installedPlayerPage(browser) {
   const context = browser.contexts()[0];
   if (context === undefined) throw new Error('Installed candidate exposed no browser context.');
-  const deadline = Date.now() + 30_000;
-  while (Date.now() < deadline) {
-    const page = context
-      .pages()
-      .find(
-        (candidate) =>
-          candidate.url() === 'http://tauri.localhost/' ||
-          candidate.url() === 'http://tauri.localhost/index.html',
-      );
-    if (page !== undefined) return page;
-    await delay(50);
-  }
+  const page = await waitForInstalledPlayerPage(context, INSTALLED_STARTUP_TIMEOUT_MS);
+  if (page !== undefined) return page;
   throw new Error('Installed candidate exposed no player page.');
 }
 

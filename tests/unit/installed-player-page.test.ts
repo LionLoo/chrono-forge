@@ -3,15 +3,17 @@ import type { BrowserContext, Page } from '@playwright/test';
 import {
   isInstalledPlayerPageUrl,
   waitForInstalledPlayerPage,
-} from '../../scripts/installed-player-page';
+} from '../../scripts/installed-player-page.mjs';
 
 describe('installed player WebView selection', () => {
-  it.each(['http://tauri.localhost/', 'http://tauri.localhost/index.html'])(
-    'accepts the player page %s',
-    (url) => {
-      expect(isInstalledPlayerPageUrl(url)).toBe(true);
-    },
-  );
+  it.each([
+    'http://tauri.localhost/',
+    'http://tauri.localhost/index.html',
+    'https://tauri.localhost/',
+    'https://tauri.localhost/index.html',
+  ])('accepts the player page %s', (url) => {
+    expect(isInstalledPlayerPageUrl(url)).toBe(true);
+  });
 
   it.each([
     'http://tauri.localhost/index.html?persistence-broker=1',

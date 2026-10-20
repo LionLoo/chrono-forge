@@ -21,7 +21,7 @@ import {
   createRuntimeProfileWorld,
 } from '../tests/support/runtime-profile-fixture';
 import { serializeWorldSnapshot } from '../src/simulation/persistence';
-import { waitForInstalledPlayerPage } from './installed-player-page';
+import { waitForInstalledPlayerPage } from './installed-player-page.mjs';
 
 const PROFILE_VERSION = 1;
 const HEAP_LIMIT_BYTES = 512 * 1024 * 1024;

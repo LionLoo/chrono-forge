@@ -11,7 +11,7 @@ import {
   stepWorld,
   type WorldState,
 } from '../src/simulation/world';
-import { waitForInstalledPlayerPage } from './installed-player-page';
+import { waitForInstalledPlayerPage } from './installed-player-page.mjs';
 
 const endpoint = process.env.CHRONO_FORGE_CDP_URL ?? 'http://127.0.0.1:9333';
 const outputDirectory = resolve(
