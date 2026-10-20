@@ -38,6 +38,8 @@ export function selectSingleInstaller(paths: readonly string[]): string;
 
 export function checksumLine(hash: string, filename: string): string;
 
+export function releaseCandidateCdpPort(value: string | undefined): number | undefined;
+
 export function verifiedSaveGeneration(
   row: ReleaseCandidateSaveGenerationRow,
 ): ReleaseCandidateSaveGeneration;

@@ -23,6 +23,7 @@ import { loadReleaseManifest } from './release-manifest.mjs';
 const APPLICATION_IDENTIFIER = 'com.lionloo.chronoforge';
 const INSTALLED_STARTUP_TIMEOUT_MS = 60_000;
 const MAX_DIAGNOSTIC_TARGET_URLS = 8;
+const RELEASE_CANDIDATE_CDP_PORT_ENVIRONMENT_VARIABLE = 'CHRONO_FORGE_RC_CDP_PORT';
 const PROFILE_PATTERN = /^m11-rc-[a-z0-9-]{1,48}$/u;
 const EXPECTED_SLOT_IDS = Object.freeze([
   'installed-crisis-review',
@@ -83,6 +84,18 @@ export function checksumLine(hash, filename) {
   if (filename.length === 0 || /[\r\n]/u.test(filename))
     throw new Error('Installer filename is invalid.');
   return `${hash}  ${filename}\n`;
+}
+
+export function releaseCandidateCdpPort(value) {
+  if (value === undefined) return undefined;
+  if (!/^[1-9][0-9]{0,4}$/u.test(value)) {
+    throw new Error('Release-candidate CDP port must be a canonical integer from 1 through 65535.');
+  }
+  const port = Number(value);
+  if (port > 65_535) {
+    throw new Error('Release-candidate CDP port must be a canonical integer from 1 through 65535.');
+  }
+  return port;
 }
 
 function sha256Value(value) {
@@ -239,11 +252,11 @@ async function waitForFileAbsent(file, timeoutMs = 15_000) {
   }
 }
 
-async function availableLoopbackPort() {
+async function availableLoopbackPort(requestedPort = 0) {
   const server = net.createServer();
   await new Promise((resolve, reject) => {
     server.once('error', reject);
-    server.listen(0, '127.0.0.1', resolve);
+    server.listen(requestedPort, '127.0.0.1', resolve);
   });
   const address = server.address();
   const port = typeof address === 'object' && address !== null ? address.port : undefined;
@@ -346,7 +359,10 @@ export async function waitForCdp(
 }
 
 async function launchInstalledApplication(executable, profile) {
-  const port = await availableLoopbackPort();
+  const requestedPort = releaseCandidateCdpPort(
+    process.env[RELEASE_CANDIDATE_CDP_PORT_ENVIRONMENT_VARIABLE],
+  );
+  const port = await availableLoopbackPort(requestedPort);
   const endpoint = `http://127.0.0.1:${port}`;
   const child = spawn(executable, [], {
     cwd: path.dirname(executable),

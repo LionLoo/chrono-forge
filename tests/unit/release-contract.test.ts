@@ -56,7 +56,13 @@ describe('v1.0.0 release contract', () => {
       '- name: Verify production excludes the test harness',
     );
     const draft = releaseWorkflow.indexOf('- name: Create or refresh private draft release');
+    const diagnosticsPolicy = releaseWorkflow.indexOf(
+      '- name: Configure installed WebView2 diagnostics policy',
+    );
     const smoke = releaseWorkflow.indexOf('- name: Smoke downloaded installer');
+    const diagnosticsCleanup = releaseWorkflow.indexOf(
+      '- name: Remove installed WebView2 diagnostics policy',
+    );
     const reconfirm = releaseWorkflow.indexOf(
       '- name: Reconfirm exact green main CI before publish',
     );
@@ -68,7 +74,11 @@ describe('v1.0.0 release contract', () => {
     expect(releaseBuild).toBeGreaterThan(ciEvidence);
     expect(productionExclusion).toBeGreaterThan(releaseBuild);
     expect(draft).toBeGreaterThan(productionExclusion);
+    expect(diagnosticsPolicy).toBeGreaterThan(draft);
+    expect(smoke).toBeGreaterThan(diagnosticsPolicy);
+    expect(diagnosticsCleanup).toBeGreaterThan(smoke);
     expect(reconfirm).toBeGreaterThan(smoke);
+    expect(reconfirm).toBeGreaterThan(diagnosticsCleanup);
     expect(publish).toBeGreaterThan(reconfirm);
     expect(releaseWorkflow).not.toContain('- name: Run full release gate');
     expect(releaseWorkflow).not.toContain('run: npm run ci\n');
@@ -91,6 +101,13 @@ describe('v1.0.0 release contract', () => {
     expect(releaseWorkflow).toContain('--notes-file RELEASE_NOTES.md --draft');
     expect(releaseWorkflow).toContain('already published; refusing to mutate it on a rerun');
     expect(releaseWorkflow).toContain('CHRONO_FORGE_RC_ARTIFACT_ROOT: test-results/release-staged');
+    expect(releaseWorkflow).toContain("CHRONO_FORGE_RC_CDP_PORT: '9222'");
+    expect(releaseWorkflow).toContain(
+      "New-ItemProperty -Path $key -Name 'chrono-forge.exe' -PropertyType String -Value '--remote-debugging-port=9222' -Force",
+    );
+    expect(releaseWorkflow).toContain(
+      'WEBVIEW2_USER_DATA_FOLDER: ${{ runner.temp }}\\chrono-forge-release-webview2',
+    );
     expect(releaseWorkflow).toContain(
       'gh release edit $env:GITHUB_REF_NAME --draft=false --latest',
     );

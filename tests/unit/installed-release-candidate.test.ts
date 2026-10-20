@@ -10,6 +10,7 @@ import {
   awaitLaunchReadiness,
   checksumLine,
   ensureProcessTreeStopped,
+  releaseCandidateCdpPort,
   releaseCandidateArtifactDirectory,
   releaseCandidateOutputDirectory,
   selectSingleInstaller,
@@ -74,6 +75,15 @@ describe('installed release-candidate verifier', () => {
     );
     expect(() => checksumLine('ABC', 'candidate.exe')).toThrow('lowercase hex');
     expect(() => checksumLine(hash, 'bad\nname.exe')).toThrow('filename is invalid');
+  });
+
+  it('accepts only a canonical bounded hosted diagnostics port', () => {
+    expect(releaseCandidateCdpPort(undefined)).toBeUndefined();
+    expect(releaseCandidateCdpPort('9222')).toBe(9222);
+    expect(releaseCandidateCdpPort('65535')).toBe(65_535);
+    for (const invalid of ['', '0', '01', '65536', '-1', '9222 ', 'not-a-port']) {
+      expect(() => releaseCandidateCdpPort(invalid)).toThrow('canonical integer');
+    }
   });
 
   it('independently hashes every immutable snapshot generation', () => {

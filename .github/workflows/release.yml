@@ -118,11 +118,30 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw 'Draft release download failed.' }
       - name: Verify and stage downloaded assets
         run: npm run stage:downloaded-release -- test-results/release-download test-results/release-staged
+      # Hosted Windows has twice launched the installed WebView2 process without honoring its
+      # inherited debugging argument. Microsoft's documented per-executable policy is an
+      # independent, runner-scoped way to require the same bounded diagnostics port.
+      - name: Configure installed WebView2 diagnostics policy
+        shell: pwsh
+        run: |
+          $key = 'HKCU:\Software\Policies\Microsoft\Edge\WebView2\AdditionalBrowserArguments'
+          New-Item -Path $key -Force | Out-Null
+          New-ItemProperty -Path $key -Name 'chrono-forge.exe' -PropertyType String -Value '--remote-debugging-port=9222' -Force | Out-Null
       - name: Smoke downloaded installer
         env:
           CHRONO_FORGE_RC_ARTIFACT_ROOT: test-results/release-staged
+          CHRONO_FORGE_RC_CDP_PORT: '9222'
           CHRONO_FORGE_RC_OUTPUT: test-results/release-download-smoke
+          WEBVIEW2_USER_DATA_FOLDER: ${{ runner.temp }}\chrono-forge-release-webview2
         run: npm run verify:installed-release-candidate
+      - name: Remove installed WebView2 diagnostics policy
+        if: always()
+        shell: pwsh
+        run: |
+          $key = 'HKCU:\Software\Policies\Microsoft\Edge\WebView2\AdditionalBrowserArguments'
+          if (Test-Path -LiteralPath $key) {
+            Remove-ItemProperty -LiteralPath $key -Name 'chrono-forge.exe' -ErrorAction SilentlyContinue
+          }
       - name: Upload downloaded-release smoke evidence
         if: always()
         uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
