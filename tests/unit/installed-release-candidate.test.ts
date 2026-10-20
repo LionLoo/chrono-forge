@@ -69,8 +69,8 @@ describe('installed release-candidate verifier', () => {
 
   it('writes a conventional lowercase SHA-256 line', () => {
     const hash = 'a'.repeat(64);
-    expect(checksumLine(hash, 'Chrono Forge_1.0.0_x64-setup.exe')).toBe(
-      `${hash}  Chrono Forge_1.0.0_x64-setup.exe\n`,
+    expect(checksumLine(hash, 'chrono-forge-1.0.0-x64-setup.exe')).toBe(
+      `${hash}  chrono-forge-1.0.0-x64-setup.exe\n`,
     );
     expect(() => checksumLine('ABC', 'candidate.exe')).toThrow('lowercase hex');
     expect(() => checksumLine(hash, 'bad\nname.exe')).toThrow('filename is invalid');

@@ -9,7 +9,7 @@ import { stageDownloadedRelease } from '../../scripts/stage-downloaded-release.m
 
 const COMMIT = '1'.repeat(40);
 const VERSION = '1.0.0';
-const INSTALLER_NAME = 'Chrono Forge_1.0.0_x64-setup.exe';
+const INSTALLER_NAME = 'chrono-forge-1.0.0-x64-setup.exe';
 
 function sha256(value: string | Buffer) {
   return createHash('sha256').update(value).digest('hex');
