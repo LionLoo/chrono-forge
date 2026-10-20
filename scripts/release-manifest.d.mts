@@ -34,6 +34,11 @@ export function createReleaseManifest(options: {
 
 export function cleanReleaseArtifacts(workspace?: string): void;
 
+export function canonicalizeReleaseInstaller(options: {
+  readonly packageVersion: string;
+  readonly workspace?: string;
+}): string;
+
 export function loadReleaseManifest(options: {
   readonly expectedCommit: string;
   readonly expectedPackageVersion: string;

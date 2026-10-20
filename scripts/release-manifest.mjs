@@ -17,7 +17,10 @@ const FORMAT = 'chrono-forge-release-manifest';
 const FORMAT_VERSION = 1;
 const MANIFEST_PATH = 'release-artifacts/release-manifest.json';
 const SBOM_PATH = 'release-artifacts/chrono-forge.cdx.json';
-const INSTALLER_PATTERN = /^src-tauri\/target\/release\/bundle\/nsis\/[^/]+\.exe$/u;
+const INSTALLER_DIRECTORY = 'src-tauri/target/release/bundle/nsis';
+const PACKAGE_VERSION_PATTERN = /^[a-z0-9]+(?:[.-][a-z0-9]+)*$/u;
+const INSTALLER_PATTERN =
+  /^src-tauri\/target\/release\/bundle\/nsis\/chrono-forge-[a-z0-9]+(?:[.-][a-z0-9]+)*-x64-setup\.exe$/u;
 const COMMIT_PATTERN = /^[a-f0-9]{40}$/u;
 const HASH_PATTERN = /^[a-f0-9]{64}$/u;
 
@@ -30,6 +33,31 @@ function requireString(value, label) {
     throw new Error(`Release manifest ${label} must be a non-empty string.`);
   }
   return value;
+}
+
+function releaseInstallerPath(packageVersion) {
+  requireString(packageVersion, 'package version');
+  if (!PACKAGE_VERSION_PATTERN.test(packageVersion)) {
+    throw new Error(`Release package version is not filename-safe: ${packageVersion}`);
+  }
+  return `${INSTALLER_DIRECTORY}/chrono-forge-${packageVersion}-x64-setup.exe`;
+}
+
+function requireVersionedInstallerPath(installerPath, packageVersion) {
+  requireString(installerPath, 'installer path');
+  if (
+    installerPath.includes('\\') ||
+    path.posix.normalize(installerPath) !== installerPath ||
+    !INSTALLER_PATTERN.test(installerPath)
+  ) {
+    throw new Error(`Release manifest installer path is invalid: ${installerPath}`);
+  }
+  const expected = releaseInstallerPath(packageVersion);
+  if (installerPath !== expected) {
+    throw new Error(
+      `Release manifest installer path must match package version ${packageVersion}: expected ${expected}, found ${String(installerPath)}.`,
+    );
+  }
 }
 
 function canonicalWorkspace(workspace) {
@@ -103,7 +131,7 @@ export function createReleaseManifest({
   if (typeof commit !== 'string' || !COMMIT_PATTERN.test(commit)) {
     throw new Error('Release manifest source commit must be a lowercase 40-character Git hash.');
   }
-  requireString(packageVersion, 'package version');
+  requireVersionedInstallerPath(installerPath, packageVersion);
   const installer = artifactEvidence(workspace, installerPath, 'installer');
   const sbom = artifactEvidence(workspace, sbomPath, 'sbom');
   return Object.freeze({
@@ -164,6 +192,14 @@ export function loadReleaseManifest({
   ) {
     throw new Error('Release manifest artifacts record is invalid.');
   }
+  if (
+    manifest.artifacts.installer === null ||
+    typeof manifest.artifacts.installer !== 'object' ||
+    Array.isArray(manifest.artifacts.installer)
+  ) {
+    throw new Error('Release manifest installer record is invalid.');
+  }
+  requireVersionedInstallerPath(manifest.artifacts.installer.path, expectedPackageVersion);
   const installer = validateArtifactRecord(workspace, manifest.artifacts.installer, 'installer');
   const sbom = validateArtifactRecord(workspace, manifest.artifacts.sbom, 'sbom');
   return Object.freeze({
@@ -219,28 +255,34 @@ export function cleanReleaseArtifacts(workspace = process.cwd()) {
   }
 }
 
-function writeReleaseManifest() {
-  const workspace = canonicalWorkspace(process.cwd());
-  const commit = releaseSource();
-  const packageJson = JSON.parse(readFileSync(path.join(workspace, 'package.json'), 'utf8'));
-  const installerDirectory = path.join(
-    workspace,
-    'src-tauri',
-    'target',
-    'release',
-    'bundle',
-    'nsis',
-  );
+export function canonicalizeReleaseInstaller({ packageVersion, workspace = process.cwd() }) {
+  const canonicalPath = releaseInstallerPath(packageVersion);
+  const root = canonicalWorkspace(workspace);
+  const installerDirectory = path.join(root, ...INSTALLER_DIRECTORY.split('/'));
   const installerNames = readdirSync(installerDirectory)
     .filter((name) => name.toLowerCase().endsWith('.exe'))
     .sort();
   if (installerNames.length !== 1) {
     throw new Error(`Expected exactly one NSIS installer; found ${installerNames.length}.`);
   }
-  const installerPath = path
-    .relative(workspace, path.join(installerDirectory, installerNames[0]))
-    .split(path.sep)
-    .join('/');
+  const canonicalName = path.posix.basename(canonicalPath);
+  if (installerNames[0] !== canonicalName) {
+    renameSync(
+      path.join(installerDirectory, installerNames[0]),
+      path.join(installerDirectory, canonicalName),
+    );
+  }
+  return canonicalPath;
+}
+
+function writeReleaseManifest() {
+  const workspace = canonicalWorkspace(process.cwd());
+  const commit = releaseSource();
+  const packageJson = JSON.parse(readFileSync(path.join(workspace, 'package.json'), 'utf8'));
+  const installerPath = canonicalizeReleaseInstaller({
+    packageVersion: packageJson.version,
+    workspace,
+  });
   const manifest = createReleaseManifest({
     commit,
     installerPath,

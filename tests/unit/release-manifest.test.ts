@@ -5,6 +5,7 @@ import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
 import {
+  canonicalizeReleaseInstaller,
   cleanReleaseArtifacts,
   createReleaseManifest,
   loadReleaseManifest,
@@ -13,7 +14,11 @@ import {
 
 const COMMIT = 'a'.repeat(40);
 const PACKAGE_VERSION = '1.0.0';
-const INSTALLER_PATH = 'src-tauri/target/release/bundle/nsis/Chrono Forge_1.0.0_x64-setup.exe';
+const INSTALLER_PATH = 'src-tauri/target/release/bundle/nsis/chrono-forge-1.0.0-x64-setup.exe';
+const MISMATCHED_INSTALLER_PATH =
+  'src-tauri/target/release/bundle/nsis/chrono-forge-9.9.9-x64-setup.exe';
+const TAURI_INSTALLER_PATH =
+  'src-tauri/target/release/bundle/nsis/Chrono Forge_1.0.0_x64-setup.exe';
 const SBOM_PATH = 'release-artifacts/chrono-forge.cdx.json';
 const MANIFEST_PATH = 'release-artifacts/release-manifest.json';
 
@@ -80,6 +85,56 @@ describe('release artifact manifest', () => {
       existsSync(path.join(workspace, 'src-tauri', 'target', 'release', 'bundle', 'nsis')),
     ).toBe(false);
     expect(existsSync(sibling)).toBe(true);
+  });
+
+  it('renames the generated Tauri installer to one GitHub-safe canonical basename', () => {
+    rmSync(path.join(workspace, ...INSTALLER_PATH.split('/')));
+    writeArtifact(TAURI_INSTALLER_PATH, 'installer-v1');
+
+    expect(canonicalizeReleaseInstaller({ packageVersion: PACKAGE_VERSION, workspace })).toBe(
+      INSTALLER_PATH,
+    );
+    expect(existsSync(path.join(workspace, ...TAURI_INSTALLER_PATH.split('/')))).toBe(false);
+    expect(existsSync(path.join(workspace, ...INSTALLER_PATH.split('/')))).toBe(true);
+  });
+
+  it('rejects non-canonical installer paths and unsafe package versions', () => {
+    expect(() =>
+      createReleaseManifest({
+        commit: COMMIT,
+        installerPath: TAURI_INSTALLER_PATH,
+        packageVersion: PACKAGE_VERSION,
+        workspace,
+      }),
+    ).toThrow('installer path is invalid');
+    expect(() => canonicalizeReleaseInstaller({ packageVersion: '1.0.0 bad', workspace })).toThrow(
+      'not filename-safe',
+    );
+  });
+
+  it('rejects a canonical installer path for a different package version', () => {
+    writeArtifact(MISMATCHED_INSTALLER_PATH, 'installer-v9');
+
+    expect(() =>
+      createReleaseManifest({
+        commit: COMMIT,
+        installerPath: MISMATCHED_INSTALLER_PATH,
+        packageVersion: PACKAGE_VERSION,
+        workspace,
+      }),
+    ).toThrow('installer path must match package version 1.0.0');
+
+    const original = manifest();
+    const altered = {
+      ...original,
+      artifacts: {
+        ...original.artifacts,
+        installer: { ...original.artifacts.installer, path: MISMATCHED_INSTALLER_PATH },
+      },
+    };
+    writeManifest(altered);
+
+    expect(() => load()).toThrow('installer path must match package version 1.0.0');
   });
 
   it('rejects an artifact manifest from a stale source commit', () => {
