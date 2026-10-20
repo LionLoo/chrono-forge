@@ -174,10 +174,10 @@ Close other Chrono Forge instances and retry. Do not copy, replace, or edit the 
 
 ## Current release constraints
 
-- The current package version is a private `0.1.0` development build, not the final v1.0.0 release.
+- The source package is versioned `1.0.0`; only the manifest-verified installer attached to the trusted private `v1.0.0` GitHub release counts as the released build.
 - Only Windows 10/11 x64 is a supported native target for v1.
 - Current installers are unsigned and use manual trusted distribution; there is no embedded private-repository token or anonymous auto-updater.
-- Clean release-candidate verification, final packaging, tag, and the private GitHub v1.0.0 release are not complete.
+- Clean release-candidate verification is complete. The final tag, downloaded-artifact smoke, and private GitHub publication remain the M12 release gate until their exact hosted workflow passes.
 - macOS and Linux may be architecturally possible but are not supported or release-verified.
 
 For development and exact validation commands, see [README.md](README.md), [CONTRIBUTING.md](CONTRIBUTING.md), and [PLAN.md](PLAN.md). The current evidence and known blockers are in [PROGRESS.md](PROGRESS.md).

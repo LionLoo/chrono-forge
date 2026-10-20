@@ -1,18 +1,19 @@
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
 import {
+  cleanReleaseArtifacts,
   createReleaseManifest,
   loadReleaseManifest,
   type ReleaseManifestDocument,
 } from '../../scripts/release-manifest.mjs';
 
 const COMMIT = 'a'.repeat(40);
-const PACKAGE_VERSION = '0.1.0';
-const INSTALLER_PATH = 'src-tauri/target/release/bundle/nsis/Chrono Forge_0.1.0_x64-setup.exe';
+const PACKAGE_VERSION = '1.0.0';
+const INSTALLER_PATH = 'src-tauri/target/release/bundle/nsis/Chrono Forge_1.0.0_x64-setup.exe';
 const SBOM_PATH = 'release-artifacts/chrono-forge.cdx.json';
 const MANIFEST_PATH = 'release-artifacts/release-manifest.json';
 
@@ -65,6 +66,20 @@ describe('release artifact manifest', () => {
       packageVersion: PACKAGE_VERSION,
       sbom: { path: SBOM_PATH },
     });
+  });
+
+  it('removes prior generated release outputs without touching target siblings', () => {
+    const sibling = path.join(workspace, 'src-tauri', 'target', 'release', 'chrono-forge.exe');
+    mkdirSync(path.dirname(sibling), { recursive: true });
+    writeFileSync(sibling, 'compiled application', 'utf8');
+
+    cleanReleaseArtifacts(workspace);
+
+    expect(existsSync(path.join(workspace, 'release-artifacts'))).toBe(false);
+    expect(
+      existsSync(path.join(workspace, 'src-tauri', 'target', 'release', 'bundle', 'nsis')),
+    ).toBe(false);
+    expect(existsSync(sibling)).toBe(true);
   });
 
   it('rejects an artifact manifest from a stale source commit', () => {

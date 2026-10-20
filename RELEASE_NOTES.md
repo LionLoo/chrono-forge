@@ -26,7 +26,7 @@ Chrono Forge requires no account or online service. Saves, settings, and focus h
 
 ## Verification boundary
 
-The release candidate freezes snapshot, engine, and content version 14 plus Worker protocol version 11. Its clean-checkout gate covers formatting, zero-warning lint, type checking, covered tests, long deterministic simulations, Rust tests, browser E2E, installed native/SQLite recovery, SBOM generation, production test-code exclusion, and Windows x64 NSIS packaging. Final M11 evidence additionally covers silent install, installed product review, uninstall/reinstall continuity, accessibility, 120-minute browser and installed performance profiles, installer checksum, and independent final code/product review.
+The release candidate freezes snapshot, engine, and content version 14 plus Worker protocol version 11. Its clean-checkout gate covers formatting, zero-warning lint, type checking, covered tests, long deterministic simulations, Rust tests, browser E2E, installed native/SQLite recovery, SBOM generation, production test-code exclusion, and Windows x64 NSIS packaging. Final M11 evidence additionally covers silent install, installed product review, uninstall/reinstall continuity, accessibility, 120-minute browser and installed performance profiles, installer checksum, and independent final code/product review. The tag workflow first creates an unpublished draft, downloads the exact four release assets, verifies and stages their bytes against the source-bound manifest and checksum, completes the installed/uninstall/reinstall smoke from that download, and publishes only after those checks pass.
 
 ## Known non-blocking limitations
 

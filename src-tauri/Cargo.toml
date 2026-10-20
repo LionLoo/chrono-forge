@@ -1,6 +1,6 @@
 [package]
 name = "chrono-forge"
-version = "0.1.0"
+version = "1.0.0"
 description = "Chrono Forge desktop shell"
 authors = ["Chrono Forge contributors"]
 edition = "2024"
