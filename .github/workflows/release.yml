@@ -138,9 +138,17 @@ jobs:
         if: always()
         shell: pwsh
         run: |
+          $ErrorActionPreference = 'Stop'
           $key = 'HKCU:\Software\Policies\Microsoft\Edge\WebView2\AdditionalBrowserArguments'
           if (Test-Path -LiteralPath $key) {
-            Remove-ItemProperty -LiteralPath $key -Name 'chrono-forge.exe' -ErrorAction SilentlyContinue
+            $properties = Get-ItemProperty -LiteralPath $key
+            if ($properties.PSObject.Properties.Name -contains 'chrono-forge.exe') {
+              Remove-ItemProperty -LiteralPath $key -Name 'chrono-forge.exe' -ErrorAction Stop
+            }
+            $properties = Get-ItemProperty -LiteralPath $key
+            if ($properties.PSObject.Properties.Name -contains 'chrono-forge.exe') {
+              throw 'Installed WebView2 diagnostics policy cleanup did not remove chrono-forge.exe.'
+            }
           }
       - name: Upload downloaded-release smoke evidence
         if: always()

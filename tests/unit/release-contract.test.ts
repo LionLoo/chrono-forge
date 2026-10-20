@@ -109,6 +109,25 @@ describe('v1.0.0 release contract', () => {
     expect(releaseWorkflow).toContain(
       'WEBVIEW2_USER_DATA_FOLDER: ${{ runner.temp }}\\chrono-forge-release-webview2',
     );
+    const diagnosticsCleanup = releaseWorkflow.indexOf(
+      '- name: Remove installed WebView2 diagnostics policy',
+    );
+    const cleanupBlock = releaseWorkflow.slice(
+      diagnosticsCleanup,
+      releaseWorkflow.indexOf('- name: Upload downloaded-release smoke evidence'),
+    );
+    expect(cleanupBlock).toContain('if: always()');
+    expect(cleanupBlock).toContain("$ErrorActionPreference = 'Stop'");
+    expect(cleanupBlock).toContain(
+      "if ($properties.PSObject.Properties.Name -contains 'chrono-forge.exe')",
+    );
+    expect(cleanupBlock).toContain(
+      "Remove-ItemProperty -LiteralPath $key -Name 'chrono-forge.exe' -ErrorAction Stop",
+    );
+    expect(cleanupBlock).toContain(
+      "throw 'Installed WebView2 diagnostics policy cleanup did not remove chrono-forge.exe.'",
+    );
+    expect(cleanupBlock).not.toContain('SilentlyContinue');
     expect(releaseWorkflow).toContain(
       'gh release edit $env:GITHUB_REF_NAME --draft=false --latest',
     );
