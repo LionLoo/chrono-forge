@@ -12,6 +12,7 @@ import {
 
 const releaseNotes = readFileSync(path.resolve('RELEASE_NOTES.md'), 'utf8');
 const releaseWorkflow = readFileSync(path.resolve('.github/workflows/release.yml'), 'utf8');
+const installedCapture = readFileSync(path.resolve('scripts/capture-installed-review.mts'), 'utf8');
 const packageJson = JSON.parse(readFileSync(path.resolve('package.json'), 'utf8')) as {
   readonly scripts: Readonly<Record<string, string>>;
   readonly version: string;
@@ -111,6 +112,24 @@ describe('v1.0.0 release contract', () => {
     expect(releaseWorkflow).toContain(
       'gh release edit $env:GITHUB_REF_NAME --draft=false --latest',
     );
+  });
+
+  it('normalizes the fresh installed viewport before asserting exact camera controls', () => {
+    const playerReady = installedCapture.indexOf("page.locator('.simulation-status')");
+    const normalizedViewport = installedCapture.indexOf(
+      'await page.setViewportSize({ width: 1440, height: 900 });',
+      playerReady,
+    );
+    const normalizedOverview = installedCapture.indexOf(
+      "await page.getByRole('button', { name: 'Overview' }).click();",
+      normalizedViewport,
+    );
+    const exactCamera = installedCapture.indexOf("getByText('1.50×')", normalizedOverview);
+
+    expect(playerReady).toBeGreaterThan(-1);
+    expect(normalizedViewport).toBeGreaterThan(playerReady);
+    expect(normalizedOverview).toBeGreaterThan(normalizedViewport);
+    expect(exactCamera).toBeGreaterThan(normalizedOverview);
   });
 
   it('uses the final v1.0.0 package version', () => {

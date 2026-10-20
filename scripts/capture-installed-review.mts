@@ -276,6 +276,11 @@ try {
     await localSlot.selectOption(foundingValue);
     await page.getByText('Loaded Founding world.').waitFor({ state: 'visible', timeout: 30_000 });
   }
+  // A fresh WebView profile can inherit the host display's initial viewport. Normalize it before
+  // asserting exact camera values so the installed control contract is independent of runner DPI.
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await page.getByRole('button', { name: 'Overview' }).click();
+  await settleVisual(page);
   await page.getByLabel('Camera position').getByText('1.50×').waitFor({ state: 'visible' });
   await exerciseInstalledControls(page);
   await page.getByRole('button', { name: 'Overview' }).click();
