@@ -6,7 +6,7 @@ Last updated: 2026-10-21
 
 - M12 synchronizes the product, package, Rust crate, Tauri bundle, lockfiles, native identity assertion, release tests, documentation, and installer contract to `1.0.0` on branch `release/v1.0.0` from delivered M11 main `1067cbe16b7c00a5e5c5392547bcb4eaab9c043c`.
 - Candidate commit `ec38a1ee59e9ae0ee6fb4d3086f1326970724598` changes the tag workflow to create or refresh a draft, require exactly four release assets, redownload those assets, verify their checksum and manifest binding, install/use/uninstall/reinstall the downloaded candidate, and publish only after that smoke passes. A rerun refuses to mutate an already published release.
-- M12 acceptance is complete. Final PR #30, exact-head and merge-head CI, exact-main `v1.0.0` tagging, downloaded installed smoke, publish-last release automation, and private-repository verification all passed.
+- M12 acceptance is complete. Final PR #30, exact-head and merge-head CI, exact-main `v1.0.0` tagging, downloaded installed smoke, publish-last release automation, and public-repository verification all passed.
 
 ## Independent review and focused verification
 
@@ -75,7 +75,7 @@ Final tag workflow `39528843695` verified exact green main, rebuilt the exact ta
 
 The hosted installed smoke configured and read back both temporary per-executable HKLM policies, captured 11 installed-product observations, passed install/use/save/uninstall/reinstall continuity, wrote its report, removed and verified absence of both policy values, uploaded evidence artifact `12314602482` with SHA-256 `c394d44a19758daa318d34f14945c335063041a4d83460fda1c21c4550965050`, and reconfirmed exact green main before publication. Every workflow step succeeded.
 
-Release ID `418240643` published at `2026-10-21T01:50:47Z` and is neither draft nor prerelease. It contains exactly `chrono-forge-1.0.0-x64-setup.exe`, `chrono-forge-1.0.0-x64-setup.exe.sha256`, `chrono-forge.cdx.json`, and `release-manifest.json`; all four are uploaded and expose GitHub SHA-256 digests. The release URL is `https://github.com/LionLoo/chrono-forge/releases/tag/v1.0.0`. Live verification after publication reports repository visibility `PRIVATE`, so the private v1.0.0 contract is satisfied.
+Release ID `418240643` published at `2026-10-21T01:50:47Z` and is neither draft nor prerelease. It contains exactly `chrono-forge-1.0.0-x64-setup.exe`, `chrono-forge-1.0.0-x64-setup.exe.sha256`, `chrono-forge.cdx.json`, and `release-manifest.json`; all four are uploaded and expose GitHub SHA-256 digests. The release URL is `https://github.com/LionLoo/chrono-forge/releases/tag/v1.0.0`. Live verification reports repository visibility `PUBLIC` per the user's final decision, so the public v1.0.0 contract is satisfied.
 
 ## Exact next action
 
