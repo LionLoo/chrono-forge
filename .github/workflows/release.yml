@@ -118,11 +118,55 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw 'Draft release download failed.' }
       - name: Verify and stage downloaded assets
         run: npm run stage:downloaded-release -- test-results/release-download test-results/release-staged
+      # GitHub-hosted Windows runs the job at high integrity. Current WebView2 intentionally
+      # ignores inherited and HKCU overrides for elevated hosts, so use temporary per-executable
+      # HKLM policies for both the bounded diagnostics port and isolated data directory.
+      - name: Configure installed WebView2 diagnostics policy
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $argumentsKey = 'HKLM:\Software\Policies\Microsoft\Edge\WebView2\AdditionalBrowserArguments'
+          $dataFolderKey = 'HKLM:\Software\Policies\Microsoft\Edge\WebView2\UserDataFolder'
+          $expectedArguments = '--remote-debugging-port=9222'
+          $expectedDataFolder = Join-Path $env:RUNNER_TEMP 'chrono-forge-release-webview2'
+          New-Item -Path $argumentsKey -Force | Out-Null
+          New-Item -Path $dataFolderKey -Force | Out-Null
+          New-ItemProperty -Path $argumentsKey -Name 'chrono-forge.exe' -PropertyType String -Value $expectedArguments -Force | Out-Null
+          New-ItemProperty -Path $dataFolderKey -Name 'chrono-forge.exe' -PropertyType String -Value $expectedDataFolder -Force | Out-Null
+          if ((Get-ItemPropertyValue -LiteralPath $argumentsKey -Name 'chrono-forge.exe') -ne $expectedArguments) {
+            throw 'Installed WebView2 diagnostics argument policy was not configured exactly.'
+          }
+          if ((Get-ItemPropertyValue -LiteralPath $dataFolderKey -Name 'chrono-forge.exe') -ne $expectedDataFolder) {
+            throw 'Installed WebView2 data-folder policy was not configured exactly.'
+          }
       - name: Smoke downloaded installer
         env:
           CHRONO_FORGE_RC_ARTIFACT_ROOT: test-results/release-staged
+          CHRONO_FORGE_RC_CDP_PORT: '9222'
           CHRONO_FORGE_RC_OUTPUT: test-results/release-download-smoke
+          WEBVIEW2_USER_DATA_FOLDER: ${{ runner.temp }}\chrono-forge-release-webview2
         run: npm run verify:installed-release-candidate
+      - name: Remove installed WebView2 diagnostics policy
+        if: always()
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $keys = @(
+            'HKLM:\Software\Policies\Microsoft\Edge\WebView2\AdditionalBrowserArguments',
+            'HKLM:\Software\Policies\Microsoft\Edge\WebView2\UserDataFolder'
+          )
+          foreach ($key in $keys) {
+            if (Test-Path -LiteralPath $key) {
+              $properties = Get-ItemProperty -LiteralPath $key
+              if ($properties.PSObject.Properties.Name -contains 'chrono-forge.exe') {
+                Remove-ItemProperty -LiteralPath $key -Name 'chrono-forge.exe' -ErrorAction Stop
+              }
+              $properties = Get-ItemProperty -LiteralPath $key
+              if ($properties.PSObject.Properties.Name -contains 'chrono-forge.exe') {
+                throw "Installed WebView2 diagnostics policy cleanup left chrono-forge.exe under $key."
+              }
+            }
+          }
       - name: Upload downloaded-release smoke evidence
         if: always()
         uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6

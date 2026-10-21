@@ -12,6 +12,7 @@ import {
 
 const releaseNotes = readFileSync(path.resolve('RELEASE_NOTES.md'), 'utf8');
 const releaseWorkflow = readFileSync(path.resolve('.github/workflows/release.yml'), 'utf8');
+const installedCapture = readFileSync(path.resolve('scripts/capture-installed-review.mts'), 'utf8');
 const packageJson = JSON.parse(readFileSync(path.resolve('package.json'), 'utf8')) as {
   readonly scripts: Readonly<Record<string, string>>;
   readonly version: string;
@@ -56,7 +57,13 @@ describe('v1.0.0 release contract', () => {
       '- name: Verify production excludes the test harness',
     );
     const draft = releaseWorkflow.indexOf('- name: Create or refresh private draft release');
+    const diagnosticsPolicy = releaseWorkflow.indexOf(
+      '- name: Configure installed WebView2 diagnostics policy',
+    );
     const smoke = releaseWorkflow.indexOf('- name: Smoke downloaded installer');
+    const diagnosticsCleanup = releaseWorkflow.indexOf(
+      '- name: Remove installed WebView2 diagnostics policy',
+    );
     const reconfirm = releaseWorkflow.indexOf(
       '- name: Reconfirm exact green main CI before publish',
     );
@@ -68,7 +75,11 @@ describe('v1.0.0 release contract', () => {
     expect(releaseBuild).toBeGreaterThan(ciEvidence);
     expect(productionExclusion).toBeGreaterThan(releaseBuild);
     expect(draft).toBeGreaterThan(productionExclusion);
+    expect(diagnosticsPolicy).toBeGreaterThan(draft);
+    expect(smoke).toBeGreaterThan(diagnosticsPolicy);
+    expect(diagnosticsCleanup).toBeGreaterThan(smoke);
     expect(reconfirm).toBeGreaterThan(smoke);
+    expect(reconfirm).toBeGreaterThan(diagnosticsCleanup);
     expect(publish).toBeGreaterThan(reconfirm);
     expect(releaseWorkflow).not.toContain('- name: Run full release gate');
     expect(releaseWorkflow).not.toContain('run: npm run ci\n');
@@ -91,9 +102,77 @@ describe('v1.0.0 release contract', () => {
     expect(releaseWorkflow).toContain('--notes-file RELEASE_NOTES.md --draft');
     expect(releaseWorkflow).toContain('already published; refusing to mutate it on a rerun');
     expect(releaseWorkflow).toContain('CHRONO_FORGE_RC_ARTIFACT_ROOT: test-results/release-staged');
+    expect(releaseWorkflow).toContain("CHRONO_FORGE_RC_CDP_PORT: '9222'");
+    expect(releaseWorkflow).toContain(
+      "New-ItemProperty -Path $argumentsKey -Name 'chrono-forge.exe' -PropertyType String -Value $expectedArguments -Force",
+    );
+    expect(releaseWorkflow).toContain(
+      "New-ItemProperty -Path $dataFolderKey -Name 'chrono-forge.exe' -PropertyType String -Value $expectedDataFolder -Force",
+    );
+    expect(releaseWorkflow).toContain(
+      'WEBVIEW2_USER_DATA_FOLDER: ${{ runner.temp }}\\chrono-forge-release-webview2',
+    );
+    const diagnosticsPolicy = releaseWorkflow.indexOf(
+      '- name: Configure installed WebView2 diagnostics policy',
+    );
+    const policyBlock = releaseWorkflow.slice(
+      diagnosticsPolicy,
+      releaseWorkflow.indexOf('- name: Smoke downloaded installer'),
+    );
+    expect(policyBlock).toContain("$ErrorActionPreference = 'Stop'");
+    expect(policyBlock).toContain(
+      "if ((Get-ItemPropertyValue -LiteralPath $argumentsKey -Name 'chrono-forge.exe') -ne $expectedArguments)",
+    );
+    expect(policyBlock).toContain(
+      "if ((Get-ItemPropertyValue -LiteralPath $dataFolderKey -Name 'chrono-forge.exe') -ne $expectedDataFolder)",
+    );
+    const diagnosticsCleanup = releaseWorkflow.indexOf(
+      '- name: Remove installed WebView2 diagnostics policy',
+    );
+    const cleanupBlock = releaseWorkflow.slice(
+      diagnosticsCleanup,
+      releaseWorkflow.indexOf('- name: Upload downloaded-release smoke evidence'),
+    );
+    expect(cleanupBlock).toContain('if: always()');
+    expect(cleanupBlock).toContain("$ErrorActionPreference = 'Stop'");
+    expect(cleanupBlock).toContain(
+      "'HKLM:\\Software\\Policies\\Microsoft\\Edge\\WebView2\\AdditionalBrowserArguments'",
+    );
+    expect(cleanupBlock).toContain(
+      "'HKLM:\\Software\\Policies\\Microsoft\\Edge\\WebView2\\UserDataFolder'",
+    );
+    expect(cleanupBlock).toContain(
+      "if ($properties.PSObject.Properties.Name -contains 'chrono-forge.exe')",
+    );
+    expect(cleanupBlock).toContain(
+      "Remove-ItemProperty -LiteralPath $key -Name 'chrono-forge.exe' -ErrorAction Stop",
+    );
+    expect(cleanupBlock).toContain(
+      'throw "Installed WebView2 diagnostics policy cleanup left chrono-forge.exe under $key."',
+    );
+    expect(cleanupBlock).not.toContain('SilentlyContinue');
+    expect(releaseWorkflow).not.toContain('HKCU:\\Software\\Policies\\Microsoft\\Edge\\WebView2');
     expect(releaseWorkflow).toContain(
       'gh release edit $env:GITHUB_REF_NAME --draft=false --latest',
     );
+  });
+
+  it('normalizes the fresh installed viewport before asserting exact camera controls', () => {
+    const playerReady = installedCapture.indexOf("page.locator('.simulation-status')");
+    const normalizedViewport = installedCapture.indexOf(
+      'await page.setViewportSize({ width: 1440, height: 900 });',
+      playerReady,
+    );
+    const normalizedOverview = installedCapture.indexOf(
+      "await page.getByRole('button', { name: 'Overview' }).click();",
+      normalizedViewport,
+    );
+    const exactCamera = installedCapture.indexOf("getByText('1.50×')", normalizedOverview);
+
+    expect(playerReady).toBeGreaterThan(-1);
+    expect(normalizedViewport).toBeGreaterThan(playerReady);
+    expect(normalizedOverview).toBeGreaterThan(normalizedViewport);
+    expect(exactCamera).toBeGreaterThan(normalizedOverview);
   });
 
   it('uses the final v1.0.0 package version', () => {
