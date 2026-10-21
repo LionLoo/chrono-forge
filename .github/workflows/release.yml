@@ -118,15 +118,27 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw 'Draft release download failed.' }
       - name: Verify and stage downloaded assets
         run: npm run stage:downloaded-release -- test-results/release-download test-results/release-staged
-      # Hosted Windows has twice launched the installed WebView2 process without honoring its
-      # inherited debugging argument. Microsoft's documented per-executable policy is an
-      # independent, runner-scoped way to require the same bounded diagnostics port.
+      # GitHub-hosted Windows runs the job at high integrity. Current WebView2 intentionally
+      # ignores inherited and HKCU overrides for elevated hosts, so use temporary per-executable
+      # HKLM policies for both the bounded diagnostics port and isolated data directory.
       - name: Configure installed WebView2 diagnostics policy
         shell: pwsh
         run: |
-          $key = 'HKCU:\Software\Policies\Microsoft\Edge\WebView2\AdditionalBrowserArguments'
-          New-Item -Path $key -Force | Out-Null
-          New-ItemProperty -Path $key -Name 'chrono-forge.exe' -PropertyType String -Value '--remote-debugging-port=9222' -Force | Out-Null
+          $ErrorActionPreference = 'Stop'
+          $argumentsKey = 'HKLM:\Software\Policies\Microsoft\Edge\WebView2\AdditionalBrowserArguments'
+          $dataFolderKey = 'HKLM:\Software\Policies\Microsoft\Edge\WebView2\UserDataFolder'
+          $expectedArguments = '--remote-debugging-port=9222'
+          $expectedDataFolder = Join-Path $env:RUNNER_TEMP 'chrono-forge-release-webview2'
+          New-Item -Path $argumentsKey -Force | Out-Null
+          New-Item -Path $dataFolderKey -Force | Out-Null
+          New-ItemProperty -Path $argumentsKey -Name 'chrono-forge.exe' -PropertyType String -Value $expectedArguments -Force | Out-Null
+          New-ItemProperty -Path $dataFolderKey -Name 'chrono-forge.exe' -PropertyType String -Value $expectedDataFolder -Force | Out-Null
+          if ((Get-ItemPropertyValue -LiteralPath $argumentsKey -Name 'chrono-forge.exe') -ne $expectedArguments) {
+            throw 'Installed WebView2 diagnostics argument policy was not configured exactly.'
+          }
+          if ((Get-ItemPropertyValue -LiteralPath $dataFolderKey -Name 'chrono-forge.exe') -ne $expectedDataFolder) {
+            throw 'Installed WebView2 data-folder policy was not configured exactly.'
+          }
       - name: Smoke downloaded installer
         env:
           CHRONO_FORGE_RC_ARTIFACT_ROOT: test-results/release-staged
@@ -139,15 +151,20 @@ jobs:
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
-          $key = 'HKCU:\Software\Policies\Microsoft\Edge\WebView2\AdditionalBrowserArguments'
-          if (Test-Path -LiteralPath $key) {
-            $properties = Get-ItemProperty -LiteralPath $key
-            if ($properties.PSObject.Properties.Name -contains 'chrono-forge.exe') {
-              Remove-ItemProperty -LiteralPath $key -Name 'chrono-forge.exe' -ErrorAction Stop
-            }
-            $properties = Get-ItemProperty -LiteralPath $key
-            if ($properties.PSObject.Properties.Name -contains 'chrono-forge.exe') {
-              throw 'Installed WebView2 diagnostics policy cleanup did not remove chrono-forge.exe.'
+          $keys = @(
+            'HKLM:\Software\Policies\Microsoft\Edge\WebView2\AdditionalBrowserArguments',
+            'HKLM:\Software\Policies\Microsoft\Edge\WebView2\UserDataFolder'
+          )
+          foreach ($key in $keys) {
+            if (Test-Path -LiteralPath $key) {
+              $properties = Get-ItemProperty -LiteralPath $key
+              if ($properties.PSObject.Properties.Name -contains 'chrono-forge.exe') {
+                Remove-ItemProperty -LiteralPath $key -Name 'chrono-forge.exe' -ErrorAction Stop
+              }
+              $properties = Get-ItemProperty -LiteralPath $key
+              if ($properties.PSObject.Properties.Name -contains 'chrono-forge.exe') {
+                throw "Installed WebView2 diagnostics policy cleanup left chrono-forge.exe under $key."
+              }
             }
           }
       - name: Upload downloaded-release smoke evidence

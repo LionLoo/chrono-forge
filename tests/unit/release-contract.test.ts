@@ -104,10 +104,27 @@ describe('v1.0.0 release contract', () => {
     expect(releaseWorkflow).toContain('CHRONO_FORGE_RC_ARTIFACT_ROOT: test-results/release-staged');
     expect(releaseWorkflow).toContain("CHRONO_FORGE_RC_CDP_PORT: '9222'");
     expect(releaseWorkflow).toContain(
-      "New-ItemProperty -Path $key -Name 'chrono-forge.exe' -PropertyType String -Value '--remote-debugging-port=9222' -Force",
+      "New-ItemProperty -Path $argumentsKey -Name 'chrono-forge.exe' -PropertyType String -Value $expectedArguments -Force",
+    );
+    expect(releaseWorkflow).toContain(
+      "New-ItemProperty -Path $dataFolderKey -Name 'chrono-forge.exe' -PropertyType String -Value $expectedDataFolder -Force",
     );
     expect(releaseWorkflow).toContain(
       'WEBVIEW2_USER_DATA_FOLDER: ${{ runner.temp }}\\chrono-forge-release-webview2',
+    );
+    const diagnosticsPolicy = releaseWorkflow.indexOf(
+      '- name: Configure installed WebView2 diagnostics policy',
+    );
+    const policyBlock = releaseWorkflow.slice(
+      diagnosticsPolicy,
+      releaseWorkflow.indexOf('- name: Smoke downloaded installer'),
+    );
+    expect(policyBlock).toContain("$ErrorActionPreference = 'Stop'");
+    expect(policyBlock).toContain(
+      "if ((Get-ItemPropertyValue -LiteralPath $argumentsKey -Name 'chrono-forge.exe') -ne $expectedArguments)",
+    );
+    expect(policyBlock).toContain(
+      "if ((Get-ItemPropertyValue -LiteralPath $dataFolderKey -Name 'chrono-forge.exe') -ne $expectedDataFolder)",
     );
     const diagnosticsCleanup = releaseWorkflow.indexOf(
       '- name: Remove installed WebView2 diagnostics policy',
@@ -119,15 +136,22 @@ describe('v1.0.0 release contract', () => {
     expect(cleanupBlock).toContain('if: always()');
     expect(cleanupBlock).toContain("$ErrorActionPreference = 'Stop'");
     expect(cleanupBlock).toContain(
+      "'HKLM:\\Software\\Policies\\Microsoft\\Edge\\WebView2\\AdditionalBrowserArguments'",
+    );
+    expect(cleanupBlock).toContain(
+      "'HKLM:\\Software\\Policies\\Microsoft\\Edge\\WebView2\\UserDataFolder'",
+    );
+    expect(cleanupBlock).toContain(
       "if ($properties.PSObject.Properties.Name -contains 'chrono-forge.exe')",
     );
     expect(cleanupBlock).toContain(
       "Remove-ItemProperty -LiteralPath $key -Name 'chrono-forge.exe' -ErrorAction Stop",
     );
     expect(cleanupBlock).toContain(
-      "throw 'Installed WebView2 diagnostics policy cleanup did not remove chrono-forge.exe.'",
+      'throw "Installed WebView2 diagnostics policy cleanup left chrono-forge.exe under $key."',
     );
     expect(cleanupBlock).not.toContain('SilentlyContinue');
+    expect(releaseWorkflow).not.toContain('HKCU:\\Software\\Policies\\Microsoft\\Edge\\WebView2');
     expect(releaseWorkflow).toContain(
       'gh release edit $env:GITHUB_REF_NAME --draft=false --latest',
     );
