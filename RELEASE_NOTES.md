@@ -1,6 +1,6 @@
 # Chrono Forge v1.0.0 release notes
 
-Chrono Forge is a private, local-first Windows focus timer and autonomous civilization simulator. A real focus session advances one deterministic persistent world while its people gather, build, form families and societies, respond to crises, develop contextually, establish multiple settlements and civilizations, and eventually enter a factual system view with missions, colonies, exchange, and alien contact.
+Chrono Forge is a local-first Windows focus timer and autonomous civilization simulator. A real focus session advances one deterministic persistent world while its people gather, build, form families and societies, respond to crises, develop contextually, establish multiple settlements and civilizations, and eventually enter a factual system view with missions, colonies, exchange, and alien contact.
 
 ## Highlights
 
@@ -20,7 +20,7 @@ Chrono Forge is a private, local-first Windows focus timer and autonomous civili
 
 ## Install and trust
 
-This private v1.0.0 build is unsigned because no Windows signing credential is established. Obtain the installer, its `.sha256` file, the CycloneDX SBOM, and the release manifest from the same trusted private GitHub release. The manifest binds the exact source commit to the immutable installer and SBOM hashes. Verify the manifest and SHA-256 checksum before running the installer. Windows may show **Unknown publisher** or Microsoft Defender SmartScreen; proceed only when the filename and checksum match the trusted release.
+This v1.0.0 build is unsigned because no Windows signing credential is established. Obtain the installer, its `.sha256` file, the CycloneDX SBOM, and the release manifest from the same trusted public GitHub release. The manifest binds the exact source commit to the immutable installer and SBOM hashes. Verify the manifest and SHA-256 checksum before running the installer. Windows may show **Unknown publisher** or Microsoft Defender SmartScreen; proceed only when the filename and checksum match the trusted release.
 
 Chrono Forge requires no account or online service. Saves, settings, and focus history remain in local application data. Uninstalling the application intentionally leaves that local archive in place so reinstalling can recover it; export important worlds before manually deleting local data.
 
@@ -30,13 +30,13 @@ The release candidate freezes snapshot, engine, and content version 14 plus Work
 
 ## Known non-blocking limitations
 
-- Windows code signing is not available for this private release, so publisher warnings are expected.
+- Windows code signing is not available for this release, so publisher warnings are expected.
 - The System view is a factual read-only projection of saved celestial bodies, routes, missions, craft, colonies, communications, and discovered aliens. V1 does not simulate a separate tile terrain map for every body and does not call the procedural homeworld Earth unless saved authority says so.
 - Focus history is retained locally without an automatic total-row expiry, and SQLite files may retain previously allocated disk pages after logical generation pruning.
 - Dense production web bundles can emit a build-time chunk-size warning; measured browser and installed runtime budgets remain release-blocking and are recorded separately.
 - There is no anonymous telemetry, cloud sync, multiplayer, mandatory login, or automatic updater.
 
-## Private release contents
+## Release contents
 
 - Usable Windows x64 NSIS installer.
 - Installer SHA-256 checksum file.

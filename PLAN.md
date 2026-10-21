@@ -8,7 +8,7 @@ Branch: `bootstrap/repository-harness`
 
 Deliver the pinned React/Vite/Pixi/Tauri toolchain, deterministic module boundaries, local-first persistence decision, project instructions and agents, required documentation, CI/release workflow skeletons, a production-buildable desktop shell, and smoke tests.
 
-Acceptance: clean install; formatting, lint, type checking, unit tests, Rust tests, web E2E smoke, web build, and Windows desktop build pass; app launches; private origin exists; bootstrap PR is independently reviewed, green, and merged.
+Acceptance: clean install; formatting, lint, type checking, unit tests, Rust tests, web E2E smoke, web build, and Windows desktop build pass; app launches; origin exists; bootstrap PR is independently reviewed, green, and merged.
 
 ## M1 — Deterministic world and simulation kernel
 
@@ -258,6 +258,6 @@ Acceptance: evidence for every final-verification step is recorded; an independe
 
 Branch: `release/v1.0.0`
 
-Synchronize versions, merge the green release candidate, tag the exact main commit `v1.0.0`, build from that tag, create the private GitHub release with notes/checksum/SBOM/usable Windows x64 installer, smoke the downloaded artifact, and publish only after manifest verification.
+Synchronize versions, merge the green release candidate, tag the exact main commit `v1.0.0`, build from that tag, create the public GitHub release with notes/checksum/SBOM/usable Windows x64 installer, smoke the downloaded artifact, and publish only after manifest verification.
 
-Acceptance: private repository history is complete; tag and release exist; repository/release links, installation steps, supported platform, CI/test evidence, architectural decisions, non-blocking limitations, and demonstrated civilization progression are ready for the final report.
+Acceptance: public repository history is complete; tag and release exist; repository/release links, installation steps, supported platform, CI/test evidence, architectural decisions, non-blocking limitations, and demonstrated civilization progression are ready for the final report.
