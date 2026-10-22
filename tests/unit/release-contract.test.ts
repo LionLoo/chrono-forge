@@ -18,7 +18,7 @@ const packageJson = JSON.parse(readFileSync(path.resolve('package.json'), 'utf8'
   readonly version: string;
 };
 
-describe('v1.0.0 release contract', () => {
+describe('v1 release contract', () => {
   it('freezes authoritative save and Worker protocol versions for the release candidate', () => {
     expect({
       content: WORLD_CONTENT_VERSION,
@@ -28,7 +28,7 @@ describe('v1.0.0 release contract', () => {
     }).toStrictEqual({ content: 14, engine: 14, protocol: 11, snapshot: 14 });
   });
 
-  it('documents the private Windows release boundary and recovery expectations', () => {
+  it('documents the public Windows release boundary and recovery expectations', () => {
     expect(releaseNotes).toContain('Windows 10 or Windows 11, x64');
     expect(releaseNotes).toContain('unsigned');
     expect(releaseNotes).toContain('SHA-256 checksum');
@@ -56,7 +56,7 @@ describe('v1.0.0 release contract', () => {
     const productionExclusion = releaseWorkflow.indexOf(
       '- name: Verify production excludes the test harness',
     );
-    const draft = releaseWorkflow.indexOf('- name: Create or refresh private draft release');
+    const draft = releaseWorkflow.indexOf('- name: Create or refresh draft release');
     const diagnosticsPolicy = releaseWorkflow.indexOf(
       '- name: Configure installed WebView2 diagnostics policy',
     );
@@ -67,7 +67,7 @@ describe('v1.0.0 release contract', () => {
     const reconfirm = releaseWorkflow.indexOf(
       '- name: Reconfirm exact green main CI before publish',
     );
-    const publish = releaseWorkflow.indexOf('- name: Publish verified private release');
+    const publish = releaseWorkflow.indexOf('- name: Publish verified release');
 
     expect(releaseWorkflow).toContain('actions: read');
     expect(releaseWorkflow).toContain('run: npm run verify:release-ci');
@@ -87,11 +87,11 @@ describe('v1.0.0 release contract', () => {
 
   it('stages a draft download, smokes it, and only then publishes the release', () => {
     const orderedSteps = [
-      'Create or refresh private draft release',
+      'Create or refresh draft release',
       'Download exact draft assets',
       'Verify and stage downloaded assets',
       'Smoke downloaded installer',
-      'Publish verified private release',
+      'Publish verified release',
     ];
     let previous = -1;
     for (const step of orderedSteps) {
@@ -175,7 +175,7 @@ describe('v1.0.0 release contract', () => {
     expect(exactCamera).toBeGreaterThan(normalizedOverview);
   });
 
-  it('uses the final v1.0.0 package version', () => {
-    expect(packageJson.version).toBe('1.0.0');
+  it('uses the v1.0.1 patch package version', () => {
+    expect(packageJson.version).toBe('1.0.1');
   });
 });

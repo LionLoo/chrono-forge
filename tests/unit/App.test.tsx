@@ -662,24 +662,29 @@ describe('deterministic world lab', () => {
       await user.click(screen.getByRole('button', { name: 'Complete focus' }));
       expectedTick += expectedIssuedTicks;
 
-      await waitFor(async () => {
-        const completedSave = await persistence.gateway.loadSaveSlot('primary');
-        const session = completedSave?.focusSession;
-        expect(session).toMatchObject({
-          status: 'completed',
-          focusedMs: minutes * 60_000,
-          issuedSimulationTicks: expectedIssuedTicks,
-          review: {
-            before: { tick: expectedTick - expectedIssuedTicks },
-            after: { tick: expectedTick },
-          },
-        });
-        const world = deserializeWorldSnapshot(completedSave!.snapshot);
-        const expectedReview = projectFocusCheckpoint(world, session!.review!.baselineEventId);
-        expect(session!.review!.after).toEqual(expectedReview.moment);
-        expect(session!.recapEntries).toEqual(expectedReview.recapEntries);
-        expect(session!.review!.revisitTarget).toEqual(expectedReview.revisitTarget);
-      });
+      await waitFor(
+        async () => {
+          const completedSave = await persistence.gateway.loadSaveSlot('primary');
+          const session = completedSave?.focusSession;
+          expect(session).toMatchObject({
+            status: 'completed',
+            focusedMs: minutes * 60_000,
+            issuedSimulationTicks: expectedIssuedTicks,
+            review: {
+              before: { tick: expectedTick - expectedIssuedTicks },
+              after: { tick: expectedTick },
+            },
+          });
+          const world = deserializeWorldSnapshot(completedSave!.snapshot);
+          const expectedReview = projectFocusCheckpoint(world, session!.review!.baselineEventId);
+          expect(session!.review!.after).toEqual(expectedReview.moment);
+          expect(session!.recapEntries).toEqual(expectedReview.recapEntries);
+          expect(session!.review!.revisitTarget).toEqual(expectedReview.revisitTarget);
+        },
+        // Bounded catch-up intentionally waits for each Worker response before issuing the next
+        // request. Keep this integration assertion long enough for several deterministic chunks.
+        { timeout: 15_000 },
+      );
 
       if (index < 2) {
         await user.click(screen.getByRole('button', { name: 'New session' }));

@@ -1,6 +1,13 @@
-# Chrono Forge v1.0.0 release notes
+# Chrono Forge v1.0.1 release notes
 
 Chrono Forge is a local-first Windows focus timer and autonomous civilization simulator. A real focus session advances one deterministic persistent world while its people gather, build, form families and societies, respond to crises, develop contextually, establish multiple settlements and civilizations, and eventually enter a factual system view with missions, colonies, exchange, and alien contact.
+
+## v1.0.1 patch
+
+- High-rate or long-restored focus sessions now split accumulated simulation work into bounded Worker requests instead of faulting when one catch-up delta exceeds the protocol ceiling.
+- Pause, completion, and cancellation retain their exact original action time while bounded catch-up drains, so no later wall-clock interval is credited accidentally.
+- The focus panel now distinguishes the immutable rate used by the active session from a changed setting that will apply to the next session.
+- Oversized direct advance requests are rejected before they can cross and terminate the simulation Worker.
 
 ## Highlights
 
@@ -15,12 +22,12 @@ Chrono Forge is a local-first Windows focus timer and autonomous civilization si
 
 - Windows 10 or Windows 11, x64.
 - Microsoft WebView2 Runtime is required.
-- The v1.0.0 installer is a current-user NSIS package.
-- macOS and Linux are not supported release targets for v1.0.0.
+- The v1.0.1 installer is a current-user NSIS package.
+- macOS and Linux are not supported release targets for v1.0.1.
 
 ## Install and trust
 
-This v1.0.0 build is unsigned because no Windows signing credential is established. Obtain the installer, its `.sha256` file, the CycloneDX SBOM, and the release manifest from the same trusted public GitHub release. The manifest binds the exact source commit to the immutable installer and SBOM hashes. Verify the manifest and SHA-256 checksum before running the installer. Windows may show **Unknown publisher** or Microsoft Defender SmartScreen; proceed only when the filename and checksum match the trusted release.
+This v1.0.1 build is unsigned because no Windows signing credential is established. Obtain the installer, its `.sha256` file, the CycloneDX SBOM, and the release manifest from the same trusted public GitHub release. The manifest binds the exact source commit to the immutable installer and SBOM hashes. Verify the manifest and SHA-256 checksum before running the installer. Windows may show **Unknown publisher** or Microsoft Defender SmartScreen; proceed only when the filename and checksum match the trusted release.
 
 Chrono Forge requires no account or online service. Saves, settings, and focus history remain in local application data. Uninstalling the application intentionally leaves that local archive in place so reinstalling can recover it; export important worlds before manually deleting local data.
 

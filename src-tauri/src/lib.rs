@@ -229,7 +229,7 @@ mod tests {
             app_info(),
             AppInfo {
                 name: "Chrono Forge",
-                version: "1.0.0",
+                version: "1.0.1",
                 local_first: true,
             }
         );

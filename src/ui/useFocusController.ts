@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 
 import type { FocusSession, FocusSessionStatus } from '../adapters/persistence';
+import { MAX_ADVANCE_TICKS_PER_REQUEST } from '../protocol';
 import type { SimulationAdvancePriority } from './useWorldSimulation';
 import {
   cancelFocus,
@@ -23,6 +24,10 @@ export interface FocusClock {
 export const systemFocusClock: FocusClock = {
   now: () => Date.now(),
 };
+
+/** Keeps focus catch-up at the largest already-supported one-second high-rate batch. */
+export const MAX_FOCUS_ADVANCE_TICKS_PER_REQUEST = Math.min(10_000, MAX_ADVANCE_TICKS_PER_REQUEST);
+const FOCUS_CATCH_UP_RETRY_INTERVAL_MS = 100;
 
 export interface UseFocusControllerOptions {
   readonly clock: FocusClock;
@@ -126,6 +131,44 @@ function remaining(duration: number | null, elapsed: number): number {
   return duration === null ? 0 : Math.max(0, duration - elapsed);
 }
 
+type FocusTransition = (current: FocusState, epochMs: number) => FocusState;
+
+type TimedTransitionKind = 'checkpoint' | 'pause' | 'complete' | 'cancel';
+
+interface PendingTimedTransition {
+  readonly epochMs: number;
+  readonly kind: TimedTransitionKind;
+  readonly operation: FocusTransition;
+}
+
+/**
+ * Finds the latest millisecond checkpoint whose newly issued ticks fit one Worker request.
+ * Binary search avoids rounding assumptions around the persisted fractional-tick remainder.
+ */
+function boundedFocusCheckpoint(state: FocusState, epochMs: number): FocusState {
+  if (state.phase !== 'focus-running' || state.lastObservedEpochMs === null) {
+    throw new RangeError('Only a running focus interval can require bounded tick catch-up.');
+  }
+  let earliest = state.lastObservedEpochMs;
+  let latest = Math.max(earliest, epochMs);
+  while (earliest < latest) {
+    const candidateEpochMs = earliest + Math.ceil((latest - earliest) / 2);
+    const candidate = checkpointFocus(state, candidateEpochMs);
+    const issuedDelta = candidate.totalIssuedSimulationTicks - state.totalIssuedSimulationTicks;
+    if (issuedDelta <= MAX_FOCUS_ADVANCE_TICKS_PER_REQUEST) {
+      earliest = candidateEpochMs;
+    } else {
+      latest = candidateEpochMs - 1;
+    }
+  }
+  const bounded = checkpointFocus(state, earliest);
+  const issuedDelta = bounded.totalIssuedSimulationTicks - state.totalIssuedSimulationTicks;
+  if (issuedDelta <= 0 || issuedDelta > MAX_FOCUS_ADVANCE_TICKS_PER_REQUEST) {
+    throw new RangeError('Focus tick catch-up cannot fit the Worker request boundary.');
+  }
+  return bounded;
+}
+
 /**
  * React scheduling shell around the pure, injected-clock focus state machine.
  * The state ref is authoritative between render commits so callbacks never rely
@@ -138,8 +181,10 @@ export function useFocusController(options: UseFocusControllerOptions): FocusCon
   const [sessionId, setSessionId] = useState<string | null>(
     options.initialSession?.sessionId ?? null,
   );
+  const [timedTransitionPending, setTimedTransitionPending] = useState(false);
   const stateRef = useRef(state);
   const sessionIdRef = useRef<string | null>(options.initialSession?.sessionId ?? null);
+  const pendingTimedTransitionRef = useRef<PendingTimedTransition | null>(null);
 
   const publish = useCallback(
     (next: FocusState, recapEventIds: readonly number[] = []): void => {
@@ -151,24 +196,31 @@ export function useFocusController(options: UseFocusControllerOptions): FocusCon
   );
 
   const transition = useCallback(
-    (operation: (current: FocusState, epochMs: number) => FocusState): void => {
-      if (suspended) return;
+    (operation: FocusTransition, epochMs: number): boolean => {
+      if (suspended) return false;
       const previous = stateRef.current;
-      const next = operation(previous, clock.now());
-      if (next === previous) return;
+      const desired = operation(previous, epochMs);
+      if (desired === previous) return true;
 
-      const issuedDelta = next.totalIssuedSimulationTicks - previous.totalIssuedSimulationTicks;
+      const desiredIssuedDelta =
+        desired.totalIssuedSimulationTicks - previous.totalIssuedSimulationTicks;
       const priority: SimulationAdvancePriority =
-        next.phase === previous.phase ? 'ordinary' : 'terminal';
-      if (issuedDelta > 0 && onSimulationTicks(issuedDelta, priority) === false) return;
+        desired.phase === previous.phase ? 'ordinary' : 'terminal';
+      const next =
+        desiredIssuedDelta > MAX_FOCUS_ADVANCE_TICKS_PER_REQUEST
+          ? boundedFocusCheckpoint(previous, epochMs)
+          : desired;
+      const issuedDelta = next.totalIssuedSimulationTicks - previous.totalIssuedSimulationTicks;
+      if (issuedDelta > 0 && onSimulationTicks(issuedDelta, priority) === false) return false;
       // The Worker owns world authority. Do not commit accepted focus time locally until the
       // corresponding tick command has crossed that boundary successfully; a synchronous
       // dispatch failure must leave the same elapsed interval available for an exact retry.
       stateRef.current = next;
       setState(next);
       publish(next);
+      return next === desired;
     },
-    [clock, onSimulationTicks, publish, suspended],
+    [onSimulationTicks, publish, suspended],
   );
 
   const start = useCallback(
@@ -184,34 +236,71 @@ export function useFocusController(options: UseFocusControllerOptions): FocusCon
       if (sessionId.length === 0) throw new Error('A focus session ID must not be empty.');
       sessionIdRef.current = sessionId;
       setSessionId(sessionId);
-      transition((current, epochMs) => startFocus(current, configuration, epochMs));
+      transition((current, epochMs) => startFocus(current, configuration, epochMs), clock.now());
     },
-    [createSessionId, transition],
+    [clock, createSessionId, transition],
+  );
+
+  const requestTimedTransition = useCallback(
+    (kind: TimedTransitionKind, operation: FocusTransition): void => {
+      if (suspended) return;
+      const existing = pendingTimedTransitionRef.current;
+      if (existing !== null) {
+        // The first explicit user action owns its exact click boundary. Later Pause, Complete,
+        // or Cancel clicks may help drain another bounded chunk, but must never replace that
+        // intent or credit time from a later click. A user action may supersede an automatic
+        // checkpoint because no terminal intent has been recorded yet.
+        if (existing.kind !== 'checkpoint' || kind === 'checkpoint') {
+          if (transition(existing.operation, existing.epochMs)) {
+            pendingTimedTransitionRef.current = null;
+            setTimedTransitionPending(false);
+          }
+          return;
+        }
+      }
+      const pending = { epochMs: clock.now(), kind, operation };
+      pendingTimedTransitionRef.current = pending;
+      if (transition(operation, pending.epochMs)) {
+        pendingTimedTransitionRef.current = null;
+        setTimedTransitionPending(false);
+      } else {
+        setTimedTransitionPending(true);
+      }
+    },
+    [clock, suspended, transition],
   );
 
   const checkpoint = useCallback((): void => {
-    transition(checkpointFocus);
-  }, [transition]);
+    const pending = pendingTimedTransitionRef.current;
+    if (pending === null) {
+      requestTimedTransition('checkpoint', checkpointFocus);
+      return;
+    }
+    if (transition(pending.operation, pending.epochMs)) {
+      pendingTimedTransitionRef.current = null;
+      setTimedTransitionPending(false);
+    }
+  }, [requestTimedTransition, transition]);
 
   const pause = useCallback((): void => {
-    transition(pauseFocus);
-  }, [transition]);
+    requestTimedTransition('pause', pauseFocus);
+  }, [requestTimedTransition]);
 
   const resume = useCallback((): void => {
-    transition(resumeFocus);
-  }, [transition]);
+    transition(resumeFocus, clock.now());
+  }, [clock, transition]);
 
   const complete = useCallback((): void => {
-    transition(completeFocus);
-  }, [transition]);
+    requestTimedTransition('complete', completeFocus);
+  }, [requestTimedTransition]);
 
   const cancel = useCallback((): void => {
-    transition(cancelFocus);
-  }, [transition]);
+    requestTimedTransition('cancel', cancelFocus);
+  }, [requestTimedTransition]);
 
   const skipBreak = useCallback((): void => {
-    transition(skipFocusBreak);
-  }, [transition]);
+    transition(skipFocusBreak, clock.now());
+  }, [clock, transition]);
 
   const reset = useCallback((): void => {
     if (!isTerminal(stateRef.current)) {
@@ -219,6 +308,8 @@ export function useFocusController(options: UseFocusControllerOptions): FocusCon
     }
     stateRef.current = createIdleFocusState();
     sessionIdRef.current = null;
+    pendingTimedTransitionRef.current = null;
+    setTimedTransitionPending(false);
     setState(stateRef.current);
     setSessionId(null);
   }, []);
@@ -230,11 +321,14 @@ export function useFocusController(options: UseFocusControllerOptions): FocusCon
 
   const running =
     !suspended && (state.phase === 'focus-running' || state.phase === 'break-running');
+  const activeCheckpointIntervalMs = timedTransitionPending
+    ? Math.min(checkpointIntervalMs, FOCUS_CATCH_UP_RETRY_INTERVAL_MS)
+    : checkpointIntervalMs;
   useEffect(() => {
     if (!running) return undefined;
-    const interval = window.setInterval(checkpoint, checkpointIntervalMs);
+    const interval = window.setInterval(checkpoint, activeCheckpointIntervalMs);
     return () => window.clearInterval(interval);
-  }, [checkpoint, checkpointIntervalMs, running]);
+  }, [activeCheckpointIntervalMs, checkpoint, running]);
 
   useEffect(() => {
     if (suspended) return undefined;

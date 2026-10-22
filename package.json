@@ -1,6 +1,6 @@
 {
   "name": "chrono-forge",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "private": true,
   "type": "module",
   "description": "A local-first focus timer where an autonomous civilization builds itself.",
