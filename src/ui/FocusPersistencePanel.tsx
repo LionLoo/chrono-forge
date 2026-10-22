@@ -1634,8 +1634,14 @@ function FocusWorkspace({
               : formatDuration(timerValue)}
           </output>
           <p className="timer-ratio">
-            {settings.focusToSimRatio} simulation ticks per accepted focus second · interruptions
-            are non-punitive
+            {focus.state.simulationTicksPerFocusSecond ?? settings.focusToSimRatio} simulation ticks
+            per accepted focus second
+            {focus.state.simulationTicksPerFocusSecond === null ? '' : ' for this session'}
+            {focus.state.simulationTicksPerFocusSecond !== null &&
+            focus.state.simulationTicksPerFocusSecond !== settings.focusToSimRatio
+              ? ` · next session setting: ${settings.focusToSimRatio}`
+              : ''}{' '}
+            · interruptions are non-punitive
           </p>
 
           {simulation.status === 'faulted' ? (

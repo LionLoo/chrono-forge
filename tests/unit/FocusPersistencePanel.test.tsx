@@ -277,6 +277,49 @@ describe('FocusPersistencePanel offline progression', () => {
     expect(performOfflineCatchUp).not.toHaveBeenCalled();
   });
 
+  it('shows the immutable active-session rate separately from the next-session setting', async () => {
+    const nowMs = 1_000;
+    const gateway = createInMemoryPersistenceGateway(() => nowMs);
+    const runningState = startFocus(
+      createIdleFocusState(),
+      {
+        focusDurationMs: 30_000_000,
+        breakDurationMs: 0,
+        simulationTicksPerFocusSecond: 10_000,
+      },
+      nowMs,
+    );
+    await gateway.commitFocusCheckpoint(
+      'primary',
+      'Founding world',
+      snapshot,
+      focusSessionFromState('high-rate-session', 'primary', runningState),
+      [],
+    );
+    await gateway.saveSettings({
+      ...DEFAULT_APP_SETTINGS,
+      activeSlotId: 'primary',
+      focusToSimRatio: 10,
+      offlineProgressionEnabled: false,
+    });
+    const { simulation } = createSimulation();
+
+    render(
+      <FocusPersistencePanel
+        alerts={{ notifyCompletion: () => Promise.resolve() }}
+        clock={{ now: () => nowMs }}
+        runtime={{ gateway, mode: 'browser-preview' }}
+        simulation={simulation}
+      />,
+    );
+
+    expect(
+      await screen.findByText(
+        /10000 simulation ticks per accepted focus second for this session.*next session setting: 10/i,
+      ),
+    ).toBeVisible();
+  });
+
   it('captures events created after a restored running-session checkpoint', async () => {
     const user = userEvent.setup();
     const gateway = createInMemoryPersistenceGateway(() => 1_000);

@@ -2,6 +2,7 @@ import { act, renderHook, waitFor } from '@testing-library/react';
 
 import type { FocusSession } from '../../src/adapters/persistence';
 import {
+  MAX_ADVANCE_TICKS_PER_REQUEST,
   WORKER_PROTOCOL_VERSION,
   type UiToWorkerMessage,
   type WorkerToUiMessage,
@@ -490,6 +491,30 @@ describe('world simulation UI gateway', () => {
     ).toBe(false);
     expect(result.current.status).toBe('ready');
     expect(result.current.frame?.tick).toBe(0);
+  });
+
+  it('rejects an oversized advance before it can fault the Worker', async () => {
+    const activity = createTestRuntimeActivityRecorder(() => 0);
+    const worker = createControlledRuntimeWorker();
+    const { result } = renderHook(() => useWorldSimulation(() => worker.port, activity));
+
+    await act(async () => {
+      worker.flush();
+      await Promise.resolve();
+    });
+    expect(result.current.status).toBe('ready');
+
+    expect(() => act(() => result.current.advanceTicks(MAX_ADVANCE_TICKS_PER_REQUEST + 1))).toThrow(
+      `Advance ticks must not exceed ${MAX_ADVANCE_TICKS_PER_REQUEST}`,
+    );
+    expect(result.current.status).toBe('ready');
+    expect(
+      activity
+        .samples()
+        .some(
+          (sample) => sample.kind === 'worker-request' && sample.messageType === 'advanceTicks',
+        ),
+    ).toBe(false);
   });
 
   it('keeps pause responsive while the preceding focus advance is awaiting its frame', async () => {

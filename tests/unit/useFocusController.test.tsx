@@ -4,6 +4,7 @@ import { act, renderHook } from '@testing-library/react';
 import type { FocusSession } from '../../src/adapters/persistence';
 import { checkpointFocus, createIdleFocusState, startFocus } from '../../src/focus';
 import {
+  MAX_FOCUS_ADVANCE_TICKS_PER_REQUEST,
   focusSessionFromState,
   useFocusController,
   type FocusClock,
@@ -274,6 +275,213 @@ describe('focus controller', () => {
       totalIssuedSimulationTicks: 10,
     });
     expect(ticks).toEqual([10, 10]);
+  });
+
+  it('partitions a restored high-rate focus backlog into bounded Worker requests', () => {
+    const controlled = createClock();
+    const ticks: number[] = [];
+    const { result } = renderHook(() =>
+      useFocusController({
+        clock: controlled.clock,
+        slotId: 'slot-a',
+        createSessionId: () => 'bounded-backlog-session',
+        onSimulationTicks: (count) => {
+          ticks.push(count);
+        },
+      }),
+    );
+    act(() =>
+      result.current.start({
+        focusDurationMs: 30_000_000,
+        simulationTicksPerFocusSecond: 10_000,
+      }),
+    );
+    controlled.set(101_000);
+
+    act(() => result.current.checkpoint());
+    expect(result.current.state).toMatchObject({
+      accumulatedFocusMs: 1_000,
+      phase: 'focus-running',
+      totalIssuedSimulationTicks: MAX_FOCUS_ADVANCE_TICKS_PER_REQUEST,
+    });
+    expect(ticks).toEqual([MAX_FOCUS_ADVANCE_TICKS_PER_REQUEST]);
+
+    act(() => {
+      for (let index = 1; index < 101; index += 1) result.current.checkpoint();
+    });
+    expect(result.current.state).toMatchObject({
+      accumulatedFocusMs: 101_000,
+      phase: 'focus-running',
+      totalIssuedSimulationTicks: 101 * MAX_FOCUS_ADVANCE_TICKS_PER_REQUEST,
+    });
+    expect(ticks).toHaveLength(101);
+    expect(new Set(ticks)).toEqual(new Set([MAX_FOCUS_ADVANCE_TICKS_PER_REQUEST]));
+  });
+
+  it('drains an oversized completion request in bounded chunks at its original click time', () => {
+    const controlled = createClock();
+    const requests: { readonly priority: string; readonly ticks: number }[] = [];
+    const { result } = renderHook(() =>
+      useFocusController({
+        clock: controlled.clock,
+        slotId: 'slot-a',
+        createSessionId: () => 'bounded-completion-session',
+        onSimulationTicks: (ticks, priority) => {
+          requests.push({ priority, ticks });
+        },
+      }),
+    );
+    act(() =>
+      result.current.start({
+        focusDurationMs: 30_000_000,
+        simulationTicksPerFocusSecond: 10_000,
+      }),
+    );
+    controlled.set(101_000);
+
+    act(() => result.current.complete());
+    expect(result.current.state).toMatchObject({
+      accumulatedFocusMs: 1_000,
+      phase: 'focus-running',
+      totalIssuedSimulationTicks: MAX_FOCUS_ADVANCE_TICKS_PER_REQUEST,
+    });
+
+    // Catch-up may take several Worker responses. The manual completion boundary must remain
+    // fixed at the original click rather than accepting the later wall-clock interval.
+    controlled.set(500_000);
+    act(() => {
+      for (let index = 1; index < 101; index += 1) result.current.checkpoint();
+    });
+    expect(result.current.state).toMatchObject({
+      accumulatedFocusMs: 101_000,
+      endedAtEpochMs: 101_000,
+      phase: 'focus-completed',
+      totalIssuedSimulationTicks: 101 * MAX_FOCUS_ADVANCE_TICKS_PER_REQUEST,
+    });
+    expect(requests).toHaveLength(101);
+    expect(new Set(requests.map((request) => request.ticks))).toEqual(
+      new Set([MAX_FOCUS_ADVANCE_TICKS_PER_REQUEST]),
+    );
+    expect(new Set(requests.map((request) => request.priority))).toEqual(new Set(['terminal']));
+  });
+
+  it.each([
+    { action: 'pause', expectedPhase: 'focus-paused' },
+    { action: 'cancel', expectedPhase: 'focus-cancelled' },
+  ] as const)(
+    'drains an oversized $action request at its original click time',
+    ({ action, expectedPhase }) => {
+      const controlled = createClock();
+      const requests: { readonly priority: string; readonly ticks: number }[] = [];
+      const { result } = renderHook(() =>
+        useFocusController({
+          clock: controlled.clock,
+          slotId: 'slot-a',
+          createSessionId: () => `bounded-${action}-session`,
+          onSimulationTicks: (ticks, priority) => {
+            requests.push({ priority, ticks });
+          },
+        }),
+      );
+      act(() =>
+        result.current.start({
+          focusDurationMs: 30_000_000,
+          simulationTicksPerFocusSecond: 10_000,
+        }),
+      );
+      controlled.set(101_000);
+
+      act(() => result.current[action]());
+      controlled.set(500_000);
+      act(() => {
+        for (let index = 1; index < 101; index += 1) result.current.checkpoint();
+      });
+
+      expect(result.current.state).toMatchObject({
+        accumulatedFocusMs: 101_000,
+        endedAtEpochMs: action === 'cancel' ? 101_000 : null,
+        lastObservedEpochMs: 101_000,
+        phase: expectedPhase,
+        totalIssuedSimulationTicks: 101 * MAX_FOCUS_ADVANCE_TICKS_PER_REQUEST,
+      });
+      expect(requests).toHaveLength(101);
+      expect(new Set(requests.map((request) => request.priority))).toEqual(new Set(['terminal']));
+    },
+  );
+
+  it('preserves the first terminal click while bounded catch-up is pending', () => {
+    const controlled = createClock();
+    const ticks: number[] = [];
+    const { result } = renderHook(() =>
+      useFocusController({
+        clock: controlled.clock,
+        slotId: 'slot-a',
+        createSessionId: () => 'first-terminal-intent-session',
+        onSimulationTicks: (count) => {
+          ticks.push(count);
+        },
+      }),
+    );
+    act(() =>
+      result.current.start({
+        focusDurationMs: 30_000_000,
+        simulationTicksPerFocusSecond: 10_000,
+      }),
+    );
+    controlled.set(101_000);
+    act(() => result.current.complete());
+
+    controlled.set(102_000);
+    act(() => result.current.cancel());
+    act(() => {
+      for (let index = 2; index < 101; index += 1) result.current.checkpoint();
+    });
+
+    expect(result.current.state).toMatchObject({
+      accumulatedFocusMs: 101_000,
+      endedAtEpochMs: 101_000,
+      lastObservedEpochMs: 101_000,
+      phase: 'focus-completed',
+      totalIssuedSimulationTicks: 101 * MAX_FOCUS_ADVANCE_TICKS_PER_REQUEST,
+    });
+    expect(ticks).toHaveLength(101);
+  });
+
+  it('lets the first user action supersede a pending automatic checkpoint', () => {
+    const controlled = createClock();
+    const ticks: number[] = [];
+    const { result } = renderHook(() =>
+      useFocusController({
+        clock: controlled.clock,
+        slotId: 'slot-a',
+        createSessionId: () => 'checkpoint-upgrade-session',
+        onSimulationTicks: (count) => {
+          ticks.push(count);
+        },
+      }),
+    );
+    act(() =>
+      result.current.start({
+        focusDurationMs: 30_000_000,
+        simulationTicksPerFocusSecond: 10_000,
+      }),
+    );
+    controlled.set(101_000);
+    act(() => result.current.checkpoint());
+
+    controlled.set(102_000);
+    act(() => result.current.pause());
+    act(() => {
+      for (let index = 2; index < 102; index += 1) result.current.checkpoint();
+    });
+
+    expect(result.current.state).toMatchObject({
+      accumulatedFocusMs: 102_000,
+      lastObservedEpochMs: 102_000,
+      phase: 'focus-paused',
+      totalIssuedSimulationTicks: 102 * MAX_FOCUS_ADVANCE_TICKS_PER_REQUEST,
+    });
+    expect(ticks).toHaveLength(102);
   });
 
   it('freezes automatic and manual elapsed-time transitions while simulation is suspended', () => {

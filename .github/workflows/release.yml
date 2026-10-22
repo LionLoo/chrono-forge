@@ -61,7 +61,7 @@ jobs:
           if ($installer.Count -ne 1) { throw "Expected exactly one NSIS installer, found $($installer.Count)." }
           $hash = Get-FileHash -LiteralPath $installer.FullName -Algorithm SHA256
           "$($hash.Hash.ToLowerInvariant())  $($installer.Name)" | Set-Content -LiteralPath "$($installer.FullName).sha256" -Encoding utf8NoBOM
-      - name: Create or refresh private draft release
+      - name: Create or refresh draft release
         shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
@@ -171,7 +171,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
         with:
-          name: v1.0.0-downloaded-release-smoke
+          name: ${{ github.ref_name }}-downloaded-release-smoke
           path: test-results/release-download-smoke
           if-no-files-found: ignore
           retention-days: 30
@@ -179,7 +179,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: npm run verify:release-ci
-      - name: Publish verified private release
+      - name: Publish verified release
         shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}

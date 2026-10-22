@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 
 import {
+  MAX_ADVANCE_TICKS_PER_REQUEST,
   WORKER_PROTOCOL_VERSION,
   type UiToWorkerMessage,
   type QueuedCommand,
@@ -562,6 +563,11 @@ export function useWorldSimulation(
   const advanceTicks = useCallback(
     (ticks: number, priority: SimulationAdvancePriority = 'ordinary'): boolean => {
       assertNonNegativeSafeInteger(ticks, 'Advance ticks');
+      if (ticks > MAX_ADVANCE_TICKS_PER_REQUEST) {
+        throw new RangeError(
+          `Advance ticks must not exceed ${MAX_ADVANCE_TICKS_PER_REQUEST} per Worker request.`,
+        );
+      }
       const worker = workerRef.current;
       if (worker === null) return false;
       // Routine deltas remain one-at-a-time. One explicit terminal transition may cross behind an
